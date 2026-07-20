@@ -2,7 +2,7 @@
 
 Product + engineering specification for implementation kickoff. Decisions locked on [Wayfinder: Phlegethon hand-off spec](https://github.com/soubarnak/phlegethon/issues/1) are recorded here once; research notes and UI prototypes are assets, not peer sources of truth.
 
-**Status:** authored from locked decisions — awaiting human map sign-off on the wayfinder map (“hand-off accepted; implementation may start”).
+**Status:** **hand-off accepted** (map [#1](https://github.com/soubarnak/phlegethon/issues/1) signed off 2026-07-20) — implementation may start. Remaining fog stays under [§ Deferred / open](#11-deferred--open).
 
 ---
 
@@ -332,7 +332,7 @@ Map Destination bar — a reviewer walks this list against this file; human map 
 | 5 | Non-goals match the agreed set | Yes |
 | 6 | Remaining fog resolved in-spec or listed under Deferred / open | Yes (§11) |
 | 7 | Assets linked (`docs/research/`, `prototypes/`) | Yes (§12) |
-| 8 | Human sign-off on the map: “hand-off accepted; implementation may start” | Pending |
+| 8 | Human sign-off on the map: “hand-off accepted; implementation may start” | **Yes** (2026-07-20) |
 
 ### Decision index (Decisions so far → where reflected)
 
