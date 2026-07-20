@@ -19,7 +19,7 @@ pub use extractor::{
     ExtractorToolchain, FakeExtractorToolchain, ItemSelection, MediaItem, ProbeResult,
     ProbeSelection, Quality,
 };
-pub use http::HttpBackend;
+pub use http::{HttpBackend, ProdHttpBackend};
 pub use job::EnqueueOutcome;
 pub use mirror_set::MirrorSet;
 
