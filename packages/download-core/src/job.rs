@@ -34,6 +34,9 @@ pub struct Job {
     state: JobState,
     /// The directory where this job's files land.
     destination: PathBuf,
+    /// Number of bytes successfully written to disk so far.
+    /// Used for resumable transfers via Range headers.
+    bytes_received: u64,
 }
 
 impl Job {
@@ -45,6 +48,7 @@ impl Job {
             url,
             state: JobState::Pending,
             destination,
+            bytes_received: 0,
         }
     }
 
@@ -60,12 +64,26 @@ impl Job {
         &self.destination
     }
 
+    #[allow(dead_code)]
     pub fn state(&self) -> JobState {
         self.state
     }
 
     pub fn is_pending(&self) -> bool {
         self.state == JobState::Pending
+    }
+
+    #[allow(dead_code)]
+    pub fn has_partial_data(&self) -> bool {
+        self.bytes_received > 0
+    }
+
+    pub fn bytes_received(&self) -> u64 {
+        self.bytes_received
+    }
+
+    pub fn add_bytes_received(&mut self, n: u64) {
+        self.bytes_received += n;
     }
 
     pub fn mark_completed(&mut self) {
@@ -106,6 +124,7 @@ impl Job {
         match self.state {
             JobState::Failed => {
                 self.state = JobState::Pending;
+                self.bytes_received = 0;
                 Ok(())
             }
             _ => Err(format!(

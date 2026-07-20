@@ -185,6 +185,12 @@ impl Core {
     /// the work synchronously.  Paused and failed jobs are skipped.
     /// HTTP failures cause the job to transition to `Failed` state and emit
     /// `CoreEvent::JobFailed`; processing continues with the next job.
+    ///
+    /// When a job has partial data already written (`bytes_received > 0`),
+    /// the HTTP backend is called with a `Range` header to resume from the
+    /// last successful byte.  New data is appended to the existing file.
+    /// If `bytes_received < total` after the fetch, the job stays pending
+    /// so the next `process_pending` call can continue where it left off.
     pub fn process_pending(&mut self) -> Result<(), String> {
         // Collect indices of jobs that need work (pending only)
         let indices: Vec<usize> = self
@@ -196,22 +202,34 @@ impl Core {
             .collect();
 
         for i in indices {
-            let (job_id, url, dest) = {
+            let (job_id, url, dest, bytes_received) = {
                 let job = &self.jobs[i];
-                (job.id().to_string(), job.url().to_string(), job.destination().to_path_buf())
+                (
+                    job.id().to_string(),
+                    job.url().to_string(),
+                    job.destination().to_path_buf(),
+                    job.bytes_received(),
+                )
             };
 
-            // Emit progress
+            // Build optional Range header if we have partial data
+            let range = if bytes_received > 0 {
+                Some(bytes_received..u64::MAX)
+            } else {
+                None
+            };
+
+            // Emit progress (with cumulative bytes so far)
             self.event_tx
                 .send(CoreEvent::JobProgress {
                     job_id: job_id.clone(),
-                    bytes_downloaded: 0,
+                    bytes_downloaded: bytes_received,
                     total_bytes: None,
                 })
                 .map_err(|_| "event channel closed".to_string())?;
 
-            // Fetch from HTTP backend
-            let (data, total) = match self.http.fetch(&url, None) {
+            // Fetch from HTTP backend (with Range if resuming)
+            let (data, total) = match self.http.fetch(&url, range) {
                 Ok(result) => result,
                 Err(err) => {
                     // Mark job as failed and emit event
@@ -237,14 +255,29 @@ impl Core {
                 .ok()
                 .and_then(|u| {
                     u.path_segments()
-                        .and_then(|s| s.last())
+                        .and_then(|mut s| s.next_back())
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| "download".to_string());
 
             let file_path = dest.join(&filename);
-            if let Err(e) = std::fs::write(&file_path, &data) {
+
+            // Append to existing file (or create if first write)
+            let write_result = if bytes_received > 0 {
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&file_path)
+                    .and_then(|mut f| f.write_all(&data))
+                    .map_err(|e| format!("append {file_path:?}: {e}"))
+            } else {
+                std::fs::write(&file_path, &data)
+                    .map_err(|e| format!("write {file_path:?}: {e}"))
+            };
+
+            if let Err(e) = write_result {
                 // I/O error — mark as failed
                 if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
                     job.mark_failed();
@@ -252,32 +285,43 @@ impl Core {
                 self.event_tx
                     .send(CoreEvent::JobFailed {
                         job_id: job_id.clone(),
-                        error: format!("write {file_path:?}: {e}"),
+                        error: e,
                     })
                     .map_err(|_| "event channel closed".to_string())?;
                 continue;
             }
 
-            // Emit progress (complete)
+            // Update bytes_received with what we just wrote
+            let new_bytes = bytes_received + data.len() as u64;
+            if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
+                job.add_bytes_received(data.len() as u64);
+            }
+
+            // Emit progress with cumulative total
             self.event_tx
                 .send(CoreEvent::JobProgress {
                     job_id: job_id.clone(),
-                    bytes_downloaded: total,
+                    bytes_downloaded: new_bytes,
                     total_bytes: Some(total),
                 })
                 .map_err(|_| "event channel closed".to_string())?;
 
-            // Emit completed
-            self.event_tx
-                .send(CoreEvent::JobCompleted {
-                    job_id: job_id.clone(),
-                    bytes_written: total,
-                    path: file_path,
-                })
-                .map_err(|_| "event channel closed".to_string())?;
+            // Mark complete only if we have all the bytes
+            if new_bytes >= total {
+                // Emit completed
+                self.event_tx
+                    .send(CoreEvent::JobCompleted {
+                        job_id: job_id.clone(),
+                        bytes_written: total,
+                        path: file_path,
+                    })
+                    .map_err(|_| "event channel closed".to_string())?;
 
-            // Mark job complete
-            self.jobs[i].mark_completed();
+                // Mark job complete
+                self.jobs[i].mark_completed();
+            }
+            // Otherwise the job stays pending — next process_pending
+            // call will resume with a Range header.
         }
 
         Ok(())
