@@ -122,13 +122,20 @@ pub unsafe extern "C" fn core_create() -> *mut Core {
         let http = Box::new(crate::http::ProdHttpBackend::new());
         let config = crate::ytdlp_extractor::YtDlpConfig::default();
         let extractor = Box::new(crate::ytdlp_extractor::YtDlpExtractorToolchain::new(config));
-        let (core, rx) = Core::new(http, extractor);
+        let job_signals = std::sync::Arc::new(crate::job_signals::JobSignals::default());
+        let (core, rx) = Core::new_with_clock_and_signals(
+            http,
+            extractor,
+            std::sync::Arc::new(crate::SystemClock::new()),
+            job_signals.clone(),
+        );
 
         // We need to keep the receiver alive to drain events.
         // We store it in a leaked box alongside the core.
         let ctx = Box::new(CoreContext {
             core: Mutex::new(Some(core)),
             event_rx: Mutex::new(Some(rx)),
+            job_signals,
         });
         Box::into_raw(ctx) as *mut Core
     })
@@ -138,6 +145,7 @@ pub unsafe extern "C" fn core_create() -> *mut Core {
 struct CoreContext {
     core: Mutex<Option<Core>>,
     event_rx: Mutex<Option<crossbeam_channel::Receiver<CoreEvent>>>,
+    job_signals: std::sync::Arc<crate::job_signals::JobSignals>,
 }
 
 /// Destroy a Core instance created by `core_create`.
@@ -352,7 +360,46 @@ macro_rules! lifecycle_cmd {
     };
 }
 
-lifecycle_cmd!(core_pause_job, pause_job);
+#[no_mangle]
+pub unsafe extern "C" fn core_pause_job(
+    handle: *mut Core,
+    job_id: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let jid = cstr_to_str(job_id);
+
+        {
+            let core_guard = ctx.core.lock().unwrap();
+            let core = core_guard.as_ref().unwrap();
+            if let Err(err) = core.can_pause_job(jid) {
+                write_str_to_buf(&err, error_buf, error_buf_len);
+                return -1;
+            }
+        }
+
+        if let Some(flag) = ctx.job_signals.request_pause(jid) {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        if ctx.job_signals.is_transfer_active(jid) {
+            return 0;
+        }
+
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+        match core.finish_pause_if_idle(jid) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
 lifecycle_cmd!(core_resume_job, resume_job);
 lifecycle_cmd!(core_retry_job, retry_job);
 lifecycle_cmd!(core_discard_job, discard_job);

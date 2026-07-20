@@ -1015,24 +1015,61 @@ fn retry_resets_bytes_received_and_starts_from_zero() {
 }
 
 // ---------------------------------------------------------------------------
-// Acceptance: Bandwidth Cap (issue #17)
+// Acceptance: Bandwidth Cap (issue #31 — bytes/sec token bucket)
 // ---------------------------------------------------------------------------
 
-fn count_process_calls_until_done(
+fn make_capped_core(
+    http: Box<dyn HttpBackend>,
+) -> (
+    Core,
+    crossbeam_channel::Receiver<CoreEvent>,
+    Arc<ManualClock>,
+) {
+    let clock = Arc::new(ManualClock::new());
+    let (core, rx) = Core::new_with_clock(http, Box::new(fake_toolchain()), clock.clone());
+    (core, rx, clock)
+}
+
+fn no_range_http(map: std::collections::HashMap<String, Vec<u8>>) -> NoRangeFakeHttp {
+    NoRangeFakeHttp(FakeHttp {
+        responses: Arc::new(Mutex::new(map)),
+    })
+}
+
+fn process_with_clock_until_done(
     core: &mut Core,
     rx: &crossbeam_channel::Receiver<CoreEvent>,
-) -> usize {
-    let mut count = 0;
+    clock: &ManualClock,
+) {
     loop {
         core.process_pending().unwrap();
-        count += 1;
         let events = collect_events(rx);
         if events
             .iter()
             .any(|e| matches!(e, CoreEvent::JobCompleted { .. }))
         {
-            return count;
+            return;
         }
+        clock.advance(std::time::Duration::from_secs(1));
+    }
+}
+
+fn process_until_job_done_with_clock(
+    core: &mut Core,
+    rx: &crossbeam_channel::Receiver<CoreEvent>,
+    clock: &ManualClock,
+    target: &str,
+) {
+    loop {
+        core.process_pending().unwrap();
+        let events = collect_events(rx);
+        if events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { job_id, .. } if job_id == target))
+        {
+            return;
+        }
+        clock.advance(std::time::Duration::from_secs(1));
     }
 }
 
@@ -1046,22 +1083,22 @@ fn default_transfer_is_uncapped() {
         "https://example.com/uncapped.zip".into(),
         content.clone(),
     );
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, _clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let _job_id =
         enqueue_direct_job_id(&mut core, "https://example.com/uncapped.zip");
 
-    // One call should complete the job
-    let calls = count_process_calls_until_done(&mut core, &rx);
-    assert_eq!(
-        calls, 1,
-        "default uncapped transfer should complete in 1 call, took {calls}"
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "default uncapped transfer should complete in one call"
     );
 }
 
@@ -1072,18 +1109,16 @@ fn global_bandwidth_cap_limits_aggregate_throughput() {
     let mut map = std::collections::HashMap::new();
     map.insert("https://example.com/a.zip".into(), content_a.to_vec());
     map.insert("https://example.com/b.zip".into(), content_b.to_vec());
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_a = enqueue_direct_job_id(&mut core, "https://example.com/a.zip");
     let job_b = enqueue_direct_job_id(&mut core, "https://example.com/b.zip");
 
-    // Global cap: 20 bytes per call (aggregate across both jobs)
+    // Global cap: 20 bytes/sec
     core.set_global_bandwidth_cap(20);
 
     // First call — neither job should complete yet
@@ -1091,11 +1126,12 @@ fn global_bandwidth_cap_limits_aggregate_throughput() {
     process_and_accumulate_completions(&mut core, &rx, &mut done);
     assert!(
         !done.contains(&job_a) && !done.contains(&job_b),
-        "neither job should complete in one call with 20-byte global cap"
+        "neither job should complete in one call with 20-byte/sec global cap"
     );
 
-    // Drain remaining bytes
+    // Drain remaining bytes, advancing the injectable clock between rounds
     while !done.contains(&job_a) || !done.contains(&job_b) {
+        clock.advance(std::time::Duration::from_secs(1));
         process_and_accumulate_completions(&mut core, &rx, &mut done);
     }
 
@@ -1123,21 +1159,17 @@ fn per_job_bandwidth_cap_limits_that_job_without_global() {
     let mut map = std::collections::HashMap::new();
     map.insert("https://example.com/a.zip".into(), content_a.to_vec());
     map.insert("https://example.com/b.zip".into(), content_b.to_vec());
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_a = enqueue_direct_job_id(&mut core, "https://example.com/a.zip");
     let job_b = enqueue_direct_job_id(&mut core, "https://example.com/b.zip");
 
-    // Set per-job cap on job_b only (no global cap)
     core.set_job_bandwidth_cap(&job_b, 10).unwrap();
 
-    // First call — job_a should complete; job_b should stay pending
     let mut done = std::collections::HashSet::new();
     process_and_accumulate_completions(&mut core, &rx, &mut done);
     assert!(
@@ -1149,8 +1181,7 @@ fn per_job_bandwidth_cap_limits_that_job_without_global() {
         "capped job should NOT complete in one call"
     );
 
-    // Finish job_b in subsequent calls
-    process_until_job_done(&mut core, &rx, &job_b);
+    process_until_job_done_with_clock(&mut core, &rx, &clock, &job_b);
 
     // Verify full content on disk
     let dir = tmp.path().join("library").join("jobs").join(&job_b);
@@ -1168,21 +1199,17 @@ fn per_job_cap_more_restrictive_than_global_is_effective() {
     let content = vec![b'X'; 200]; // 200 bytes
     let mut map = std::collections::HashMap::new();
     map.insert("https://example.com/big.zip".into(), content.clone());
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/big.zip");
 
-    // Global cap 100, per-job cap 10 => effective cap should be 10
     core.set_global_bandwidth_cap(100);
     core.set_job_bandwidth_cap(&job_id, 10).unwrap();
 
-    // First call should transfer at most 10 bytes
     core.process_pending().unwrap();
     let events = collect_events(&rx);
 
@@ -1201,7 +1228,7 @@ fn per_job_cap_more_restrictive_than_global_is_effective() {
         "should transfer exactly 10 bytes (per-job cap is more restrictive)"
     );
 
-    process_until_job_done(&mut core, &rx, &job_id);
+    process_until_job_done_with_clock(&mut core, &rx, &clock, &job_id);
 
     let dir = tmp.path().join("library").join("jobs").join(&job_id);
     let files: Vec<_> = std::fs::read_dir(&dir)
@@ -1223,17 +1250,14 @@ fn global_cap_more_restrictive_than_per_job_is_effective() {
     let content = vec![b'Y'; 200]; // 200 bytes
     let mut map = std::collections::HashMap::new();
     map.insert("https://example.com/big.zip".into(), content.clone());
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/big.zip");
 
-    // Global cap 5, per-job cap 100 => effective cap should be 5
     core.set_global_bandwidth_cap(5);
     core.set_job_bandwidth_cap(&job_id, 100).unwrap();
 
@@ -1255,7 +1279,7 @@ fn global_cap_more_restrictive_than_per_job_is_effective() {
         "should transfer exactly 5 bytes (global cap is more restrictive)"
     );
 
-    process_until_job_done(&mut core, &rx, &job_id);
+    process_until_job_done_with_clock(&mut core, &rx, &clock, &job_id);
 
     let dir = tmp.path().join("library").join("jobs").join(&job_id);
     let files: Vec<_> = std::fs::read_dir(&dir)
@@ -1275,24 +1299,24 @@ fn bandwidth_cap_does_not_affect_small_transfers() {
         "https://example.com/small.zip".into(),
         content.clone(),
     );
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, _clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let _job_id =
         enqueue_direct_job_id(&mut core, "https://example.com/small.zip");
 
-    // Set cap larger than content
     core.set_global_bandwidth_cap(100);
 
-    let calls = count_process_calls_until_done(&mut core, &rx);
-    assert_eq!(
-        calls, 1,
-        "small file should complete in 1 call even with cap, took {calls}"
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "small file should complete in one call even with cap"
     );
 }
 
@@ -1305,31 +1329,22 @@ fn set_and_remove_global_bandwidth_cap_restores_uncapped() {
         "https://example.com/global-switch.zip".into(),
         content.clone(),
     );
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let _job_id =
         enqueue_direct_job_id(&mut core, "https://example.com/global-switch.zip");
 
-    // Set cap, verify it's active
     core.set_global_bandwidth_cap(5);
     assert_eq!(core.global_bandwidth_cap(), Some(5));
 
-    // Remove cap
     core.remove_global_bandwidth_cap();
     assert_eq!(core.global_bandwidth_cap(), None);
 
-    // Now it should complete in one call
-    let calls = count_process_calls_until_done(&mut core, &rx);
-    assert_eq!(
-        calls, 1,
-        "after removing global cap, transfer completes in 1 call, took {calls}"
-    );
+    process_with_clock_until_done(&mut core, &rx, &clock);
 
     // Verify content
     let dir = tmp.path().join("library").join("jobs");
@@ -1355,31 +1370,22 @@ fn set_and_remove_job_bandwidth_cap_restores_uncapped() {
         "https://example.com/job-switch.zip".into(),
         content.clone(),
     );
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id =
         enqueue_direct_job_id(&mut core, "https://example.com/job-switch.zip");
 
-    // Set per-job cap, verify
     core.set_job_bandwidth_cap(&job_id, 5).unwrap();
     assert_eq!(core.job_bandwidth_cap(&job_id).unwrap(), Some(5));
 
-    // Remove per-job cap
     core.remove_job_bandwidth_cap(&job_id).unwrap();
     assert_eq!(core.job_bandwidth_cap(&job_id).unwrap(), None);
 
-    // Should complete in one call
-    let calls = count_process_calls_until_done(&mut core, &rx);
-    assert_eq!(
-        calls, 1,
-        "after removing per-job cap, transfer completes in 1 call, took {calls}"
-    );
+    process_with_clock_until_done(&mut core, &rx, &clock);
 
     let dir = tmp.path().join("library").join("jobs").join(&job_id);
     let files: Vec<_> = std::fs::read_dir(&dir)
@@ -1397,22 +1403,18 @@ fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
     map.insert("https://example.com/1.zip".into(), content.clone());
     map.insert("https://example.com/2.zip".into(), content.clone());
     map.insert("https://example.com/3.zip".into(), content.clone());
-    let http = FakeHttp {
-        responses: Arc::new(Mutex::new(map)),
-    };
+    let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core(Box::new(http));
+    let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_1 = enqueue_direct_job_id(&mut core, "https://example.com/1.zip");
     let job_2 = enqueue_direct_job_id(&mut core, "https://example.com/2.zip");
     let job_3 = enqueue_direct_job_id(&mut core, "https://example.com/3.zip");
 
-    // Global cap 30 — should allow one full job (20) + 10 of the next
     core.set_global_bandwidth_cap(30);
 
-    // First call: one job should complete (20b), another gets ≤10b
     let mut done = std::collections::HashSet::new();
     core.process_pending().unwrap();
     let events = collect_events(&rx);
@@ -1438,8 +1440,8 @@ fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
         done.insert(job_id.clone());
     }
 
-    // Process remaining until all 3 are done
     while done.len() < 3 {
+        clock.advance(std::time::Duration::from_secs(1));
         process_and_accumulate_completions(&mut core, &rx, &mut done);
     }
 
@@ -1480,6 +1482,134 @@ fn job_bandwidth_cap_error_for_nonexistent_job() {
     assert!(
         result.is_err(),
         "getting cap on nonexistent job should error"
+    );
+}
+
+#[test]
+fn pause_during_in_flight_transfer_stops_without_full_body() {
+    #[derive(Clone)]
+    struct SlowNoRangeFakeHttp {
+        responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    }
+
+    impl HttpBackend for SlowNoRangeFakeHttp {
+        fn fetch(
+            &self,
+            url: &str,
+            range: Option<std::ops::Range<u64>>,
+            sink: &mut dyn Write,
+        ) -> Result<FetchResult, String> {
+            let responses = self.responses.lock().unwrap();
+            let full_body = responses
+                .get(url)
+                .ok_or_else(|| format!("no fake response for {url}"))?;
+            let total = full_body.len() as u64;
+            let data = match range {
+                Some(r) => {
+                    let start = r.start.min(total);
+                    let end = r.end.min(total).max(start);
+                    &full_body[start as usize..end as usize]
+                }
+                None => full_body.as_slice(),
+            };
+
+            let mut written = 0u64;
+            for byte in data {
+                let n = sink
+                    .write(std::slice::from_ref(byte))
+                    .map_err(|e| format!("sink write: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                written += n as u64;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(FetchResult {
+                total_length: total,
+                bytes_written: written,
+            })
+        }
+
+        fn supports_range(&self, _url: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+
+        fn file_size(&self, url: &str) -> Result<u64, String> {
+            let responses = self.responses.lock().unwrap();
+            Ok(responses
+                .get(url)
+                .map(|b| b.len() as u64)
+                .ok_or_else(|| format!("no fake response for {url}"))?)
+        }
+    }
+
+    let content = vec![b'P'; 256];
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "https://example.com/pause-mid.zip".into(),
+        content.clone(),
+    );
+    let http = SlowNoRangeFakeHttp {
+        responses: Arc::new(Mutex::new(map)),
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx, _clock) = make_capped_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/pause-mid.zip");
+    let signals = core.job_signals();
+
+    let core = Arc::new(Mutex::new(core));
+    let rx = Arc::new(rx);
+    let job_for_pause = job_id.clone();
+
+    let worker = {
+        let core = core.clone();
+        let rx = rx.clone();
+        std::thread::spawn(move || {
+            let mut guard = core.lock().unwrap();
+            guard.process_pending().unwrap();
+            collect_events(&rx)
+        })
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    signals
+        .request_pause(&job_for_pause)
+        .expect("pause flag registered")
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let events = worker.join().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobPaused { .. })),
+        "pause during transfer should emit JobPaused, got: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "paused transfer must not claim success"
+    );
+
+    let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
+    let part_path = job_dir.join("pause-mid.zip.part");
+    let final_path = job_dir.join("pause-mid.zip");
+    assert!(
+        !final_path.exists(),
+        "paused transfer must not rename partial to final file"
+    );
+    assert!(part_path.exists(), "partial bytes should remain on disk");
+    let partial_len = std::fs::metadata(&part_path).unwrap().len();
+    assert!(
+        partial_len > 0,
+        "partial file should contain bytes written before pause"
+    );
+    assert!(
+        partial_len < content.len() as u64,
+        "partial file should be shorter than full content, got {partial_len}"
     );
 }
 

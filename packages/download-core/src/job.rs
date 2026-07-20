@@ -3,6 +3,8 @@
 use crate::mirror_set::MirrorSet;
 use crate::storage::{PersistedJob, PersistedJobState};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Outcome returned from `Core::enqueue`.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,9 +84,13 @@ pub struct Job {
     /// Number of bytes successfully written to disk so far.
     /// Used for resumable transfers via Range headers.
     bytes_received: u64,
-    /// Per-job bandwidth cap in bytes per process_pending call.
+    /// Per-job bandwidth cap in bytes per second.
     /// None = uncapped for this job.
     bandwidth_cap: Option<u64>,
+    /// Set by `pause_job` to stop an in-flight transfer without holding Core lock.
+    pause_requested: Arc<AtomicBool>,
+    /// True while a transfer is actively writing body bytes for this job.
+    transfer_active: Arc<AtomicBool>,
     /// Optional source name for batch/channel subfolder naming.
     source: Option<String>,
     /// When set, `process_pending` downloads via the Extractor Toolchain
@@ -106,6 +112,8 @@ impl Job {
             destination,
             bytes_received: 0,
             bandwidth_cap: None,
+            pause_requested: Arc::new(AtomicBool::new(false)),
+            transfer_active: Arc::new(AtomicBool::new(false)),
             source: None,
             extractor_format: None,
             filename,
@@ -137,6 +145,8 @@ impl Job {
             destination,
             bytes_received: 0,
             bandwidth_cap: None,
+            pause_requested: Arc::new(AtomicBool::new(false)),
+            transfer_active: Arc::new(AtomicBool::new(false)),
             source,
             extractor_format: None,
             filename,
@@ -153,6 +163,8 @@ impl Job {
             destination: persisted.destination,
             bytes_received: persisted.bytes_received,
             bandwidth_cap: persisted.bandwidth_cap,
+            pause_requested: Arc::new(AtomicBool::new(false)),
+            transfer_active: Arc::new(AtomicBool::new(false)),
             source: persisted.source,
             extractor_format: persisted.extractor_format,
             filename: persisted.filename,
@@ -286,6 +298,18 @@ impl Job {
         self.bandwidth_cap = None;
     }
 
+    pub fn pause_requested(&self) -> &Arc<AtomicBool> {
+        &self.pause_requested
+    }
+
+    pub fn transfer_active(&self) -> &Arc<AtomicBool> {
+        &self.transfer_active
+    }
+
+    pub fn clear_pause_requested(&self) {
+        self.pause_requested.store(false, Ordering::Release);
+    }
+
     pub fn mark_completed(&mut self) {
         self.state = JobState::Completed;
     }
@@ -311,6 +335,7 @@ impl Job {
     pub fn resume(&mut self) -> Result<(), String> {
         match self.state {
             JobState::Paused => {
+                self.clear_pause_requested();
                 self.state = JobState::Pending;
                 Ok(())
             }
@@ -328,6 +353,7 @@ impl Job {
     pub fn retry(&mut self) -> Result<(), String> {
         match self.state {
             JobState::Failed => {
+                self.clear_pause_requested();
                 self.state = JobState::Pending;
                 self.bytes_received = 0;
                 self.mirrors.reset();

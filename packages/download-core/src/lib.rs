@@ -3,13 +3,16 @@
 //! The Core owns URL classification, job lifecycle, and storage.
 //! Platform shells consume this library via its public command/event API.
 
+mod bandwidth;
 mod cabi;
 mod classification;
 mod event;
 mod extractor;
 mod http;
 mod job;
+mod job_signals;
 mod mirror_set;
+mod transfer;
 pub mod plugin_sidecar;
 mod storage;
 pub mod ytdlp_extractor;
@@ -19,6 +22,7 @@ pub use plugin_sidecar::{
 };
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
+pub use bandwidth::{Clock, ManualClock, SystemClock};
 pub use event::CoreEvent;
 pub use extractor::{
     ExtractorToolchain, FakeExtractorToolchain, ItemSelection, MediaItem, ProbeResult,
@@ -28,12 +32,17 @@ pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
 pub use job::EnqueueOutcome;
 pub use mirror_set::MirrorSet;
 
+use bandwidth::{shared_token_bucket, SharedTokenBucket};
 use std::collections::HashMap;
-use std::io::{Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use transfer::{
+    execute_segment_fetch, execute_single_fetch, make_job_bucket, SegmentFetchParams,
+    SingleFetchParams,
+};
 
 /// Debounce interval for progress-only queue flushes.
 const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -52,9 +61,10 @@ pub struct Core {
     library_root: Option<PathBuf>,
     jobs: Vec<job::Job>,
     event_tx: crossbeam_channel::Sender<CoreEvent>,
-    /// Global bandwidth cap in bytes per process_pending call.
+    /// Global bandwidth cap in bytes per second.
     /// None = globally uncapped.
     bandwidth_cap: Option<u64>,
+    clock: Arc<dyn bandwidth::Clock>,
     /// Pending probe results, keyed by URL.
     /// Stored until confirm or replaced by a new probe for the same URL.
     pending_probes: HashMap<String, ProbeResult>,
@@ -64,6 +74,7 @@ pub struct Core {
     bytes_since_progress_flush: u64,
     /// Whether a debounced progress flush is pending.
     progress_flush_pending: bool,
+    job_signals: Arc<job_signals::JobSignals>,
 }
 
 impl Core {
@@ -75,6 +86,30 @@ impl Core {
         http: Box<dyn HttpBackend>,
         extractor: Box<dyn ExtractorToolchain>,
     ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
+        Self::new_with_clock(http, extractor, Arc::new(SystemClock::new()))
+    }
+
+    /// Create a Core with an injectable clock (used in acceptance tests).
+    pub fn new_with_clock(
+        http: Box<dyn HttpBackend>,
+        extractor: Box<dyn ExtractorToolchain>,
+        clock: Arc<dyn bandwidth::Clock>,
+    ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
+        Self::new_with_clock_and_signals(
+            http,
+            extractor,
+            clock,
+            Arc::new(job_signals::JobSignals::default()),
+        )
+    }
+
+    /// Create a Core with shared job signals (used by the C ABI).
+    pub fn new_with_clock_and_signals(
+        http: Box<dyn HttpBackend>,
+        extractor: Box<dyn ExtractorToolchain>,
+        clock: Arc<dyn bandwidth::Clock>,
+        job_signals: Arc<job_signals::JobSignals>,
+    ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let core = Self {
             http: Arc::from(http),
@@ -83,12 +118,74 @@ impl Core {
             jobs: Vec::new(),
             event_tx: tx,
             bandwidth_cap: None,
+            clock,
             pending_probes: HashMap::new(),
             last_progress_flush: Instant::now(),
             bytes_since_progress_flush: 0,
             progress_flush_pending: false,
+            job_signals,
         };
         (core, rx)
+    }
+
+    pub fn job_signals(&self) -> Arc<job_signals::JobSignals> {
+        self.job_signals.clone()
+    }
+
+    fn register_job_signals(&self, job: &job::Job) {
+        self.job_signals.register(
+            job.id(),
+            job.pause_requested().clone(),
+            job.transfer_active().clone(),
+        );
+    }
+
+    /// Finalize a pause when no transfer is active (C ABI / post-transfer).
+    pub fn can_pause_job(&self, job_id: &str) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        if !job.is_pending() {
+            return Err(format!(
+                "cannot pause job {job_id}: current state is {:?}",
+                job.state()
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn finish_pause_if_idle(&mut self, job_id: &str) -> Result<(), String> {
+        let transfer_active = self
+            .jobs
+            .iter()
+            .find(|j| j.id() == job_id)
+            .map(|j| j.transfer_active().load(Ordering::Acquire))
+            .unwrap_or(false);
+        if transfer_active {
+            return Ok(());
+        }
+        self.finalize_pause(job_id)
+    }
+
+    fn finalize_pause(&mut self, job_id: &str) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        if !job.is_pending() {
+            return Ok(());
+        }
+        job.pause()?;
+        job.clear_pause_requested();
+        self.event_tx
+            .send(CoreEvent::JobPaused {
+                job_id: job_id.to_string(),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+        self.persist_queue_now()
     }
 
     /// Set the Library Root — the base directory for all downloads.
@@ -98,6 +195,9 @@ impl Core {
     pub fn set_library_root(&mut self, root: PathBuf) -> Result<(), String> {
         std::fs::create_dir_all(&root).map_err(|e| format!("create library root: {e}"))?;
         self.jobs = storage::load_jobs(&root)?;
+        for job in &self.jobs {
+            self.register_job_signals(job);
+        }
         if let Some(cap) = storage::load_global_bandwidth_cap(&root)? {
             self.bandwidth_cap = Some(cap);
         }
@@ -161,6 +261,7 @@ impl Core {
                 let job = job::Job::new(url_str.to_string(), root.clone());
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
+                self.register_job_signals(&job);
                 self.jobs.push(job);
                 self.persist_queue_now()?;
                 Ok(EnqueueOutcome::EnqueueDirect {
@@ -183,23 +284,20 @@ impl Core {
     /// Pause a pending job.  Emits `CoreEvent::JobPaused`.
     ///
     /// A paused job is skipped by `process_pending` until resumed.
+    /// When a transfer is in flight, pause takes effect without waiting
+    /// for the full body read to finish.
     pub fn pause_job(&mut self, job_id: &str) -> Result<(), String> {
-        let job = self
-            .jobs
-            .iter_mut()
-            .find(|j| j.id() == job_id)
-            .ok_or_else(|| format!("job {job_id} not found"))?;
+        self.can_pause_job(job_id)?;
 
-        job.pause()?;
+        if let Some(flag) = self.job_signals.request_pause(job_id) {
+            flag.store(true, Ordering::Release);
+        }
 
-        self.event_tx
-            .send(CoreEvent::JobPaused {
-                job_id: job_id.to_string(),
-            })
-            .map_err(|_| "event channel closed".to_string())?;
+        if self.job_signals.is_transfer_active(job_id) {
+            return Ok(());
+        }
 
-        self.persist_queue_now()?;
-        Ok(())
+        self.finalize_pause(job_id)
     }
 
     /// Resume a paused job.  Emits `CoreEvent::JobResumed`.
@@ -259,6 +357,7 @@ impl Core {
             .ok_or_else(|| format!("job {job_id} not found"))?;
 
         self.jobs.remove(pos);
+        self.job_signals.unregister(job_id);
 
         self.event_tx
             .send(CoreEvent::JobDiscarded {
@@ -274,10 +373,9 @@ impl Core {
     // Bandwidth cap
     // -----------------------------------------------------------------------
 
-    /// Set the global bandwidth cap in bytes per `process_pending` call.
+    /// Set the global bandwidth cap in bytes per second.
     ///
-    /// When set, the total bytes transferred across ALL jobs in a single
-    /// `process_pending` call will not exceed this value.
+    /// When set, aggregate throughput across all jobs is limited to this rate.
     /// None/unset = globally uncapped.
     pub fn set_global_bandwidth_cap(&mut self, cap: u64) {
         self.bandwidth_cap = Some(cap);
@@ -295,10 +393,9 @@ impl Core {
         self.bandwidth_cap
     }
 
-    /// Set a per-job bandwidth cap in bytes per `process_pending` call.
+    /// Set a per-job bandwidth cap in bytes per second.
     ///
-    /// This job will not transfer more than `cap` bytes in a single
-    /// `process_pending` call, regardless of global cap status.
+    /// Effective rate is `min(global, per-job)` when both are set.
     pub fn set_job_bandwidth_cap(&mut self, job_id: &str, cap: u64) -> Result<(), String> {
         let job = self
             .jobs
@@ -502,6 +599,7 @@ impl Core {
             job.set_extractor_format(&sel.quality_id);
 
             job_ids.push(job.id().to_string());
+            self.register_job_signals(&job);
             self.jobs.push(job);
         }
 
@@ -530,10 +628,9 @@ impl Core {
     ///
     /// When Range is not supported, or when a job has partial data already
     /// written (`bytes_received > 0`), the single-connection path is used:
-    /// a plain GET (or GET with `Range` for resume), with bandwidth-capped
-    /// truncation if needed.
+    /// a plain GET (or GET with `Range` for resume), rate-limited via token
+    /// bucket and interruptible via pause.
     pub fn process_pending(&mut self) -> Result<(), String> {
-        // Collect indices of jobs that need work (pending only)
         let indices: Vec<usize> = self
             .jobs
             .iter()
@@ -542,16 +639,22 @@ impl Core {
             .map(|(i, _)| i)
             .collect();
 
-        // Track remaining global budget for this call
-        let mut global_remaining = self.bandwidth_cap;
+        let global_bucket = self
+            .bandwidth_cap
+            .map(|rate| shared_token_bucket(rate, self.clock.clone()));
 
         for i in indices {
-            // Exhausted global cap — skip remaining jobs
-            if global_remaining == Some(0) {
-                break;
-            }
-
-            let (job_id, url, dest, filename, bytes_received, job_cap, extractor_format) = {
+            let (
+                job_id,
+                url,
+                dest,
+                filename,
+                bytes_received,
+                job_cap,
+                extractor_format,
+                pause_requested,
+                transfer_active,
+            ) = {
                 let job = &self.jobs[i];
                 (
                     job.id().to_string(),
@@ -561,10 +664,11 @@ impl Core {
                     job.bytes_received(),
                     job.bandwidth_cap(),
                     job.extractor_format().map(|s| s.to_string()),
+                    job.pause_requested().clone(),
+                    job.transfer_active().clone(),
                 )
             };
 
-            // Launch Site path: yt-dlp download (HLS / signed CDN), not HTTP page GET.
             if let Some(format) = extractor_format {
                 match self.extractor.download(&url, &format, &dest) {
                     Ok(path) => {
@@ -595,49 +699,33 @@ impl Core {
                 continue;
             }
 
-            // Effective cap = min(global_remaining, per-job cap)
-            let effective_cap: Option<u64> = match (global_remaining, job_cap) {
-                (Some(g), Some(j)) => Some(g.min(j)),
-                (Some(g), None) => Some(g),
-                (None, Some(j)) => Some(j),
-                (None, None) => None,
-            };
+            let job_bucket = job_cap.map(|rate| make_job_bucket(rate, self.clock.clone()));
 
-            // --- Segmented Transfer for fresh jobs ---
-            // When bytes_received == 0, check if the server supports Range.
-            // If yes, use multi-connection segmented transfer.
             if bytes_received == 0 {
-                // Check primary URL for Range support; if it fails, fall through
-                // to single-connection path below.
-                let supports_range = match self.http.supports_range(&url) {
-                    Ok(true) => true,
-                    _ => false,
-                };
+                let supports_range = matches!(self.http.supports_range(&url), Ok(true));
+                let rate_limited = global_bucket.is_some() || job_bucket.is_some();
 
-                if supports_range {
+                if supports_range && !rate_limited {
                     std::fs::create_dir_all(&dest)
                         .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
                     let file_path = dest.join(&filename);
                     let part_path = Self::part_path_for(&file_path);
 
-                    // Segmented fetch loop: retry with next mirror on failure
                     let seg_result = 'seg_loop: loop {
-                        let current_url = {
-                            let job = &self.jobs[i];
-                            job.url().to_string()
-                        };
-
-                        match self.segmented_fetch(&current_url, &part_path, effective_cap) {
+                        let current_url = self.jobs[i].url().to_string();
+                        match self.segmented_fetch(
+                            &current_url,
+                            &part_path,
+                            global_bucket.clone(),
+                            job_bucket.clone(),
+                            pause_requested.clone(),
+                            transfer_active.clone(),
+                        ) {
                             Ok(result) => break 'seg_loop Some(result),
                             Err(err) => {
-                                // Drop partial segmented data before mirror failover.
                                 let _ = std::fs::remove_file(&part_path);
-                                // Try next mirror
                                 if self.jobs[i].advance_mirror() {
-                                    let next_url = {
-                                        let job = &self.jobs[i];
-                                        job.url().to_string()
-                                    };
+                                    let next_url = self.jobs[i].url().to_string();
                                     self.event_tx
                                         .send(CoreEvent::JobMirrorFailover {
                                             job_id: job_id.clone(),
@@ -649,7 +737,6 @@ impl Core {
                                     self.persist_queue_now()?;
                                     continue 'seg_loop;
                                 }
-                                // All mirrors exhausted
                                 self.jobs[i].mark_failed();
                                 self.event_tx
                                     .send(CoreEvent::JobFailed {
@@ -664,29 +751,14 @@ impl Core {
                     };
 
                     match seg_result {
-                        Some((total_size, bytes_written)) => {
-                            if let Some(ref mut remaining) = global_remaining {
-                                *remaining = remaining.saturating_sub(bytes_written);
+                        Some((total_size, _bytes_written, paused)) => {
+                            if paused {
+                                self.sync_job_progress(&job_id, bytes_received)?;
+                                self.finalize_pause(&job_id)?;
+                                continue;
                             }
 
-                            let on_disk = std::fs::metadata(&part_path)
-                                .map(|m| m.len())
-                                .map_err(|e| format!("stat partial {part_path:?}: {e}"))?;
-
-                            if on_disk > 0 {
-                                if let Some(job) =
-                                    self.jobs.iter_mut().find(|j| j.id() == job_id)
-                                {
-                                    let prev = job.bytes_received();
-                                    if on_disk > prev {
-                                        let delta = on_disk - prev;
-                                        job.add_bytes_received(delta);
-                                        self.note_progress_bytes(delta)?;
-                                    }
-                                }
-                            }
-
-                            // Emit progress; on-disk bytes are authoritative.
+                            let on_disk = self.sync_job_progress(&job_id, bytes_received)?;
                             self.event_tx
                                 .send(CoreEvent::JobProgress {
                                     job_id: job_id.clone(),
@@ -695,48 +767,26 @@ impl Core {
                                 })
                                 .map_err(|_| "event channel closed".to_string())?;
 
-                            // Mark complete only if we have all the bytes, then rename partial.
                             if on_disk >= total_size {
-                                std::fs::rename(&part_path, &file_path).map_err(|e| {
-                                    format!("rename {part_path:?} -> {file_path:?}: {e}")
-                                })?;
-
-                                self.event_tx
-                                    .send(CoreEvent::JobCompleted {
-                                        job_id: job_id.clone(),
-                                        bytes_written: total_size,
-                                        path: file_path,
-                                    })
-                                    .map_err(|_| "event channel closed".to_string())?;
-
-                                if let Some(job) =
-                                    self.jobs.iter_mut().find(|j| j.id() == job_id)
-                                {
-                                    job.mark_completed();
-                                }
-                                self.persist_queue_now()?;
+                                self.complete_job_file(
+                                    &job_id, i, &part_path, &file_path, total_size,
+                                )?;
                             } else {
                                 self.flush_pending_progress()?;
                             }
                         }
-                        None => {
-                            // All mirrors exhausted — move to next job
-                            continue;
-                        }
+                        None => continue,
                     }
-                    continue; // handled, move to next job
+                    continue;
                 }
             }
 
-            // --- Single-connection path (fallback + resumable) ---
-            // Try mirrors in order until one succeeds or all exhausted
             let range = if bytes_received > 0 {
                 Some(bytes_received..u64::MAX)
             } else {
                 None
             };
 
-            // Emit progress (with cumulative bytes so far)
             self.event_tx
                 .send(CoreEvent::JobProgress {
                     job_id: job_id.clone(),
@@ -751,38 +801,36 @@ impl Core {
             let file_path = dest.join(&filename);
             let part_path = Self::part_path_for(&file_path);
 
-            // Segmented partials may have written the final path; migrate before resume.
             if bytes_received > 0 && !part_path.exists() && file_path.exists() {
                 std::fs::rename(&file_path, &part_path).map_err(|e| {
                     format!("migrate partial {file_path:?} -> {part_path:?}: {e}")
                 })?;
             }
 
-            // Fetch loop: retry with next mirror on failure
             let job_fetch = 'fetch_loop: loop {
-                let current_url = {
-                    let job = &self.jobs[i];
-                    job.url().to_string()
-                };
+                let current_url = self.jobs[i].url().to_string();
+                let outcome = execute_single_fetch(SingleFetchParams {
+                    http: self.http.clone(),
+                    url: current_url.clone(),
+                    part_path: part_path.clone(),
+                    range: range.clone(),
+                    append: bytes_received > 0,
+                    truncate: bytes_received == 0,
+                    global_bucket: global_bucket.clone(),
+                    job_bucket: job_bucket.clone(),
+                    pause_requested: pause_requested.clone(),
+                    transfer_active: transfer_active.clone(),
+                });
 
-                let mut part_file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .append(bytes_received > 0)
-                    .truncate(bytes_received == 0)
-                    .open(&part_path)
-                    .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
+                if outcome.paused {
+                    break 'fetch_loop Some(outcome);
+                }
 
-                let mut capped = CappedWriter::new(&mut part_file, effective_cap);
-                match self.http.fetch(&current_url, range.clone(), &mut capped) {
-                    Ok(result) => break 'fetch_loop Some((result, capped.bytes_written())),
+                match outcome.fetch {
+                    Ok(_result) => break 'fetch_loop Some(outcome),
                     Err(err) => {
-                        // Try next mirror
                         if self.jobs[i].advance_mirror() {
-                            let next_url = {
-                                let job = &self.jobs[i];
-                                job.url().to_string()
-                            };
+                            let next_url = self.jobs[i].url().to_string();
                             self.event_tx
                                 .send(CoreEvent::JobMirrorFailover {
                                     job_id: job_id.clone(),
@@ -794,7 +842,6 @@ impl Core {
                             self.persist_queue_now()?;
                             continue 'fetch_loop;
                         }
-                        // All mirrors exhausted
                         self.jobs[i].mark_failed();
                         self.event_tx
                             .send(CoreEvent::JobFailed {
@@ -808,29 +855,20 @@ impl Core {
                 }
             };
 
-            let (fetch_result, bytes_this_call) = match job_fetch {
-                Some(r) => r,
-                None => continue, // all mirrors exhausted, move to next job
+            let outcome = match job_fetch {
+                Some(outcome) => outcome,
+                None => continue,
             };
-            let total = fetch_result.total_length;
 
-            if let Some(ref mut remaining) = global_remaining {
-                *remaining = remaining.saturating_sub(bytes_this_call);
+            if outcome.paused {
+                self.sync_job_progress(&job_id, bytes_received)?;
+                self.finalize_pause(&job_id)?;
+                continue;
             }
 
-            let on_disk = std::fs::metadata(&part_path)
-                .map(|m| m.len())
-                .map_err(|e| format!("stat partial {part_path:?}: {e}"))?;
+            let total = outcome.fetch?.total_length;
+            let on_disk = self.sync_job_progress(&job_id, bytes_received)?;
 
-            if on_disk > bytes_received {
-                if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
-                    let delta = on_disk - bytes_received;
-                    job.add_bytes_received(delta);
-                    self.note_progress_bytes(delta)?;
-                }
-            }
-
-            // Emit progress with cumulative total; on-disk bytes are authoritative.
             self.event_tx
                 .send(CoreEvent::JobProgress {
                     job_id: job_id.clone(),
@@ -839,21 +877,8 @@ impl Core {
                 })
                 .map_err(|_| "event channel closed".to_string())?;
 
-            // Mark complete only if we have all the bytes, then rename partial.
             if on_disk >= total {
-                std::fs::rename(&part_path, &file_path)
-                    .map_err(|e| format!("rename {part_path:?} -> {file_path:?}: {e}"))?;
-
-                self.event_tx
-                    .send(CoreEvent::JobCompleted {
-                        job_id: job_id.clone(),
-                        bytes_written: total,
-                        path: file_path,
-                    })
-                    .map_err(|_| "event channel closed".to_string())?;
-
-                self.jobs[i].mark_completed();
-                self.persist_queue_now()?;
+                self.complete_job_file(&job_id, i, &part_path, &file_path, total)?;
             } else {
                 self.flush_pending_progress()?;
             }
@@ -863,25 +888,75 @@ impl Core {
         Ok(())
     }
 
-    /// Perform a multi-connection segmented fetch for the given URL.
-    ///
-    /// 1. Probes the file size via [`HttpBackend::file_size`].
-    /// 2. Splits the file into [`DEFAULT_SEGMENT_COUNT`] byte ranges.
-    /// 3. Fetches each range concurrently via scoped threads.
-    /// 4. Writes each range at the correct offset in `part_path`.
-    ///
-    /// Returns the total file size and bytes written to `part_path`.
-    /// This does NOT rename the partial or update job state — the caller does that
-    /// so that `&mut self` is available for job mutation.
+    fn sync_job_progress(&mut self, job_id: &str, bytes_before: u64) -> Result<u64, String> {
+        let job = self
+            .jobs
+            .iter()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        let part_path = Self::part_path_for(&job.final_path());
+        let on_disk = std::fs::metadata(&part_path)
+            .map(|m| m.len())
+            .map_err(|e| format!("stat partial {part_path:?}: {e}"))?;
+
+        if on_disk > bytes_before {
+            if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
+                let delta = on_disk - bytes_before;
+                job.add_bytes_received(delta);
+                self.note_progress_bytes(delta)?;
+            }
+        }
+        Ok(on_disk)
+    }
+
+    fn complete_job_file(
+        &mut self,
+        job_id: &str,
+        job_index: usize,
+        part_path: &Path,
+        file_path: &Path,
+        total: u64,
+    ) -> Result<(), String> {
+        std::fs::rename(part_path, file_path)
+            .map_err(|e| format!("rename {part_path:?} -> {file_path:?}: {e}"))?;
+
+        self.event_tx
+            .send(CoreEvent::JobCompleted {
+                job_id: job_id.to_string(),
+                bytes_written: total,
+                path: file_path.to_path_buf(),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+
+        self.jobs[job_index].mark_completed();
+        self.persist_queue_now()
+    }
+
     fn segmented_fetch(
         &self,
         url: &str,
         part_path: &Path,
-        cap: Option<u64>,
-    ) -> Result<(u64, u64), String> {
-        // Determine total file size (does not download the body)
-        let total_size = self.http.file_size(url)?;
+        global_bucket: Option<SharedTokenBucket>,
+        job_bucket: Option<SharedTokenBucket>,
+        pause_requested: Arc<std::sync::atomic::AtomicBool>,
+        transfer_active: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(u64, u64, bool), String> {
+        transfer_active.store(true, Ordering::Release);
+        let result =
+            self.run_segmented_fetch(url, part_path, global_bucket, job_bucket, pause_requested);
+        transfer_active.store(false, Ordering::Release);
+        result
+    }
 
+    fn run_segmented_fetch(
+        &self,
+        url: &str,
+        part_path: &Path,
+        global_bucket: Option<SharedTokenBucket>,
+        job_bucket: Option<SharedTokenBucket>,
+        pause_requested: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(u64, u64, bool), String> {
+        let total_size = self.http.file_size(url)?;
         if total_size == 0 {
             return Err("empty file, nothing to download".to_string());
         }
@@ -893,8 +968,7 @@ impl Core {
             .open(part_path)
             .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
 
-        // Calculate segment boundaries
-        let seg_count = DEFAULT_SEGMENT_COUNT.min(total_size); // at most one per byte
+        let seg_count = DEFAULT_SEGMENT_COUNT.min(total_size);
         let seg_size = total_size / seg_count;
         let mut segments: Vec<Range<u64>> = Vec::with_capacity(seg_count as usize);
         for s in 0..seg_count {
@@ -909,36 +983,32 @@ impl Core {
             }
         }
 
-        // Fetch segments concurrently using scoped threads.
-        // We clone the Arc<dyn HttpBackend> so each thread gets its own ref.
         let http = self.http.clone();
         let url_owned = url.to_string();
         let part_path_owned = part_path.to_path_buf();
 
         let segment_results: Vec<Result<u64, String>> = std::thread::scope(|scope| {
             let mut handles = Vec::new();
-            for range in &segments {
-                let fetch_range = clip_range_to_cap(range.clone(), cap);
-                if fetch_range.start >= fetch_range.end {
-                    continue;
-                }
-
-                let start = fetch_range.start;
-                let end = fetch_range.end;
-                let http_ref = &http;
-                let url_ref = &url_owned;
-                let part_ref = &part_path_owned;
+            for range in segments {
+                let http_ref = http.clone();
+                let url_ref = url_owned.clone();
+                let part_ref = part_path_owned.clone();
+                let global = global_bucket.clone();
+                let job = job_bucket.clone();
+                let pause = pause_requested.clone();
                 handles.push(scope.spawn(move || {
-                    let mut writer = OffsetWriter::new(part_ref, start)?;
-                    let result = http_ref.fetch(url_ref, Some(start..end), &mut writer)?;
-                    Ok(result.bytes_written)
+                    execute_segment_fetch(SegmentFetchParams {
+                        http: http_ref,
+                        url: url_ref,
+                        part_path: part_ref,
+                        range,
+                        global_bucket: global,
+                        job_bucket: job,
+                        pause_requested: pause,
+                    })
                 }));
             }
-            // Collect results, joining each thread
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap())
-                .collect()
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
 
         let mut bytes_written = 0u64;
@@ -946,7 +1016,8 @@ impl Core {
             bytes_written = bytes_written.saturating_add(result?);
         }
 
-        Ok((total_size, bytes_written))
+        let paused = pause_requested.load(Ordering::Acquire);
+        Ok((total_size, bytes_written, paused))
     }
 
     // -----------------------------------------------------------------------
@@ -962,85 +1033,5 @@ impl Core {
 impl Drop for Core {
     fn drop(&mut self) {
         let _ = self.flush_pending_progress();
-    }
-}
-
-/// Clip a segment range to the global bandwidth cap (prefix of the object).
-fn clip_range_to_cap(range: Range<u64>, cap: Option<u64>) -> Range<u64> {
-    match cap {
-        None => range,
-        Some(cap) if range.start >= cap => range.start..range.start,
-        Some(cap) => range.start..range.end.min(cap),
-    }
-}
-
-/// Writes to a fixed offset in an on-disk file.
-struct OffsetWriter {
-    file: std::fs::File,
-}
-
-impl OffsetWriter {
-    fn new(path: &Path, offset: u64) -> Result<Self, String> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .map_err(|e| format!("open {path:?} for offset write: {e}"))?;
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| format!("seek {path:?} to {offset}: {e}"))?;
-        Ok(Self { file })
-    }
-}
-
-impl Write for OffsetWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-/// Limits how many bytes may be written to an inner sink.
-struct CappedWriter<'a, W: Write> {
-    inner: &'a mut W,
-    remaining: Option<u64>,
-    written: u64,
-}
-
-impl<'a, W: Write> CappedWriter<'a, W> {
-    fn new(inner: &'a mut W, cap: Option<u64>) -> Self {
-        Self {
-            inner,
-            remaining: cap,
-            written: 0,
-        }
-    }
-
-    fn bytes_written(&self) -> u64 {
-        self.written
-    }
-}
-
-impl<W: Write> Write for CappedWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let allowed = match self.remaining {
-            Some(0) => return Ok(0),
-            Some(remaining) => buf.len().min(remaining as usize),
-            None => buf.len(),
-        };
-        if allowed == 0 {
-            return Ok(0);
-        }
-        let n = self.inner.write(&buf[..allowed])?;
-        self.written += n as u64;
-        if let Some(remaining) = self.remaining.as_mut() {
-            *remaining = remaining.saturating_sub(n as u64);
-        }
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
     }
 }
