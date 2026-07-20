@@ -2,9 +2,10 @@
 //!
 //! These tests use FakeYtDlpExtractor (no live subprocess) to verify
 //! JSON parsing, extractor key validation, and quality mapping.
+//! CI defaults to fixtures — never live Launch Site network.
 
 use download_core::{
-    ExtractorToolchain, FakeYtDlpExtractor,
+    Core, ExtractorToolchain, FakeYtDlpExtractor, ItemSelection, ProbeSelection,
 };
 
 const CANNED_YOUTUBE_JSON: &str = r#"{
@@ -22,6 +23,49 @@ const CANNED_YOUTUBE_JSON: &str = r#"{
     {"format_id":"140","format_note":"medium","ext":"m4a","tbr":130000.0,"vcodec":"none","acodec":"mp4a.40.2"},
     {"format_id":"247","format_note":"720p (60fps)","ext":"webm","height":720,"width":1280,"tbr":2000000.0,"vcodec":"vp9","acodec":"none","resolution":"1280x720","fps":60.0},
     {"format_id":"251","format_note":"medium","ext":"webm","tbr":160000.0,"vcodec":"none","acodec":"opus"}
+  ]
+}"#;
+
+const CANNED_YOUTUBE_PLAYLIST_JSON: &str = r#"{
+  "_type": "playlist",
+  "id": "PLabc123",
+  "title": "My Awesome Playlist",
+  "extractor": "youtube:playlist",
+  "extractor_key": "YoutubePlaylist",
+  "webpage_url": "https://www.youtube.com/playlist?list=PLabc123",
+  "original_url": "https://www.youtube.com/playlist?list=PLabc123",
+  "entries": [
+    {"_type":"url","id":"vidOne111","title":"First Playlist Video","url":"https://www.youtube.com/watch?v=vidOne111","ie_key":"Youtube"},
+    {"_type":"url","id":"vidTwo222","title":"Second Playlist Video","url":"https://www.youtube.com/watch?v=vidTwo222","ie_key":"Youtube"},
+    null
+  ]
+}"#;
+
+const CANNED_XHAMSTER_JSON: &str = r#"{
+  "id": "xh-video-12345",
+  "title": "Example xHamster Video",
+  "extractor": "xhamster",
+  "extractor_key": "XHamster",
+  "webpage_url": "https://xhamster.com/videos/example-xh-video-12345",
+  "original_url": "https://xhamster.com/videos/example-xh-video-12345",
+  "formats": [
+    {"format_id":"240p","format_note":"240p","ext":"mp4","height":240,"width":426,"tbr":300000.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"426x240"},
+    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1500000.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"1280x720"},
+    {"format_id":"hls-1080","format_note":"1080p","ext":"mp4","height":1080,"width":1920,"tbr":4000000.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"1920x1080"}
+  ]
+}"#;
+
+const CANNED_XHAMSTER_USER_JSON: &str = r#"{
+  "_type": "playlist",
+  "id": "example-creator",
+  "title": "example-creator",
+  "extractor": "xhamster:user",
+  "extractor_key": "XHamsterUser",
+  "webpage_url": "https://xhamster.com/creators/example-creator",
+  "original_url": "https://xhamster.com/creators/example-creator",
+  "entries": [
+    {"_type":"url","id":"xh-item-aaa","title":"Creator Video A","url":"https://xhamster.com/videos/creator-video-a-xh-item-aaa","ie_key":"XHamster"},
+    {"_type":"url","id":"xh-item-bbb","title":"Creator Video B","url":"https://xhamster.com/videos/creator-video-b-xh-item-bbb","ie_key":"XHamster"}
   ]
 }"#;
 
@@ -83,6 +127,63 @@ fn fake_ytdlp_extractor_qualities_include_resolutions() {
 }
 
 #[test]
+fn fake_ytdlp_extractor_probe_youtube_playlist_multi_item() {
+    let mut fake = FakeYtDlpExtractor::new();
+    fake.insert(
+        "https://www.youtube.com/playlist?list=PLabc123",
+        CANNED_YOUTUBE_PLAYLIST_JSON,
+    );
+
+    let result = fake
+        .probe("https://www.youtube.com/playlist?list=PLabc123")
+        .unwrap();
+
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(
+        result.source_name,
+        Some("My Awesome Playlist".to_string())
+    );
+    assert!(result
+        .items
+        .iter()
+        .all(|i| i.qualities.iter().any(|q| q.id == "best")));
+}
+
+#[test]
+fn fake_ytdlp_extractor_probe_xhamster_single_video() {
+    let mut fake = FakeYtDlpExtractor::new();
+    fake.insert(
+        "https://xhamster.com/videos/example-xh-video-12345",
+        CANNED_XHAMSTER_JSON,
+    );
+
+    let result = fake
+        .probe("https://xhamster.com/videos/example-xh-video-12345")
+        .unwrap();
+
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].id, "xh-xh-video-12345");
+    assert!(result.items[0].qualities.iter().any(|q| q.id == "720p"));
+    assert_eq!(result.source_name, None);
+}
+
+#[test]
+fn fake_ytdlp_extractor_probe_xhamster_user_multi_item() {
+    let mut fake = FakeYtDlpExtractor::new();
+    fake.insert(
+        "https://xhamster.com/creators/example-creator",
+        CANNED_XHAMSTER_USER_JSON,
+    );
+
+    let result = fake
+        .probe("https://xhamster.com/creators/example-creator")
+        .unwrap();
+
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(result.source_name, Some("example-creator".to_string()));
+}
+
+#[test]
 fn generic_extractor_hard_fails() {
     let mut fake = FakeYtDlpExtractor::new();
     fake.insert(
@@ -102,7 +203,9 @@ fn generic_extractor_hard_fails() {
 #[test]
 fn fake_extractor_fails_on_unknown_url() {
     let fake = FakeYtDlpExtractor::new();
-    let err = fake.probe("https://www.youtube.com/watch?v=unknown").unwrap_err();
+    let err = fake
+        .probe("https://www.youtube.com/watch?v=unknown")
+        .unwrap_err();
     assert!(err.contains("no canned response"), "got: {err}");
 }
 
@@ -110,7 +213,9 @@ fn fake_extractor_fails_on_unknown_url() {
 fn fake_extractor_fails_on_configured_failure() {
     let mut fake = FakeYtDlpExtractor::new();
     fake.insert_failure("https://www.youtube.com/watch?v=fail");
-    let err = fake.probe("https://www.youtube.com/watch?v=fail").unwrap_err();
+    let err = fake
+        .probe("https://www.youtube.com/watch?v=fail")
+        .unwrap_err();
     assert!(err.contains("process error"), "got: {err}");
 }
 
@@ -131,4 +236,107 @@ fn quality_ids_are_unique() {
     ids.sort();
     ids.dedup();
     assert_eq!(ids.len(), qualities.len(), "quality IDs must be unique");
+}
+
+/// Minimal HTTP backend for Probe-then-Confirm wiring tests (no live network).
+struct StubHttp;
+
+impl download_core::HttpBackend for StubHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        _range: Option<std::ops::Range<u64>>,
+    ) -> Result<(Vec<u8>, u64), String> {
+        let body = format!("body for {url}").into_bytes();
+        let len = body.len() as u64;
+        Ok((body, len))
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        Ok(format!("body for {url}").len() as u64)
+    }
+}
+
+/// Probe-then-Confirm: jobs are created only after confirm, never on probe alone.
+#[test]
+fn youtube_playlist_probe_then_confirm_creates_jobs_only_after_confirm() {
+    let mut fake = FakeYtDlpExtractor::new();
+    fake.insert(
+        "https://www.youtube.com/playlist?list=PLabc123",
+        CANNED_YOUTUBE_PLAYLIST_JSON,
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(StubHttp), Box::new(fake));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let probe = core
+        .probe("https://www.youtube.com/playlist?list=PLabc123")
+        .unwrap();
+    assert_eq!(probe.items.len(), 2);
+
+    // Drain probe events — no JobCompleted / transfers yet
+    while let Ok(ev) = rx.try_recv() {
+        assert!(
+            !matches!(ev, download_core::CoreEvent::JobCompleted { .. }),
+            "probe must not complete transfers"
+        );
+    }
+
+    let job_ids = core
+        .confirm_probe_selection(&ProbeSelection {
+            url: "https://www.youtube.com/playlist?list=PLabc123".to_string(),
+            items: vec![
+                ItemSelection {
+                    item_id: "yt-vidOne111".to_string(),
+                    quality_id: "best".to_string(),
+                },
+                ItemSelection {
+                    item_id: "yt-vidTwo222".to_string(),
+                    quality_id: "best".to_string(),
+                },
+            ],
+        })
+        .unwrap();
+    assert_eq!(job_ids.len(), 2, "confirm creates jobs; probe alone does not");
+}
+
+#[test]
+fn xhamster_single_probe_then_confirm_creates_job_only_after_confirm() {
+    let mut fake = FakeYtDlpExtractor::new();
+    fake.insert(
+        "https://xhamster.com/videos/example-xh-video-12345",
+        CANNED_XHAMSTER_JSON,
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(StubHttp), Box::new(fake));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let probe = core
+        .probe("https://xhamster.com/videos/example-xh-video-12345")
+        .unwrap();
+    assert_eq!(probe.items.len(), 1);
+
+    while let Ok(ev) = rx.try_recv() {
+        assert!(
+            !matches!(ev, download_core::CoreEvent::JobCompleted { .. }),
+            "probe must not complete transfers"
+        );
+    }
+
+    let job_ids = core
+        .confirm_probe_selection(&ProbeSelection {
+            url: "https://xhamster.com/videos/example-xh-video-12345".to_string(),
+            items: vec![ItemSelection {
+                item_id: "xh-xh-video-12345".to_string(),
+                quality_id: "720p".to_string(),
+            }],
+        })
+        .unwrap();
+    assert_eq!(job_ids.len(), 1);
 }

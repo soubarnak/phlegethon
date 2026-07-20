@@ -5,10 +5,15 @@
 //! dedicated extractor cannot resolve a URL (falls through to `generic`),
 //! the probe returns an error instead of silently reporting success.
 //!
+//! Supports single-video and multi-item (`_type: "playlist"`) probes for
+//! YouTube (playlist / channel / user tabs) and xHamster (video + user/creator
+//! lists) where the upstream extractor provides them.
+//!
 //! ## CI / fixture path
 //!
 //! The existing [`FakeExtractorToolchain`](crate::FakeExtractorToolchain) in
 //! `extractor.rs` serves as the deterministic test seam — no live network.
+//! [`FakeYtDlpExtractor`] returns canned yt-dlp JSON through the same parser.
 //! This module's unit tests use canned JSON strings.
 
 use crate::extractor::{ExtractorToolchain, MediaItem, ProbeResult, Quality};
@@ -65,12 +70,14 @@ impl Default for YtDlpConfig {
 ///
 /// ## Probe flow
 ///
-/// 1. Runs `yt-dlp -J --flat --no-warnings <url>`.
-/// 2. Parses the JSON output.
+/// 1. Runs `yt-dlp -J --flat-playlist --no-warnings <url>`.
+/// 2. Parses the JSON output (single video **or** playlist with `entries`).
 /// 3. Validates that the resolved extractor is the **dedicated** one for
-///    the Launch Site (e.g. `Youtube` for youtube.com).  If the extractor
+///    the Launch Site (e.g. `Youtube` / `YoutubePlaylist` for youtube.com,
+///    `XHamster` / `XHamsterUser` for xhamster).  If the extractor
 ///    is `Generic` or mismatched, the probe **hard-fails**.
-/// 4. Maps formats → [`Quality`] list and produces a [`ProbeResult`].
+/// 4. Maps formats → [`Quality`] list (or default `best` for flat entries)
+///    and produces a [`ProbeResult`].
 ///
 /// ## Hard-fail policy
 ///
@@ -174,10 +181,13 @@ impl YtDlpExtractorToolchain {
     fn run_probe(&self, url: &str) -> Result<String, String> {
         let mut cmd = Command::new(&self.config.binary_path);
 
-        // Suppress progress/stderr noise; output JSON for the single video
+        // Suppress progress/stderr noise; dump JSON.  `--flat-playlist`
+        // lists playlist/channel/user entries without fully extracting each
+        // video (Probe-then-Confirm lists items first; qualities per entry
+        // default to "best" until a dedicated per-item probe exists).
         cmd.arg("-J")
             .arg("--no-warnings")
-            .arg("--flat")
+            .arg("--flat-playlist")
             .arg(url);
 
         // Add ffmpeg dir to PATH if configured
@@ -227,19 +237,25 @@ impl YtDlpExtractorToolchain {
         // Validate extractor key
         self.validate_extractor(url, &info.extractor_key)?;
 
+        let is_playlist = info
+            .type_
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("playlist"))
+            || info.entries.is_some();
+
+        if is_playlist {
+            return self.parse_playlist_probe(&info, url);
+        }
+
         // Determine source name (None for single-video probes)
-        let source_name = if info.playlist_title.is_some() {
-            info.playlist_title.clone()
-        } else {
-            None
-        };
+        let source_name = info.playlist_title.clone();
 
         // Map formats → qualities
         let qualities = self.formats_to_qualities(&info.formats.unwrap_or_default());
 
-        // Create a single MediaItem for this video
+        let prefix = item_id_prefix(&info.extractor_key);
         let item = MediaItem {
-            id: format!("yt-{}", info.id),
+            id: format!("{prefix}-{}", info.id),
             title: info.title.clone(),
             url: info.original_url.unwrap_or_else(|| url.to_string()),
             qualities,
@@ -248,6 +264,70 @@ impl YtDlpExtractorToolchain {
         Ok(ProbeResult {
             url: url.to_string(),
             items: vec![item],
+            source_name,
+        })
+    }
+
+    /// Parse a multi-item playlist / channel / user probe result.
+    fn parse_playlist_probe(
+        &self,
+        info: &YtDlpVideoInfo,
+        url: &str,
+    ) -> Result<ProbeResult, String> {
+        let source_name = {
+            let from_title = info.title.trim();
+            if !from_title.is_empty() {
+                Some(from_title.to_string())
+            } else {
+                info.playlist_title.clone()
+            }
+        };
+
+        let prefix = item_id_prefix(&info.extractor_key);
+        let mut items = Vec::new();
+
+        for entry in info.entries.iter().flatten().flatten() {
+            let Some(id) = entry.id.as_deref().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let title = entry
+                .title
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(id)
+                .to_string();
+            let Some(item_url) = entry
+                .url
+                .clone()
+                .or_else(|| entry.webpage_url.clone())
+                .or_else(|| entry.original_url.clone())
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+
+            let qualities = match &entry.formats {
+                Some(formats) if !formats.is_empty() => self.formats_to_qualities(formats),
+                _ => default_flat_qualities(),
+            };
+
+            items.push(MediaItem {
+                id: format!("{prefix}-{id}"),
+                title,
+                url: item_url,
+                qualities,
+            });
+        }
+
+        if items.is_empty() {
+            return Err(format!(
+                "playlist probe for '{url}' returned no usable entries"
+            ));
+        }
+
+        Ok(ProbeResult {
+            url: url.to_string(),
+            items,
             source_name,
         })
     }
@@ -372,23 +452,32 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
 // ---------------------------------------------------------------------------
 
 /// Top-level yt-dlp JSON output for `-J` / `--dump-single-json`.
+///
+/// Covers both single-video and playlist (`_type: "playlist"`) responses.
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 struct YtDlpVideoInfo {
-    /// YouTube video ID (or site-specific ID).
+    /// YouTube video ID (or site-specific ID / playlist id).
     id: String,
-    /// Video title.
+    /// Video title or playlist/channel title.
+    #[serde(default)]
     title: String,
     /// Short extractor name (e.g. "youtube").
     #[serde(default)]
     extractor: String,
-    /// Capitalised extractor key (e.g. "Youtube").
+    /// Capitalised extractor key (e.g. "Youtube", "YoutubePlaylist").
     #[serde(default)]
     extractor_key: String,
-    /// Available formats (may be absent for some extractors).
+    /// yt-dlp result type: `"video"`, `"playlist"`, `"url"`, etc.
+    #[serde(default, rename = "_type")]
+    type_: Option<String>,
+    /// Available formats (may be absent for flat playlist entries).
     #[serde(default)]
     formats: Option<Vec<YtDlpFormat>>,
+    /// Playlist / channel / user entries (null slots = deleted / private).
+    #[serde(default)]
+    entries: Option<Vec<Option<YtDlpEntry>>>,
     /// The webpage URL.
     #[serde(default)]
     webpage_url: String,
@@ -416,6 +505,48 @@ struct YtDlpVideoInfo {
     /// Uploader name.
     #[serde(default)]
     uploader: Option<String>,
+}
+
+/// A single entry inside a yt-dlp playlist JSON (`entries` array).
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+struct YtDlpEntry {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    webpage_url: Option<String>,
+    #[serde(default)]
+    original_url: Option<String>,
+    #[serde(default)]
+    formats: Option<Vec<YtDlpFormat>>,
+    #[serde(default)]
+    ie_key: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+}
+
+/// Stable MediaItem id prefix for a Launch Site extractor family.
+fn item_id_prefix(extractor_key: &str) -> &'static str {
+    if extractor_key.starts_with("XHamster") {
+        "xh"
+    } else if extractor_key.starts_with("Youtube") {
+        "yt"
+    } else {
+        "item"
+    }
+}
+
+/// Default quality list for flat playlist entries (no formats yet).
+fn default_flat_qualities() -> Vec<Quality> {
+    vec![Quality {
+        id: "best".to_string(),
+        label: "Best available".to_string(),
+    }]
 }
 
 /// A single format entry from yt-dlp's format list.
@@ -642,6 +773,174 @@ pub(crate) fn canned_youtube_playlist_item_json() -> &'static str {
       "filesize": 6000000,
       "fps": 30.0,
       "audio_channels": 2
+    }
+  ]
+}"#
+}
+
+/// Canned yt-dlp `-J --flat-playlist` output for a YouTube playlist URL.
+#[cfg(test)]
+pub(crate) fn canned_youtube_playlist_json() -> &'static str {
+    r#"{
+  "_type": "playlist",
+  "id": "PLabc123",
+  "title": "My Awesome Playlist",
+  "extractor": "youtube:playlist",
+  "extractor_key": "YoutubePlaylist",
+  "webpage_url": "https://www.youtube.com/playlist?list=PLabc123",
+  "original_url": "https://www.youtube.com/playlist?list=PLabc123",
+  "entries": [
+    {
+      "_type": "url",
+      "id": "vidOne111",
+      "title": "First Playlist Video",
+      "url": "https://www.youtube.com/watch?v=vidOne111",
+      "ie_key": "Youtube",
+      "duration": 120.0
+    },
+    {
+      "_type": "url",
+      "id": "vidTwo222",
+      "title": "Second Playlist Video",
+      "url": "https://www.youtube.com/watch?v=vidTwo222",
+      "ie_key": "Youtube",
+      "duration": 200.0
+    },
+    null
+  ]
+}"#
+}
+
+/// Canned yt-dlp output for a YouTube channel tab (multi-item).
+#[cfg(test)]
+pub(crate) fn canned_youtube_channel_json() -> &'static str {
+    r#"{
+  "_type": "playlist",
+  "id": "UCchannel123",
+  "title": "Example Channel",
+  "extractor": "youtube:tab",
+  "extractor_key": "YoutubeTab",
+  "webpage_url": "https://www.youtube.com/@ExampleChannel/videos",
+  "original_url": "https://www.youtube.com/@ExampleChannel/videos",
+  "entries": [
+    {
+      "_type": "url",
+      "id": "chanVid001",
+      "title": "Channel Upload One",
+      "url": "https://www.youtube.com/watch?v=chanVid001",
+      "ie_key": "Youtube"
+    },
+    {
+      "_type": "url",
+      "id": "chanVid002",
+      "title": "Channel Upload Two",
+      "url": "https://www.youtube.com/watch?v=chanVid002",
+      "ie_key": "Youtube"
+    }
+  ]
+}"#
+}
+
+/// Canned yt-dlp output for a YouTube user URL (multi-item).
+#[cfg(test)]
+pub(crate) fn canned_youtube_user_json() -> &'static str {
+    r#"{
+  "_type": "playlist",
+  "id": "UCUserUploads",
+  "title": "ExampleUser",
+  "extractor": "youtube:tab",
+  "extractor_key": "YoutubeTab",
+  "webpage_url": "https://www.youtube.com/user/ExampleUser",
+  "original_url": "https://www.youtube.com/user/ExampleUser",
+  "entries": [
+    {
+      "_type": "url",
+      "id": "userVid001",
+      "title": "User Video One",
+      "url": "https://www.youtube.com/watch?v=userVid001",
+      "ie_key": "Youtube"
+    }
+  ]
+}"#
+}
+
+/// Canned yt-dlp JSON for an xHamster single video with qualities.
+#[cfg(test)]
+pub(crate) fn canned_xhamster_probe_json() -> &'static str {
+    r#"{
+  "id": "xh-video-12345",
+  "title": "Example xHamster Video",
+  "extractor": "xhamster",
+  "extractor_key": "XHamster",
+  "webpage_url": "https://xhamster.com/videos/example-xh-video-12345",
+  "original_url": "https://xhamster.com/videos/example-xh-video-12345",
+  "duration": 600.0,
+  "formats": [
+    {
+      "format_id": "240p",
+      "format_note": "240p",
+      "ext": "mp4",
+      "height": 240,
+      "width": 426,
+      "tbr": 300000.0,
+      "vcodec": "avc1",
+      "acodec": "mp4a.40.2",
+      "resolution": "426x240",
+      "url": "https://cdn.xh.example/video_240.mp4"
+    },
+    {
+      "format_id": "720p",
+      "format_note": "720p",
+      "ext": "mp4",
+      "height": 720,
+      "width": 1280,
+      "tbr": 1500000.0,
+      "vcodec": "avc1",
+      "acodec": "mp4a.40.2",
+      "resolution": "1280x720",
+      "url": "https://cdn.xh.example/video_720.mp4"
+    },
+    {
+      "format_id": "hls-1080",
+      "format_note": "1080p",
+      "ext": "mp4",
+      "height": 1080,
+      "width": 1920,
+      "tbr": 4000000.0,
+      "vcodec": "avc1",
+      "acodec": "mp4a.40.2",
+      "resolution": "1920x1080",
+      "url": "https://cdn.xh.example/hls/1080.m3u8"
+    }
+  ]
+}"#
+}
+
+/// Canned yt-dlp flat playlist for an xHamster user/creator list.
+#[cfg(test)]
+pub(crate) fn canned_xhamster_user_json() -> &'static str {
+    r#"{
+  "_type": "playlist",
+  "id": "example-creator",
+  "title": "example-creator",
+  "extractor": "xhamster:user",
+  "extractor_key": "XHamsterUser",
+  "webpage_url": "https://xhamster.com/creators/example-creator",
+  "original_url": "https://xhamster.com/creators/example-creator",
+  "entries": [
+    {
+      "_type": "url",
+      "id": "xh-item-aaa",
+      "title": "Creator Video A",
+      "url": "https://xhamster.com/videos/creator-video-a-xh-item-aaa",
+      "ie_key": "XHamster"
+    },
+    {
+      "_type": "url",
+      "id": "xh-item-bbb",
+      "title": "Creator Video B",
+      "url": "https://xhamster.com/videos/creator-video-b-xh-item-bbb",
+      "ie_key": "XHamster"
     }
   ]
 }"#
@@ -949,6 +1248,148 @@ mod tests {
             result.source_name,
             Some("My Awesome Playlist".to_string())
         );
+    }
+
+    // ---- YouTube multi-item (playlist / channel / user) ----
+
+    #[test]
+    fn parse_youtube_playlist_returns_multi_item_probe() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_youtube_playlist_json(),
+                "https://www.youtube.com/playlist?list=PLabc123",
+            )
+            .unwrap();
+
+        assert_eq!(result.items.len(), 2, "null entries must be skipped");
+        assert_eq!(
+            result.source_name,
+            Some("My Awesome Playlist".to_string())
+        );
+        assert_eq!(result.items[0].id, "yt-vidOne111");
+        assert_eq!(result.items[0].title, "First Playlist Video");
+        assert_eq!(
+            result.items[0].url,
+            "https://www.youtube.com/watch?v=vidOne111"
+        );
+        assert_eq!(result.items[1].id, "yt-vidTwo222");
+        // Flat playlist entries expose a selectable default quality
+        assert!(
+            result.items[0]
+                .qualities
+                .iter()
+                .any(|q| q.id == "best"),
+            "flat entries need a default quality, got: {:?}",
+            result.items[0].qualities
+        );
+    }
+
+    #[test]
+    fn parse_youtube_channel_returns_multi_item_probe() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_youtube_channel_json(),
+                "https://www.youtube.com/@ExampleChannel/videos",
+            )
+            .unwrap();
+
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.source_name, Some("Example Channel".to_string()));
+        assert_eq!(result.items[0].title, "Channel Upload One");
+        assert_eq!(result.items[1].title, "Channel Upload Two");
+    }
+
+    #[test]
+    fn parse_youtube_user_returns_multi_item_probe() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_youtube_user_json(),
+                "https://www.youtube.com/user/ExampleUser",
+            )
+            .unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.source_name, Some("ExampleUser".to_string()));
+        assert_eq!(result.items[0].id, "yt-userVid001");
+    }
+
+    #[test]
+    fn validate_youtube_tab_extractor_passes() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        assert!(extractor
+            .validate_extractor(
+                "https://www.youtube.com/@ExampleChannel/videos",
+                "YoutubeTab",
+            )
+            .is_ok());
+    }
+
+    // ---- xHamster ----
+
+    #[test]
+    fn parse_xhamster_single_video_returns_items_and_qualities() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_xhamster_probe_json(),
+                "https://xhamster.com/videos/example-xh-video-12345",
+            )
+            .unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.source_name, None);
+        assert_eq!(result.items[0].id, "xh-xh-video-12345");
+        assert_eq!(result.items[0].title, "Example xHamster Video");
+        let qualities = &result.items[0].qualities;
+        assert!(
+            qualities.iter().any(|q| q.id == "240p"),
+            "expected 240p, got: {qualities:?}"
+        );
+        assert!(
+            qualities.iter().any(|q| q.id == "720p"),
+            "expected 720p, got: {qualities:?}"
+        );
+        assert!(
+            qualities.iter().any(|q| q.id == "1080p"),
+            "expected 1080p, got: {qualities:?}"
+        );
+    }
+
+    #[test]
+    fn parse_xhamster_user_list_returns_multi_item_probe() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_xhamster_user_json(),
+                "https://xhamster.com/creators/example-creator",
+            )
+            .unwrap();
+
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.source_name, Some("example-creator".to_string()));
+        assert_eq!(result.items[0].id, "xh-xh-item-aaa");
+        assert_eq!(result.items[1].title, "Creator Video B");
+        assert!(
+            result.items[0]
+                .qualities
+                .iter()
+                .any(|q| q.id == "best"),
+            "flat user entries need default quality"
+        );
+    }
+
+    #[test]
+    fn validate_xhamster_user_extractor_passes() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        assert!(extractor
+            .validate_extractor(
+                "https://xhamster.com/creators/example-creator",
+                "XHamsterUser",
+            )
+            .is_ok());
     }
 
     #[test]
