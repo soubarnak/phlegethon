@@ -1,20 +1,35 @@
 //! HTTP backend trait — primary test seam for the Core.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::ops::Range;
+
+/// Metadata returned after a successful HTTP fetch into a sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchResult {
+    /// Total content length reported by the server (full object size when known).
+    pub total_length: u64,
+    /// Bytes written to the sink during this fetch call.
+    pub bytes_written: u64,
+}
 
 /// An HTTP backend that the Download Core uses to fetch remote content.
 ///
 /// In production this wraps a real HTTP client.  In tests a fake impl
 /// returns canned data (no live network).
 pub trait HttpBackend: Send + Sync {
-    /// Fetch (partial) content from `url`.
+    /// Fetch (partial) content from `url`, streaming the body into `sink`.
     ///
     /// `range` — optional byte range `start..end`.  When `end` is `u64::MAX`
     /// it means "to the end of the file".
     ///
-    /// Returns `(bytes, total_length)` on success.
-    fn fetch(&self, url: &str, range: Option<Range<u64>>) -> Result<(Vec<u8>, u64), String>;
+    /// On success returns how many bytes were written and the total object
+    /// length when the server reports it.
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String>;
 
     /// Check whether the server at `url` supports byte-range requests.
     ///
@@ -27,6 +42,17 @@ pub trait HttpBackend: Send + Sync {
     /// In production this sends a HEAD request and reads `Content-Length`.
     /// In tests it returns the length of canned data.
     fn file_size(&self, url: &str) -> Result<u64, String>;
+}
+
+/// Collect a fetch into memory. Used by segmented transfer for per-range bodies.
+pub(crate) fn fetch_into_vec(
+    backend: &dyn HttpBackend,
+    url: &str,
+    range: Option<Range<u64>>,
+) -> Result<(Vec<u8>, u64), String> {
+    let mut buf = Vec::new();
+    let meta = backend.fetch(url, range, &mut buf)?;
+    Ok((buf, meta.total_length))
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +90,8 @@ impl HttpBackend for ProdHttpBackend {
         &self,
         url: &str,
         range: Option<Range<u64>>,
-    ) -> Result<(Vec<u8>, u64), String> {
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
         let mut req = self.client.get(url);
         if let Some(r) = range {
             let header_val = format!("bytes={}-{}", r.start, r.end.saturating_sub(1));
@@ -74,19 +101,41 @@ impl HttpBackend for ProdHttpBackend {
             .call()
             .map_err(|e| format!("GET {url}: {e}"))?;
 
-        // Read Content-Length for total size
         let total: u64 = resp
             .header("Content-Length")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
-        // Read body
-        let mut body: Vec<u8> = Vec::new();
-        resp.into_reader()
-            .read_to_end(&mut body)
-            .map_err(|e| format!("read body {url}: {e}"))?;
+        let mut reader = resp.into_reader();
+        let mut written = 0u64;
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("read body {url}: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            let mut chunk_written = 0;
+            while chunk_written < n {
+                let w = sink
+                    .write(&buf[chunk_written..n])
+                    .map_err(|e| format!("write sink {url}: {e}"))?;
+                if w == 0 {
+                    break;
+                }
+                chunk_written += w;
+                written += w as u64;
+            }
+            if chunk_written < n {
+                break;
+            }
+        }
 
-        Ok((body, total))
+        Ok(FetchResult {
+            total_length: total,
+            bytes_written: written,
+        })
     }
 
     fn supports_range(&self, url: &str) -> Result<bool, String> {

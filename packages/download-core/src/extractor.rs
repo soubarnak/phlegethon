@@ -164,6 +164,32 @@ impl ExtractorToolchain for FakeExtractorToolchain {
             source_name: response.source_name.clone(),
         })
     }
+
+    fn download(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf, String> {
+        std::fs::create_dir_all(dest_dir)
+            .map_err(|e| format!("create extractor dest {dest_dir:?}: {e}"))?;
+
+        let filename = url::Url::parse(url)
+            .ok()
+            .and_then(|u| {
+                u.path_segments()
+                    .and_then(|mut s| s.next_back())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "download".to_string());
+
+        let path = dest_dir.join(&filename);
+        let body = format!("fake extractor download:{url}:{format}");
+        std::fs::write(&path, body.as_bytes())
+            .map_err(|e| format!("write extractor output {path:?}: {e}"))?;
+        Ok(path)
+    }
 }
 
 // ---------------------------------------------------------------------------

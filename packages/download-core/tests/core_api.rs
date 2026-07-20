@@ -5,8 +5,30 @@
 //! issue #14 is covered here.
 
 use download_core::*;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
+
+fn write_fetch_to_sink(
+    sink: &mut dyn Write,
+    data: &[u8],
+    total: u64,
+) -> Result<FetchResult, String> {
+    let mut written = 0usize;
+    while written < data.len() {
+        let n = sink
+            .write(&data[written..])
+            .map_err(|e| format!("sink write: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        written += n;
+    }
+    Ok(FetchResult {
+        total_length: total,
+        bytes_written: written as u64,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -55,7 +77,8 @@ impl HttpBackend for FakeHttp {
         &self,
         url: &str,
         range: Option<std::ops::Range<u64>>,
-    ) -> Result<(Vec<u8>, u64), String> {
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
         let responses = self.responses.lock().unwrap();
         let full_body = responses
             .get(url)
@@ -66,12 +89,12 @@ impl HttpBackend for FakeHttp {
             Some(r) => {
                 let start = r.start.min(total);
                 let end = r.end.min(total).max(start);
-                full_body[start as usize..end as usize].to_vec()
+                &full_body[start as usize..end as usize]
             }
-            None => full_body.clone(),
+            None => full_body.as_slice(),
         };
 
-        Ok((data, total))
+        write_fetch_to_sink(sink, data, total)
     }
 
     fn supports_range(&self, _url: &str) -> Result<bool, String> {
@@ -107,7 +130,8 @@ impl HttpBackend for FailingHttp {
         &self,
         url: &str,
         _range: Option<std::ops::Range<u64>>,
-    ) -> Result<(Vec<u8>, u64), String> {
+        _sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
         Err(format!("simulated failure for {url}"))
     }
 
@@ -216,6 +240,88 @@ fn enqueue_direct_job_writes_bytes_to_disk() {
         .iter()
         .any(|e| matches!(e, CoreEvent::JobProgress { .. }));
     assert!(has_progress, "should emit JobProgress event");
+}
+
+/// HTTP fake that forces the single-connection path (no Range support).
+#[derive(Clone)]
+struct NoRangeFakeHttp(FakeHttp);
+
+impl HttpBackend for NoRangeFakeHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        self.0.fetch(url, range, sink)
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        self.0.file_size(url)
+    }
+}
+
+#[test]
+fn single_connection_enqueue_writes_matching_bytes_via_part_file() {
+    let expected = b"hello world this is a test file";
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let result = core.enqueue("https://example.com/file.zip").unwrap();
+    let (job_id, destination) = match result {
+        EnqueueOutcome::EnqueueDirect { job_id, destination } => (job_id, destination),
+        _ => panic!("expected enqueue_direct"),
+    };
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    let final_path = destination.join("file.zip");
+    assert!(final_path.exists(), "final file should exist after rename");
+    assert!(
+        !destination.join("file.zip.part").exists(),
+        "partial file should be renamed away on success"
+    );
+
+    let on_disk = std::fs::read(&final_path).unwrap();
+    assert_eq!(on_disk, expected, "on-disk bytes should match source");
+
+    let progress_bytes = events.iter().rev().find_map(|e| match e {
+        CoreEvent::JobProgress {
+            bytes_downloaded,
+            total_bytes: Some(total),
+            ..
+        } => Some((*bytes_downloaded, *total)),
+        _ => None,
+    });
+    assert!(
+        progress_bytes.is_some(),
+        "should emit progress with total bytes"
+    );
+    let (downloaded, total) = progress_bytes.unwrap();
+    assert_eq!(downloaded, expected.len() as u64);
+    assert_eq!(total, expected.len() as u64);
+    assert_eq!(
+        downloaded,
+        on_disk.len() as u64,
+        "progress bytes should match on-disk size"
+    );
+
+    let completed_path = events.iter().find_map(|e| match e {
+        CoreEvent::JobCompleted { path, .. } => Some(path.clone()),
+        _ => None,
+    });
+    assert_eq!(completed_path, Some(final_path));
+
+    // Sanity: job destination is under library root
+    assert!(destination.starts_with(root.join("jobs")));
+    let _ = job_id;
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +580,8 @@ impl HttpBackend for StagedFakeHttp {
         &self,
         url: &str,
         range: Option<std::ops::Range<u64>>,
-    ) -> Result<(Vec<u8>, u64), String> {
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
         let (full_body, total) = {
             let responses = self.responses.lock().unwrap();
             let body = responses
@@ -489,16 +596,16 @@ impl HttpBackend for StagedFakeHttp {
             None => {
                 // First call: return only a portion (simulate interrupt)
                 let chunk_size = (total / 2).max(1);
-                let chunk = full_body[..chunk_size as usize].to_vec();
+                let chunk = &full_body[..chunk_size as usize];
                 sent.insert(url.to_string(), chunk_size);
-                Ok((chunk, total))
+                write_fetch_to_sink(sink, chunk, total)
             }
             Some(r) => {
                 let start = r.start.min(total);
                 let end = r.end.min(total).max(start);
-                let remaining = full_body[start as usize..end as usize].to_vec();
+                let remaining = &full_body[start as usize..end as usize];
                 sent.insert(url.to_string(), total);
-                Ok((remaining, total))
+                write_fetch_to_sink(sink, remaining, total)
             }
         }
     }
@@ -1889,7 +1996,8 @@ impl HttpBackend for TrackedFakeHttp {
         &self,
         url: &str,
         range: Option<std::ops::Range<u64>>,
-    ) -> Result<(Vec<u8>, u64), String> {
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
         let mut calls = self.calls.lock().unwrap();
         calls.push((url.to_string(), range.clone()));
 
@@ -1903,12 +2011,12 @@ impl HttpBackend for TrackedFakeHttp {
             Some(r) => {
                 let start = r.start.min(total);
                 let end = r.end.min(total).max(start);
-                full_body[start as usize..end as usize].to_vec()
+                &full_body[start as usize..end as usize]
             }
-            None => full_body.clone(),
+            None => full_body.as_slice(),
         };
 
-        Ok((data, total))
+        write_fetch_to_sink(sink, data, total)
     }
 
     fn supports_range(&self, _url: &str) -> Result<bool, String> {
@@ -2225,7 +2333,8 @@ impl HttpBackend for FailoverFakeHttp {
         &self,
         url: &str,
         range: Option<std::ops::Range<u64>>,
-    ) -> Result<(Vec<u8>, u64), String> {
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
         // Check if this URL should fail
         {
             let failing = self.failing_urls.lock().unwrap();
@@ -2244,12 +2353,12 @@ impl HttpBackend for FailoverFakeHttp {
             Some(r) => {
                 let start = r.start.min(total);
                 let end = r.end.min(total).max(start);
-                full_body[start as usize..end as usize].to_vec()
+                &full_body[start as usize..end as usize]
             }
-            None => full_body.clone(),
+            None => full_body.as_slice(),
         };
 
-        Ok((data, total))
+        write_fetch_to_sink(sink, data, total)
     }
 
     fn supports_range(&self, _url: &str) -> Result<bool, String> {
@@ -2644,7 +2753,8 @@ impl HttpBackend for UnfailFakeHttp {
         &self,
         url: &str,
         range: Option<std::ops::Range<u64>>,
-    ) -> Result<(Vec<u8>, u64), String> {
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
         // Check if this URL should fail some number of times
         {
             let mut remaining = self.failures_remaining.lock().unwrap();
@@ -2666,12 +2776,12 @@ impl HttpBackend for UnfailFakeHttp {
             Some(r) => {
                 let start = r.start.min(total);
                 let end = r.end.min(total).max(start);
-                full_body[start as usize..end as usize].to_vec()
+                &full_body[start as usize..end as usize]
             }
-            None => full_body.clone(),
+            None => full_body.as_slice(),
         };
 
-        Ok((data, total))
+        write_fetch_to_sink(sink, data, total)
     }
 
     fn supports_range(&self, _url: &str) -> Result<bool, String> {
@@ -2829,7 +2939,8 @@ fn mirror_failover_in_segmented_transfer() {
             &self,
             url: &str,
             range: Option<std::ops::Range<u64>>,
-        ) -> Result<(Vec<u8>, u64), String> {
+            sink: &mut dyn Write,
+        ) -> Result<FetchResult, String> {
             {
                 let failing = self.failing_urls.lock().unwrap();
                 if failing.contains(url) {
@@ -2845,11 +2956,11 @@ fn mirror_failover_in_segmented_transfer() {
                 Some(r) => {
                     let start = r.start.min(total);
                     let end = r.end.min(total).max(start);
-                    full_body[start as usize..end as usize].to_vec()
+                    &full_body[start as usize..end as usize]
                 }
-                None => full_body.clone(),
+                None => full_body.as_slice(),
             };
-            Ok((data, total))
+            write_fetch_to_sink(sink, data, total)
         }
 
         fn supports_range(&self, _url: &str) -> Result<bool, String> {
