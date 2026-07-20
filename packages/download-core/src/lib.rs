@@ -23,6 +23,9 @@ pub struct Core {
     library_root: Option<PathBuf>,
     jobs: Vec<job::Job>,
     event_tx: crossbeam_channel::Sender<CoreEvent>,
+    /// Global bandwidth cap in bytes per process_pending call.
+    /// None = globally uncapped.
+    bandwidth_cap: Option<u64>,
 }
 
 impl Core {
@@ -37,6 +40,7 @@ impl Core {
             library_root: None,
             jobs: Vec::new(),
             event_tx: tx,
+            bandwidth_cap: None,
         };
         (core, rx)
     }
@@ -176,6 +180,64 @@ impl Core {
     }
 
     // -----------------------------------------------------------------------
+    // Bandwidth cap
+    // -----------------------------------------------------------------------
+
+    /// Set the global bandwidth cap in bytes per `process_pending` call.
+    ///
+    /// When set, the total bytes transferred across ALL jobs in a single
+    /// `process_pending` call will not exceed this value.
+    /// None/unset = globally uncapped.
+    pub fn set_global_bandwidth_cap(&mut self, cap: u64) {
+        self.bandwidth_cap = Some(cap);
+    }
+
+    /// Remove the global bandwidth cap (restore uncapped default).
+    pub fn remove_global_bandwidth_cap(&mut self) {
+        self.bandwidth_cap = None;
+    }
+
+    /// Return the current global bandwidth cap, if set.
+    pub fn global_bandwidth_cap(&self) -> Option<u64> {
+        self.bandwidth_cap
+    }
+
+    /// Set a per-job bandwidth cap in bytes per `process_pending` call.
+    ///
+    /// This job will not transfer more than `cap` bytes in a single
+    /// `process_pending` call, regardless of global cap status.
+    pub fn set_job_bandwidth_cap(&mut self, job_id: &str, cap: u64) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        job.set_bandwidth_cap(cap);
+        Ok(())
+    }
+
+    /// Remove the per-job bandwidth cap for the given job.
+    pub fn remove_job_bandwidth_cap(&mut self, job_id: &str) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        job.remove_bandwidth_cap();
+        Ok(())
+    }
+
+    /// Return the per-job bandwidth cap for the given job, if set.
+    pub fn job_bandwidth_cap(&self, job_id: &str) -> Result<Option<u64>, String> {
+        let job = self
+            .jobs
+            .iter()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        Ok(job.bandwidth_cap())
+    }
+
+    // -----------------------------------------------------------------------
     // Processing
     // -----------------------------------------------------------------------
 
@@ -201,15 +263,33 @@ impl Core {
             .map(|(i, _)| i)
             .collect();
 
+        // Track remaining global budget for this call
+        let mut global_remaining = self.bandwidth_cap;
+
         for i in indices {
-            let (job_id, url, dest, bytes_received) = {
+            // Exhausted global cap — skip remaining jobs
+            if global_remaining == Some(0) {
+                break;
+            }
+
+            let (job_id, url, dest, bytes_received, job_cap) = {
                 let job = &self.jobs[i];
                 (
                     job.id().to_string(),
                     job.url().to_string(),
                     job.destination().to_path_buf(),
                     job.bytes_received(),
+                    job.bandwidth_cap(),
                 )
+            };
+
+            // Effective cap = min(global_remaining, per-job cap)
+            // None = uncapped for that axis
+            let effective_cap: Option<u64> = match (global_remaining, job_cap) {
+                (Some(g), Some(j)) => Some(g.min(j)),
+                (Some(g), None) => Some(g),
+                (None, Some(j)) => Some(j),
+                (None, None) => None,
             };
 
             // Build optional Range header if we have partial data
@@ -229,7 +309,7 @@ impl Core {
                 .map_err(|_| "event channel closed".to_string())?;
 
             // Fetch from HTTP backend (with Range if resuming)
-            let (data, total) = match self.http.fetch(&url, range) {
+            let (mut data, total) = match self.http.fetch(&url, range) {
                 Ok(result) => result,
                 Err(err) => {
                     // Mark job as failed and emit event
@@ -244,6 +324,21 @@ impl Core {
                         .map_err(|_| "event channel closed".to_string())?;
                     continue;
                 }
+            };
+
+            // Apply bandwidth cap: truncate data if it exceeds the effective cap
+            let bytes_this_call = if let Some(cap) = effective_cap {
+                let cap_usize = cap as usize;
+                if data.len() > cap_usize {
+                    data.truncate(cap_usize);
+                }
+                let actual = data.len() as u64;
+                if let Some(ref mut remaining) = global_remaining {
+                    *remaining = remaining.saturating_sub(actual);
+                }
+                actual
+            } else {
+                data.len() as u64
             };
 
             // Write to disk
@@ -292,9 +387,9 @@ impl Core {
             }
 
             // Update bytes_received with what we just wrote
-            let new_bytes = bytes_received + data.len() as u64;
+            let new_bytes = bytes_received + bytes_this_call;
             if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
-                job.add_bytes_received(data.len() as u64);
+                job.add_bytes_received(bytes_this_call);
             }
 
             // Emit progress with cumulative total

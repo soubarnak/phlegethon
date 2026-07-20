@@ -37,6 +37,9 @@ pub struct Job {
     /// Number of bytes successfully written to disk so far.
     /// Used for resumable transfers via Range headers.
     bytes_received: u64,
+    /// Per-job bandwidth cap in bytes per process_pending call.
+    /// None = uncapped for this job.
+    bandwidth_cap: Option<u64>,
 }
 
 impl Job {
@@ -49,6 +52,7 @@ impl Job {
             state: JobState::Pending,
             destination,
             bytes_received: 0,
+            bandwidth_cap: None,
         }
     }
 
@@ -84,6 +88,18 @@ impl Job {
 
     pub fn add_bytes_received(&mut self, n: u64) {
         self.bytes_received += n;
+    }
+
+    pub fn bandwidth_cap(&self) -> Option<u64> {
+        self.bandwidth_cap
+    }
+
+    pub fn set_bandwidth_cap(&mut self, cap: u64) {
+        self.bandwidth_cap = Some(cap);
+    }
+
+    pub fn remove_bandwidth_cap(&mut self) {
+        self.bandwidth_cap = None;
     }
 
     pub fn mark_completed(&mut self) {
