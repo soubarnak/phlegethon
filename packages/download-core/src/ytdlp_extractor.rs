@@ -32,10 +32,11 @@ use std::process::Command;
 ///
 /// ```ignore
 /// YtDlpConfig {
-///     binary_path: PathBuf::from("yt-dlp"),  // rely on PATH
+///     binary_path: PathBuf::from("yt-dlp"),
 ///     ffmpeg_dir: None,
 ///     has_js_runtime: false,
 ///     probe_timeout_secs: 30,
+///     plugin_dirs: vec![],  // or with_sidecar_plugins(root)
 /// }
 /// ```
 #[derive(Debug, Clone)]
@@ -49,6 +50,11 @@ pub struct YtDlpConfig {
     pub has_js_runtime: bool,
     /// Timeout for probe operations (seconds). Default 30.
     pub probe_timeout_secs: u64,
+    /// Extra directories passed to yt-dlp as `--plugin-dirs`.
+    ///
+    /// App-managed Extractor Plugins (luxuretv, xxxbp.tv) live under the
+    /// sidecar `yt-dlp-plugins/` folder — see [`crate::plugin_sidecar`].
+    pub plugin_dirs: Vec<PathBuf>,
 }
 
 impl Default for YtDlpConfig {
@@ -58,7 +64,21 @@ impl Default for YtDlpConfig {
             ffmpeg_dir: None,
             has_js_runtime: false,
             probe_timeout_secs: 30,
+            plugin_dirs: Vec::new(),
         }
+    }
+}
+
+impl YtDlpConfig {
+    /// Attach app-managed Extractor Plugins from a sidecar root, if present.
+    ///
+    /// When `sidecar_root/yt-dlp-plugins` exists, it is appended to
+    /// [`Self::plugin_dirs`] for `--plugin-dirs`.
+    pub fn with_sidecar_plugins(mut self, sidecar_root: impl Into<PathBuf>) -> Self {
+        if let Some(dirs) = crate::plugin_sidecar::plugin_dirs_path(&sidecar_root.into()) {
+            self.plugin_dirs.push(dirs);
+        }
+        self
     }
 }
 
@@ -111,8 +131,14 @@ impl YtDlpExtractorToolchain {
         expected_extractors.insert("xhamster2.com", &["XHamster"]);
         expected_extractors.insert("xhamster3.com", &["XHamster"]);
 
-        // luxuretv — no dedicated extractor; always hard-fails
-        // xxxbp.tv — no dedicated extractor; always hard-fails
+        // luxuretv — Phlegethon Extractor Plugin (LuxureTVIE)
+        expected_extractors.insert("luxuretv.com", &["LuxureTV"]);
+        expected_extractors.insert("www.luxuretv.com", &["LuxureTV"]);
+        expected_extractors.insert("en.luxuretv.com", &["LuxureTV"]);
+
+        // xxxbp.tv — Phlegethon Extractor Plugin (XxxbpTVIE)
+        expected_extractors.insert("xxxbp.tv", &["XxxbpTV"]);
+        expected_extractors.insert("www.xxxbp.tv", &["XxxbpTV"]);
 
         Self {
             config,
@@ -177,18 +203,32 @@ impl YtDlpExtractorToolchain {
         Ok(())
     }
 
+    /// Build the argv for a yt-dlp probe invocation (test seam).
+    ///
+    /// `--flat-playlist` lists playlist/channel/user entries without fully
+    /// extracting each video (Probe-then-Confirm lists items first; qualities
+    /// per entry default to "best" until a dedicated per-item probe exists).
+    /// `--plugin-dirs` is included when configured (Launch Site Extractor Plugins).
+    pub(crate) fn probe_args(&self, url: &str) -> Vec<String> {
+        let mut args = vec![
+            "-J".to_string(),
+            "--no-warnings".to_string(),
+            "--flat-playlist".to_string(),
+        ];
+        for dir in &self.config.plugin_dirs {
+            args.push("--plugin-dirs".to_string());
+            args.push(dir.display().to_string());
+        }
+        args.push(url.to_string());
+        args
+    }
+
     /// Run yt-dlp with `-J` and return the raw JSON stdout.
     fn run_probe(&self, url: &str) -> Result<String, String> {
         let mut cmd = Command::new(&self.config.binary_path);
-
-        // Suppress progress/stderr noise; dump JSON.  `--flat-playlist`
-        // lists playlist/channel/user entries without fully extracting each
-        // video (Probe-then-Confirm lists items first; qualities per entry
-        // default to "best" until a dedicated per-item probe exists).
-        cmd.arg("-J")
-            .arg("--no-warnings")
-            .arg("--flat-playlist")
-            .arg(url);
+        for arg in self.probe_args(url) {
+            cmd.arg(arg);
+        }
 
         // Add ffmpeg dir to PATH if configured
         if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
@@ -536,6 +576,10 @@ fn item_id_prefix(extractor_key: &str) -> &'static str {
         "xh"
     } else if extractor_key.starts_with("Youtube") {
         "yt"
+    } else if extractor_key.starts_with("LuxureTV") {
+        "lux"
+    } else if extractor_key.starts_with("XxxbpTV") {
+        "xbp"
     } else {
         "item"
     }
@@ -725,8 +769,8 @@ pub(crate) fn canned_generic_probe_json() -> &'static str {
   "title": "Generic Fallback Video",
   "extractor": "generic",
   "extractor_key": "Generic",
-  "webpage_url": "https://luxuretv.com/video/12345",
-  "original_url": "https://luxuretv.com/video/12345",
+  "webpage_url": "https://example.com/video/12345",
+  "original_url": "https://example.com/video/12345",
   "formats": [
     {
       "format_id": "default",
@@ -738,8 +782,100 @@ pub(crate) fn canned_generic_probe_json() -> &'static str {
       "vcodec": "avc1",
       "acodec": "mp4a",
       "resolution": "1280x720",
-      "url": "https://cdn.luxuretv.com/video.mp4",
+      "url": "https://cdn.example.com/video.mp4",
       "filesize": 50000000
+    }
+  ]
+}"#
+}
+
+/// Canned yt-dlp JSON as produced by the LuxureTV Extractor Plugin.
+#[cfg(test)]
+pub(crate) fn canned_luxuretv_probe_json() -> &'static str {
+    r#"{
+  "id": "16982",
+  "title": "Sample LuxureTV Video",
+  "extractor": "LuxureTV",
+  "extractor_key": "LuxureTV",
+  "webpage_url": "https://www.luxuretv.com/videos/sample-video-16982.html",
+  "original_url": "https://www.luxuretv.com/videos/sample-video-16982.html",
+  "duration": 420.0,
+  "formats": [
+    {
+      "format_id": "480p",
+      "format_note": "480p",
+      "ext": "mp4",
+      "height": 480,
+      "width": 854,
+      "tbr": 800000.0,
+      "vcodec": "avc1",
+      "acodec": "mp4a",
+      "resolution": "854x480",
+      "url": "https://cdn.luxuretv.com/videos/16982_480.mp4"
+    },
+    {
+      "format_id": "720p",
+      "format_note": "720p",
+      "ext": "mp4",
+      "height": 720,
+      "width": 1280,
+      "tbr": 1600000.0,
+      "vcodec": "avc1",
+      "acodec": "mp4a",
+      "resolution": "1280x720",
+      "url": "https://cdn.luxuretv.com/videos/16982_720.mp4"
+    },
+    {
+      "format_id": "1080p",
+      "format_note": "1080p",
+      "ext": "mp4",
+      "height": 1080,
+      "width": 1920,
+      "tbr": 3200000.0,
+      "vcodec": "avc1",
+      "acodec": "mp4a",
+      "resolution": "1920x1080",
+      "url": "https://cdn.luxuretv.com/videos/16982_1080.mp4"
+    }
+  ]
+}"#
+}
+
+/// Canned yt-dlp JSON as produced by the XxxbpTV Extractor Plugin.
+#[cfg(test)]
+pub(crate) fn canned_xxxbp_probe_json() -> &'static str {
+    r#"{
+  "id": "12345",
+  "title": "Sample XXXBP Video",
+  "extractor": "XxxbpTV",
+  "extractor_key": "XxxbpTV",
+  "webpage_url": "https://www.xxxbp.tv/v/12345",
+  "original_url": "https://www.xxxbp.tv/v/12345",
+  "duration": 300.0,
+  "formats": [
+    {
+      "format_id": "360p",
+      "format_note": "360p",
+      "ext": "mp4",
+      "height": 360,
+      "width": 640,
+      "tbr": 500000.0,
+      "vcodec": "avc1",
+      "acodec": "mp4a",
+      "resolution": "640x360",
+      "url": "https://cdn.xxxbp.tv/media/12345_360.mp4"
+    },
+    {
+      "format_id": "720p",
+      "format_note": "720p",
+      "ext": "mp4",
+      "height": 720,
+      "width": 1280,
+      "tbr": 1500000.0,
+      "vcodec": "avc1",
+      "acodec": "mp4a",
+      "resolution": "1280x720",
+      "url": "https://cdn.xxxbp.tv/media/12345_720.mp4"
     }
   ]
 }"#
@@ -1015,6 +1151,16 @@ mod tests {
         assert_eq!(cfg.binary_path, PathBuf::from("yt-dlp"));
         assert!(!cfg.has_js_runtime);
         assert_eq!(cfg.probe_timeout_secs, 30);
+        assert!(cfg.plugin_dirs.is_empty());
+    }
+
+    #[test]
+    fn config_with_sidecar_plugins_attaches_plugin_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = tmp.path().join("yt-dlp-plugins");
+        std::fs::create_dir_all(&dirs).unwrap();
+        let cfg = YtDlpConfig::default().with_sidecar_plugins(tmp.path());
+        assert_eq!(cfg.plugin_dirs, vec![dirs]);
     }
 
     // ---- Extractor key validation ----
@@ -1046,7 +1192,7 @@ mod tests {
     fn validate_generic_extractor_hard_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://luxuretv.com/video/12345", "Generic")
+            .validate_extractor("https://example.com/video/12345", "Generic")
             .unwrap_err();
         assert!(
             err.contains("generic extractor"),
@@ -1397,12 +1543,115 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let json = canned_generic_probe_json();
         let err = extractor
-            .parse_probe_result(json, "https://luxuretv.com/video/12345")
+            .parse_probe_result(json, "https://example.com/video/12345")
             .unwrap_err();
         assert!(
             err.contains("generic extractor") || err.contains("unsupported"),
             "generic probe should hard-fail, got: {err}"
         );
+    }
+
+    #[test]
+    fn parse_luxuretv_plugin_probe_returns_items_and_qualities() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_luxuretv_probe_json(),
+                "https://www.luxuretv.com/videos/sample-video-16982.html",
+            )
+            .unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].id, "lux-16982");
+        assert_eq!(result.items[0].title, "Sample LuxureTV Video");
+        assert_eq!(result.source_name, None);
+
+        let qualities = &result.items[0].qualities;
+        assert!(
+            qualities.iter().any(|q| q.id == "480p"),
+            "expected 480p, got: {qualities:?}"
+        );
+        assert!(
+            qualities.iter().any(|q| q.id == "720p"),
+            "expected 720p, got: {qualities:?}"
+        );
+        assert!(
+            qualities.iter().any(|q| q.id == "1080p"),
+            "expected 1080p, got: {qualities:?}"
+        );
+    }
+
+    #[test]
+    fn parse_xxxbp_plugin_probe_returns_items_and_qualities() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_xxxbp_probe_json(),
+                "https://www.xxxbp.tv/v/12345",
+            )
+            .unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].id, "xbp-12345");
+        assert_eq!(result.items[0].title, "Sample XXXBP Video");
+
+        let qualities = &result.items[0].qualities;
+        assert!(
+            qualities.iter().any(|q| q.id == "360p"),
+            "expected 360p, got: {qualities:?}"
+        );
+        assert!(
+            qualities.iter().any(|q| q.id == "720p"),
+            "expected 720p, got: {qualities:?}"
+        );
+    }
+
+    #[test]
+    fn luxuretv_generic_fallback_hard_fails_even_with_plugin_site() {
+        // Plugin miss: yt-dlp fell through to Generic — must not count as supported.
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let err = extractor
+            .parse_probe_result(
+                canned_generic_probe_json(),
+                "https://www.luxuretv.com/videos/sample-video-16982.html",
+            )
+            .unwrap_err();
+        assert!(
+            err.contains("generic") || err.contains("unsupported"),
+            "plugin miss must hard-fail, got: {err}"
+        );
+    }
+
+    #[test]
+    fn xxxbp_wrong_extractor_hard_fails() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let err = extractor
+            .validate_extractor("https://www.xxxbp.tv/v/12345", "SomeOther")
+            .unwrap_err();
+        assert!(
+            err.contains("extractor mismatch"),
+            "wrong IE must hard-fail, got: {err}"
+        );
+    }
+
+    #[test]
+    fn probe_args_include_plugin_dirs() {
+        let config = YtDlpConfig {
+            plugin_dirs: vec![PathBuf::from("/app/sidecar/yt-dlp-plugins")],
+            ..YtDlpConfig::default()
+        };
+        let extractor = YtDlpExtractorToolchain::new(config);
+        let args = extractor.probe_args("https://www.luxuretv.com/videos/x-1.html");
+        assert!(args.contains(&"--plugin-dirs".to_string()));
+        assert!(args.contains(&"/app/sidecar/yt-dlp-plugins".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("https://www.luxuretv.com/videos/x-1.html"));
+    }
+
+    #[test]
+    fn probe_args_omit_plugin_dirs_when_empty() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let args = extractor.probe_args("https://www.youtube.com/watch?v=abc");
+        assert!(!args.iter().any(|a| a == "--plugin-dirs"));
     }
 
     // ---- FakeYtDlpExtractor ----
@@ -1674,20 +1923,40 @@ mod tests {
     }
 
     #[test]
-    fn expected_extractor_for_luxuretv_returns_none() {
-        // luxuretv has no dedicated extractor, so map returns None
+    fn expected_extractor_for_luxuretv_is_plugin() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let keys = extractor
-            .expected_extractor_for_url("https://www.luxuretv.com/video/12345");
-        assert!(keys.is_none(), "luxuretv should have no expected extractor");
+            .expected_extractor_for_url("https://www.luxuretv.com/videos/sample-16982.html")
+            .expect("luxuretv should map to plugin IE");
+        assert!(keys.contains(&"LuxureTV"));
     }
 
     #[test]
-    fn expected_extractor_for_xxxbp_tv_returns_none() {
+    fn expected_extractor_for_xxxbp_tv_is_plugin() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let keys = extractor
-            .expected_extractor_for_url("https://www.xxxbp.tv/v/12345");
-        assert!(keys.is_none(), "xxxbp.tv should have no expected extractor");
+            .expected_extractor_for_url("https://www.xxxbp.tv/v/12345")
+            .expect("xxxbp.tv should map to plugin IE");
+        assert!(keys.contains(&"XxxbpTV"));
+    }
+
+    #[test]
+    fn validate_luxuretv_plugin_extractor_passes() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        assert!(extractor
+            .validate_extractor(
+                "https://en.luxuretv.com/videos/sample-16982.html",
+                "LuxureTV",
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_xxxbp_plugin_extractor_passes() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        assert!(extractor
+            .validate_extractor("https://xxxbp.tv/v/12345", "XxxbpTV")
+            .is_ok());
     }
 
     #[test]

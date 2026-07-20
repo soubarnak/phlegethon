@@ -10,8 +10,13 @@ mod extractor;
 mod http;
 mod job;
 mod mirror_set;
+pub mod plugin_sidecar;
 mod storage;
 pub mod ytdlp_extractor;
+pub use plugin_sidecar::{
+    install_plugin_package, load_manifest, needs_update, plugin_dirs_path, write_manifest,
+    PluginManifest, MANIFEST_FILENAME, PLUGIN_DIRS_REL, PLUGIN_PACKAGE_NAME,
+};
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
 pub use event::CoreEvent;

@@ -74,10 +74,37 @@ const CANNED_GENERIC_JSON: &str = r#"{
   "title": "Generic Fallback",
   "extractor": "generic",
   "extractor_key": "Generic",
-  "webpage_url": "https://luxuretv.com/video/12345",
-  "original_url": "https://luxuretv.com/video/12345",
+  "webpage_url": "https://example.com/video/12345",
+  "original_url": "https://example.com/video/12345",
   "formats": [
     {"format_id":"default","format_note":"default","ext":"mp4","height":720,"width":1280,"tbr":1000000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"}
+  ]
+}"#;
+
+const CANNED_LUXURETV_JSON: &str = r#"{
+  "id": "16982",
+  "title": "Sample LuxureTV Video",
+  "extractor": "LuxureTV",
+  "extractor_key": "LuxureTV",
+  "webpage_url": "https://www.luxuretv.com/videos/sample-video-16982.html",
+  "original_url": "https://www.luxuretv.com/videos/sample-video-16982.html",
+  "formats": [
+    {"format_id":"480p","format_note":"480p","ext":"mp4","height":480,"width":854,"tbr":800000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"854x480"},
+    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1600000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"},
+    {"format_id":"1080p","format_note":"1080p","ext":"mp4","height":1080,"width":1920,"tbr":3200000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1920x1080"}
+  ]
+}"#;
+
+const CANNED_XXXBP_JSON: &str = r#"{
+  "id": "12345",
+  "title": "Sample XXXBP Video",
+  "extractor": "XxxbpTV",
+  "extractor_key": "XxxbpTV",
+  "webpage_url": "https://www.xxxbp.tv/v/12345",
+  "original_url": "https://www.xxxbp.tv/v/12345",
+  "formats": [
+    {"format_id":"360p","format_note":"360p","ext":"mp4","height":360,"width":640,"tbr":500000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"640x360"},
+    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1500000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"}
   ]
 }"#;
 
@@ -187,16 +214,63 @@ fn fake_ytdlp_extractor_probe_xhamster_user_multi_item() {
 fn generic_extractor_hard_fails() {
     let mut fake = FakeYtDlpExtractor::new();
     fake.insert(
-        "https://luxuretv.com/video/12345",
+        "https://example.com/video/12345",
         CANNED_GENERIC_JSON,
     );
 
     let err = fake
-        .probe("https://luxuretv.com/video/12345")
+        .probe("https://example.com/video/12345")
         .unwrap_err();
     assert!(
         err.contains("generic extractor") || err.contains("unsupported"),
         "generic extractor should hard-fail, got: {err}"
+    );
+}
+
+#[test]
+fn luxuretv_plugin_probe_returns_quality_list() {
+    let mut fake = FakeYtDlpExtractor::new();
+    fake.insert(
+        "https://www.luxuretv.com/videos/sample-video-16982.html",
+        CANNED_LUXURETV_JSON,
+    );
+
+    let result = fake
+        .probe("https://www.luxuretv.com/videos/sample-video-16982.html")
+        .unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].title, "Sample LuxureTV Video");
+    let qualities = &result.items[0].qualities;
+    assert!(qualities.iter().any(|q| q.id == "720p"), "{qualities:?}");
+    assert!(qualities.iter().any(|q| q.id == "1080p"), "{qualities:?}");
+}
+
+#[test]
+fn xxxbp_plugin_probe_returns_quality_list() {
+    let mut fake = FakeYtDlpExtractor::new();
+    fake.insert("https://www.xxxbp.tv/v/12345", CANNED_XXXBP_JSON);
+
+    let result = fake.probe("https://www.xxxbp.tv/v/12345").unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].title, "Sample XXXBP Video");
+    let qualities = &result.items[0].qualities;
+    assert!(qualities.iter().any(|q| q.id == "360p"), "{qualities:?}");
+    assert!(qualities.iter().any(|q| q.id == "720p"), "{qualities:?}");
+}
+
+#[test]
+fn luxuretv_plugin_miss_generic_hard_fails() {
+    let mut fake = FakeYtDlpExtractor::new();
+    fake.insert(
+        "https://www.luxuretv.com/videos/sample-video-16982.html",
+        CANNED_GENERIC_JSON,
+    );
+    let err = fake
+        .probe("https://www.luxuretv.com/videos/sample-video-16982.html")
+        .unwrap_err();
+    assert!(
+        err.contains("generic") || err.contains("unsupported"),
+        "plugin miss must hard-fail, got: {err}"
     );
 }
 

@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+  <head>
+    <meta property="og:title" content="Sample LuxureTV Video" />
+    <meta
+      property="og:image"
+      content="https://cdn.luxuretv.com/thumbs/16982.jpg"
+    />
+    <meta property="og:duration" content="420" />
+    <title>Sample LuxureTV Video</title>
+  </head>
+  <body>
+    <div id="player">
+      <video poster="https://cdn.luxuretv.com/thumbs/16982.jpg">
+        <source
+          src="https://cdn.luxuretv.com/videos/16982_480.mp4"
+          type="video/mp4"
+        />
+        <source
+          src="https://cdn.luxuretv.com/videos/16982_720.mp4"
+          type="video/mp4"
+        />
+        <source
+          src="https://cdn.luxuretv.com/videos/16982_1080.mp4"
+          type="video/mp4"
+        />
+      </video>
+    </div>
+    <script>
+      var flashvars = {
+        video_url: "https://cdn.luxuretv.com/videos/16982_720.mp4",
+        video_alt_url: "https://cdn.luxuretv.com/videos/16982_480.mp4",
+        video_alt_url2: "https://cdn.luxuretv.com/videos/16982_1080.mp4",
+      };
+    </script>
+  </body>
+</html>
