@@ -935,7 +935,7 @@ fn interrupt_then_resume_continues_from_last_byte() {
     );
 
     // The final progress should show all bytes
-    let final_progress = events2.iter().find_map(|e| match e {
+    let final_progress = events2.iter().rev().find_map(|e| match e {
         CoreEvent::JobProgress {
             bytes_downloaded,
             total_bytes: Some(t),
@@ -3525,5 +3525,236 @@ fn mirror_failover_in_segmented_transfer() {
     assert_eq!(
         on_disk, content,
         "segmented failover should use secondary content"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: Live HTTP JobProgress (issue #36)
+// ---------------------------------------------------------------------------
+
+/// Slow single-connection fake: writes one byte at a time so mid-transfer
+/// JobProgress can be observed from another thread.
+#[derive(Clone)]
+struct SlowKnownSizeHttp {
+    body: Arc<Vec<u8>>,
+    supports_range: bool,
+}
+
+impl HttpBackend for SlowKnownSizeHttp {
+    fn fetch(
+        &self,
+        _url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        let total = self.body.len() as u64;
+        let data = match range {
+            Some(r) => {
+                let start = r.start.min(total) as usize;
+                let end = r.end.min(total).max(r.start.min(total)) as usize;
+                &self.body[start..end]
+            }
+            None => self.body.as_slice(),
+        };
+        let mut written = 0u64;
+        for byte in data {
+            let n = sink
+                .write(std::slice::from_ref(byte))
+                .map_err(|e| format!("sink write: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            written += n as u64;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok(FetchResult {
+            total_length: total,
+            bytes_written: written,
+        })
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(self.supports_range)
+    }
+
+    fn file_size(&self, _url: &str) -> Result<u64, String> {
+        Ok(self.body.len() as u64)
+    }
+}
+
+/// Slow fake with unknown total (no Content-Length / HEAD size).
+#[derive(Clone)]
+struct SlowUnknownSizeHttp {
+    body: Arc<Vec<u8>>,
+}
+
+impl HttpBackend for SlowUnknownSizeHttp {
+    fn fetch(
+        &self,
+        _url: &str,
+        _range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        let mut written = 0u64;
+        for byte in self.body.iter() {
+            let n = sink
+                .write(std::slice::from_ref(byte))
+                .map_err(|e| format!("sink write: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            written += n as u64;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Unknown size: report 0 as "no Content-Length" until Core maps this to None.
+        Ok(FetchResult {
+            total_length: 0,
+            bytes_written: written,
+        })
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn file_size(&self, _url: &str) -> Result<u64, String> {
+        Err("no Content-Length".into())
+    }
+}
+
+#[test]
+fn http_emits_mid_transfer_job_progress_with_known_total() {
+    let body = vec![b'K'; 64];
+    let http = SlowKnownSizeHttp {
+        body: Arc::new(body.clone()),
+        supports_range: false,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, rx) = make_core(Box::new(http));
+    let mut core = core;
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/known.bin");
+
+    let core = Arc::new(Mutex::new(core));
+    let worker = {
+        let core = core.clone();
+        std::thread::spawn(move || {
+            core.lock().unwrap().process_pending().unwrap();
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut saw_mid = false;
+    let mut mid_total = None;
+    while std::time::Instant::now() < deadline {
+        for e in collect_events(&rx) {
+            if let CoreEvent::JobProgress {
+                job_id: id,
+                bytes_downloaded,
+                total_bytes,
+            } = e
+            {
+                assert_eq!(id, job_id);
+                if bytes_downloaded > 0 && bytes_downloaded < body.len() as u64 {
+                    saw_mid = true;
+                    mid_total = total_bytes;
+                    break;
+                }
+            }
+        }
+        if saw_mid {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    worker.join().unwrap();
+
+    assert!(
+        saw_mid,
+        "expected mid-transfer JobProgress with 0 < bytes < total"
+    );
+    assert_eq!(
+        mid_total,
+        Some(body.len() as u64),
+        "known size must expose total_bytes: Some"
+    );
+
+    let snap = core
+        .lock()
+        .unwrap()
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .expect("job snapshot");
+    assert_eq!(snap.total_bytes, Some(body.len() as u64));
+    assert_eq!(snap.bytes_downloaded, body.len() as u64);
+}
+
+#[test]
+fn http_emits_mid_transfer_job_progress_with_unknown_total() {
+    let body = vec![b'U'; 64];
+    let http = SlowUnknownSizeHttp {
+        body: Arc::new(body.clone()),
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, rx) = make_core(Box::new(http));
+    let mut core = core;
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/unknown.bin");
+
+    let core = Arc::new(Mutex::new(core));
+    let worker = {
+        let core = core.clone();
+        std::thread::spawn(move || {
+            core.lock().unwrap().process_pending().unwrap();
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut saw_mid = false;
+    let mut mid_total = Some(999u64); // sentinel — should become None
+    while std::time::Instant::now() < deadline {
+        for e in collect_events(&rx) {
+            if let CoreEvent::JobProgress {
+                job_id: id,
+                bytes_downloaded,
+                total_bytes,
+            } = e
+            {
+                assert_eq!(id, job_id);
+                if bytes_downloaded > 0 && bytes_downloaded < body.len() as u64 {
+                    saw_mid = true;
+                    mid_total = total_bytes;
+                    break;
+                }
+            }
+        }
+        if saw_mid {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    worker.join().unwrap();
+
+    assert!(
+        saw_mid,
+        "expected mid-transfer JobProgress with bytes-so-far"
+    );
+    assert_eq!(
+        mid_total, None,
+        "unknown size must expose total_bytes: None"
+    );
+
+    let snap = core
+        .lock()
+        .unwrap()
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .expect("job snapshot");
+    assert_eq!(snap.total_bytes, None);
+    assert!(
+        snap.bytes_downloaded > 0,
+        "snapshot should expose bytes downloaded"
     );
 }

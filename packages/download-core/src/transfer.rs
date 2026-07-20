@@ -1,6 +1,6 @@
 //! Body I/O executed outside the Core mutex (issue #31).
 
-use crate::bandwidth::{shared_token_bucket, SharedTokenBucket, TransferWriter};
+use crate::bandwidth::{shared_token_bucket, SharedTokenBucket, TransferProgress, TransferWriter};
 use crate::http::{FetchResult, HttpBackend};
 use std::io::Write;
 use std::ops::Range;
@@ -19,6 +19,7 @@ pub struct SingleFetchParams {
     pub job_bucket: Option<SharedTokenBucket>,
     pub pause_requested: Arc<AtomicBool>,
     pub transfer_active: Arc<AtomicBool>,
+    pub progress: Option<TransferProgress>,
 }
 
 pub struct SingleFetchOutcome {
@@ -63,6 +64,9 @@ fn run_single_fetch(params: &SingleFetchParams) -> SingleFetchOutcome {
         params.job_bucket.clone(),
         &params.pause_requested,
     );
+    if let Some(progress) = params.progress.clone() {
+        limited = limited.with_progress(progress);
+    }
 
     let fetch = params
         .http
@@ -95,6 +99,7 @@ pub struct SegmentFetchParams {
     pub global_bucket: Option<SharedTokenBucket>,
     pub job_bucket: Option<SharedTokenBucket>,
     pub pause_requested: Arc<AtomicBool>,
+    pub progress: Option<TransferProgress>,
 }
 
 pub fn execute_segment_fetch(params: SegmentFetchParams) -> Result<u64, String> {
@@ -105,6 +110,9 @@ pub fn execute_segment_fetch(params: SegmentFetchParams) -> Result<u64, String> 
         params.job_bucket,
         &params.pause_requested,
     );
+    if let Some(progress) = params.progress.clone() {
+        limited = limited.with_progress(progress);
+    }
     let end = params.range.end;
     let result = params
         .http

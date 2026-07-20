@@ -22,7 +22,7 @@ pub use plugin_sidecar::{
 };
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
-pub use bandwidth::{Clock, ManualClock, SystemClock};
+pub use bandwidth::{Clock, ManualClock, SystemClock, TransferProgress};
 pub use event::CoreEvent;
 pub use extractor::{
     ExtractorToolchain, FakeExtractorToolchain, ItemSelection, MediaItem, ProbeResult,
@@ -457,8 +457,8 @@ impl Core {
                         JobState::Completed => "completed",
                     }
                     .to_string(),
-                    bytes_downloaded: job.bytes_received(),
-                    total_bytes: None,
+                    bytes_downloaded: job.bytes_downloaded_snapshot(),
+                    total_bytes: job.total_bytes(),
                     title,
                 }
             })
@@ -817,6 +817,25 @@ impl Core {
 
                     let seg_result = 'seg_loop: loop {
                         let current_url = self.jobs[i].url().to_string();
+                        let known_total = self.http.file_size(&current_url).ok().filter(|&n| n > 0);
+                        if let Some(total) = known_total {
+                            self.jobs[i].set_total_bytes(Some(total));
+                        }
+                        let live_bytes = self.jobs[i].live_downloaded();
+                        live_bytes.store(0, Ordering::Release);
+                        let progress = TransferProgress {
+                            job_id: job_id.clone(),
+                            event_tx: self.event_tx.clone(),
+                            total_bytes: self.jobs[i].total_bytes(),
+                            live_bytes,
+                        };
+                        self.event_tx
+                            .send(CoreEvent::JobProgress {
+                                job_id: job_id.clone(),
+                                bytes_downloaded: 0,
+                                total_bytes: self.jobs[i].total_bytes(),
+                            })
+                            .map_err(|_| "event channel closed".to_string())?;
                         match self.segmented_fetch(
                             &current_url,
                             &part_path,
@@ -824,6 +843,7 @@ impl Core {
                             job_bucket.clone(),
                             pause_requested.clone(),
                             transfer_active.clone(),
+                            Some(progress),
                         ) {
                             Ok(result) => break 'seg_loop Some(result),
                             Err(err) => {
@@ -856,6 +876,7 @@ impl Core {
 
                     match seg_result {
                         Some((total_size, _bytes_written, paused)) => {
+                            self.jobs[i].set_total_bytes(Some(total_size));
                             if paused {
                                 self.sync_job_progress(&job_id, bytes_received)?;
                                 self.finalize_stop_after_transfer(&job_id)?;
@@ -891,11 +912,17 @@ impl Core {
                 None
             };
 
+            let known_total = self.http.file_size(&url).ok().filter(|&n| n > 0);
+            if let Some(total) = known_total {
+                self.jobs[i].set_total_bytes(Some(total));
+            }
+            let total_for_progress = self.jobs[i].total_bytes();
+
             self.event_tx
                 .send(CoreEvent::JobProgress {
                     job_id: job_id.clone(),
                     bytes_downloaded: bytes_received,
-                    total_bytes: None,
+                    total_bytes: total_for_progress,
                 })
                 .map_err(|_| "event channel closed".to_string())?;
 
@@ -911,6 +938,15 @@ impl Core {
                 })?;
             }
 
+            let live_bytes = self.jobs[i].live_downloaded();
+            live_bytes.store(bytes_received, Ordering::Release);
+            let progress = TransferProgress {
+                job_id: job_id.clone(),
+                event_tx: self.event_tx.clone(),
+                total_bytes: total_for_progress,
+                live_bytes,
+            };
+
             let job_fetch = 'fetch_loop: loop {
                 let current_url = self.jobs[i].url().to_string();
                 let outcome = execute_single_fetch(SingleFetchParams {
@@ -924,6 +960,7 @@ impl Core {
                     job_bucket: job_bucket.clone(),
                     pause_requested: pause_requested.clone(),
                     transfer_active: transfer_active.clone(),
+                    progress: Some(progress.clone()),
                 });
 
                 if outcome.paused {
@@ -970,21 +1007,38 @@ impl Core {
                 continue;
             }
 
-            let total = outcome.fetch?.total_length;
+            let reported = outcome.fetch?.total_length;
             let on_disk = self.sync_job_progress(&job_id, bytes_received)?;
+            let total_opt = self.jobs[i].total_bytes().or_else(|| {
+                if reported > 0 {
+                    Some(reported)
+                } else {
+                    None
+                }
+            });
+            if self.jobs[i].total_bytes().is_none() {
+                self.jobs[i].set_total_bytes(total_opt);
+            }
 
             self.event_tx
                 .send(CoreEvent::JobProgress {
                     job_id: job_id.clone(),
                     bytes_downloaded: on_disk,
-                    total_bytes: Some(total),
+                    total_bytes: total_opt,
                 })
                 .map_err(|_| "event channel closed".to_string())?;
 
-            if on_disk >= total {
-                self.complete_job_file(&job_id, i, &part_path, &file_path, total)?;
-            } else {
-                self.flush_pending_progress()?;
+            match total_opt {
+                Some(total) if on_disk >= total => {
+                    self.complete_job_file(&job_id, i, &part_path, &file_path, total)?;
+                }
+                Some(_) => {
+                    self.flush_pending_progress()?;
+                }
+                None => {
+                    // Unknown size: successful fetch to EOF is complete.
+                    self.complete_job_file(&job_id, i, &part_path, &file_path, on_disk)?;
+                }
             }
         }
 
@@ -1044,10 +1098,17 @@ impl Core {
         job_bucket: Option<SharedTokenBucket>,
         pause_requested: Arc<std::sync::atomic::AtomicBool>,
         transfer_active: Arc<std::sync::atomic::AtomicBool>,
+        progress: Option<TransferProgress>,
     ) -> Result<(u64, u64, bool), String> {
         transfer_active.store(true, Ordering::Release);
-        let result =
-            self.run_segmented_fetch(url, part_path, global_bucket, job_bucket, pause_requested);
+        let result = self.run_segmented_fetch(
+            url,
+            part_path,
+            global_bucket,
+            job_bucket,
+            pause_requested,
+            progress,
+        );
         transfer_active.store(false, Ordering::Release);
         result
     }
@@ -1059,6 +1120,7 @@ impl Core {
         global_bucket: Option<SharedTokenBucket>,
         job_bucket: Option<SharedTokenBucket>,
         pause_requested: Arc<std::sync::atomic::AtomicBool>,
+        progress: Option<TransferProgress>,
     ) -> Result<(u64, u64, bool), String> {
         let total_size = self.http.file_size(url)?;
         if total_size == 0 {
@@ -1100,6 +1162,7 @@ impl Core {
                 let global = global_bucket.clone();
                 let job = job_bucket.clone();
                 let pause = pause_requested.clone();
+                let prog = progress.clone();
                 handles.push(scope.spawn(move || {
                     execute_segment_fetch(SegmentFetchParams {
                         http: http_ref,
@@ -1109,6 +1172,7 @@ impl Core {
                         global_bucket: global,
                         job_bucket: job,
                         pause_requested: pause,
+                        progress: prog,
                     })
                 }));
             }
