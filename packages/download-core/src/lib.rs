@@ -19,13 +19,18 @@ pub use http::HttpBackend;
 pub use job::EnqueueOutcome;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The Download Core instance.
 ///
 /// Create one per app session.  Drop to tear down.
+/// Default number of concurrent segments for segmented transfer.
+pub const DEFAULT_SEGMENT_COUNT: u64 = 4;
+
 pub struct Core {
-    http: Box<dyn HttpBackend>,
+    http: Arc<dyn HttpBackend>,
     extractor: Box<dyn ExtractorToolchain>,
     library_root: Option<PathBuf>,
     jobs: Vec<job::Job>,
@@ -49,7 +54,7 @@ impl Core {
     ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let core = Self {
-            http,
+            http: Arc::from(http),
             extractor,
             library_root: None,
             jobs: Vec::new(),
@@ -383,16 +388,23 @@ impl Core {
 
     /// Process pending jobs — runs transfers for any queued jobs.
     ///
-    /// In a real Core this runs the transfer loop.  For now, it processes
-    /// the work synchronously.  Paused and failed jobs are skipped.
-    /// HTTP failures cause the job to transition to `Failed` state and emit
-    /// `CoreEvent::JobFailed`; processing continues with the next job.
+    /// Paused and failed jobs are skipped.  HTTP failures cause the job to
+    /// transition to `Failed` state and emit `CoreEvent::JobFailed`;
+    /// processing continues with the next job.
     ///
-    /// When a job has partial data already written (`bytes_received > 0`),
-    /// the HTTP backend is called with a `Range` header to resume from the
-    /// last successful byte.  New data is appended to the existing file.
-    /// If `bytes_received < total` after the fetch, the job stays pending
-    /// so the next `process_pending` call can continue where it left off.
+    /// ## Segmented Transfer (new jobs)
+    ///
+    /// For a fresh job (`bytes_received == 0`) whose HTTP backend reports
+    /// Range support, the Core splits the file into [`DEFAULT_SEGMENT_COUNT`]
+    /// concurrent Range requests using scoped threads.  Results are assembled
+    /// in order and written to disk in one pass.
+    ///
+    /// ## Fallback (no Range) / Resumable
+    ///
+    /// When Range is not supported, or when a job has partial data already
+    /// written (`bytes_received > 0`), the single-connection path is used:
+    /// a plain GET (or GET with `Range` for resume), with bandwidth-capped
+    /// truncation if needed.
     pub fn process_pending(&mut self) -> Result<(), String> {
         // Collect indices of jobs that need work (pending only)
         let indices: Vec<usize> = self
@@ -424,7 +436,6 @@ impl Core {
             };
 
             // Effective cap = min(global_remaining, per-job cap)
-            // None = uncapped for that axis
             let effective_cap: Option<u64> = match (global_remaining, job_cap) {
                 (Some(g), Some(j)) => Some(g.min(j)),
                 (Some(g), None) => Some(g),
@@ -432,7 +443,97 @@ impl Core {
                 (None, None) => None,
             };
 
-            // Build optional Range header if we have partial data
+            // --- Segmented Transfer for fresh jobs ---
+            // When bytes_received == 0, check if the server supports Range.
+            // If yes, use multi-connection segmented transfer.
+            if bytes_received == 0 {
+                let supports_range = match self.http.supports_range(&url) {
+                    Ok(true) => true,
+                    // Range detection failed or not supported → fall through
+                    // to single-connection path below.
+                    _ => false,
+                };
+
+                if supports_range {
+                    // Fetch all segments concurrently
+                    match self.segmented_fetch(&url, effective_cap) {
+                        Ok((total_size, full_data)) => {
+                            let bytes_this_call = full_data.len() as u64;
+
+                            if let Some(ref mut remaining) = global_remaining {
+                                *remaining = remaining.saturating_sub(bytes_this_call);
+                            }
+
+                            // Emit progress before write
+                            self.event_tx
+                                .send(CoreEvent::JobProgress {
+                                    job_id: job_id.clone(),
+                                    bytes_downloaded: 0,
+                                    total_bytes: Some(total_size),
+                                })
+                                .map_err(|_| "event channel closed".to_string())?;
+
+                            // Write to disk
+                            std::fs::create_dir_all(&dest)
+                                .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
+                            let filename = self.filename_from_url(&url);
+                            let file_path = dest.join(&filename);
+                            self.write_data_to_disk(&file_path, &full_data, false)?;
+
+                            // Update job state
+                            let final_bytes = bytes_this_call.min(total_size);
+                            if let Some(job) =
+                                self.jobs.iter_mut().find(|j| j.id() == job_id)
+                            {
+                                job.add_bytes_received(final_bytes);
+                            }
+
+                            // Emit final progress
+                            self.event_tx
+                                .send(CoreEvent::JobProgress {
+                                    job_id: job_id.clone(),
+                                    bytes_downloaded: final_bytes,
+                                    total_bytes: Some(total_size),
+                                })
+                                .map_err(|_| "event channel closed".to_string())?;
+
+                            // Mark complete if we got all the bytes
+                            if final_bytes >= total_size {
+                                self.event_tx
+                                    .send(CoreEvent::JobCompleted {
+                                        job_id: job_id.clone(),
+                                        bytes_written: final_bytes,
+                                        path: file_path,
+                                    })
+                                    .map_err(|_| "event channel closed".to_string())?;
+
+                                if let Some(job) =
+                                    self.jobs.iter_mut().find(|j| j.id() == job_id)
+                                {
+                                    job.mark_completed();
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            // Segmented transfer failed — mark job failed
+                            if let Some(job) =
+                                self.jobs.iter_mut().find(|j| j.id() == job_id)
+                            {
+                                job.mark_failed();
+                            }
+                            self.event_tx
+                                .send(CoreEvent::JobFailed {
+                                    job_id: job_id.clone(),
+                                    error: err,
+                                })
+                                .map_err(|_| "event channel closed".to_string())?;
+                        }
+                    }
+                    continue; // handled, move to next job
+                }
+            }
+
+            // --- Single-connection path (fallback + resumable) ---
             let range = if bytes_received > 0 {
                 Some(bytes_received..u64::MAX)
             } else {
@@ -452,7 +553,6 @@ impl Core {
             let (mut data, total) = match self.http.fetch(&url, range) {
                 Ok(result) => result,
                 Err(err) => {
-                    // Mark job as failed and emit event
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
                         job.mark_failed();
                     }
@@ -485,46 +585,10 @@ impl Core {
             std::fs::create_dir_all(&dest)
                 .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
 
-            // Derive filename from URL
-            let filename = url::Url::parse(&url)
-                .ok()
-                .and_then(|u| {
-                    u.path_segments()
-                        .and_then(|mut s| s.next_back())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| "download".to_string());
-
+            let filename = self.filename_from_url(&url);
             let file_path = dest.join(&filename);
 
-            // Append to existing file (or create if first write)
-            let write_result = if bytes_received > 0 {
-                use std::io::Write;
-                std::fs::OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(&file_path)
-                    .and_then(|mut f| f.write_all(&data))
-                    .map_err(|e| format!("append {file_path:?}: {e}"))
-            } else {
-                std::fs::write(&file_path, &data)
-                    .map_err(|e| format!("write {file_path:?}: {e}"))
-            };
-
-            if let Err(e) = write_result {
-                // I/O error — mark as failed
-                if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
-                    job.mark_failed();
-                }
-                self.event_tx
-                    .send(CoreEvent::JobFailed {
-                        job_id: job_id.clone(),
-                        error: e,
-                    })
-                    .map_err(|_| "event channel closed".to_string())?;
-                continue;
-            }
+            self.write_data_to_disk(&file_path, &data, bytes_received > 0)?;
 
             // Update bytes_received with what we just wrote
             let new_bytes = bytes_received + bytes_this_call;
@@ -543,7 +607,6 @@ impl Core {
 
             // Mark complete only if we have all the bytes
             if new_bytes >= total {
-                // Emit completed
                 self.event_tx
                     .send(CoreEvent::JobCompleted {
                         job_id: job_id.clone(),
@@ -552,13 +615,138 @@ impl Core {
                     })
                     .map_err(|_| "event channel closed".to_string())?;
 
-                // Mark job complete
                 self.jobs[i].mark_completed();
             }
-            // Otherwise the job stays pending — next process_pending
-            // call will resume with a Range header.
         }
 
         Ok(())
+    }
+
+    /// Perform a multi-connection segmented fetch for the given URL.
+    ///
+    /// 1. Probes the file size via [`HttpBackend::file_size`].
+    /// 2. Splits the file into [`DEFAULT_SEGMENT_COUNT`] byte ranges.
+    /// 3. Fetches each range concurrently via scoped threads.
+    /// 4. Assembles data in order.
+    ///
+    /// Returns the total file size and the assembled (possibly capped) bytes.
+    /// This does NOT write to disk or update job state — the caller does that
+    /// so that `&mut self` is available for job mutation.
+    fn segmented_fetch(
+        &self,
+        url: &str,
+        cap: Option<u64>,
+    ) -> Result<(u64, Vec<u8>), String> {
+        // Determine total file size (does not download the body)
+        let total_size = self.http.file_size(url)?;
+
+        if total_size == 0 {
+            return Err("empty file, nothing to download".to_string());
+        }
+
+        // Calculate segment boundaries
+        let seg_count = DEFAULT_SEGMENT_COUNT.min(total_size); // at most one per byte
+        let seg_size = total_size / seg_count;
+        let mut segments: Vec<Range<u64>> = Vec::with_capacity(seg_count as usize);
+        for s in 0..seg_count {
+            let start = s * seg_size;
+            let end = if s == seg_count - 1 {
+                total_size
+            } else {
+                (s + 1) * seg_size
+            };
+            if start < end {
+                segments.push(start..end);
+            }
+        }
+
+        // Fetch segments concurrently using scoped threads.
+        // We clone the Arc<dyn HttpBackend> so each thread gets its own ref.
+        let http = self.http.clone();
+        let url_owned = url.to_string();
+
+        let segment_results: Vec<Result<(u64, Vec<u8>), String>> =
+            std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for range in &segments {
+                    let start = range.start;
+                    let end = range.end;
+                    let http_ref = &http;
+                    let url_ref = &url_owned;
+                    handles.push(scope.spawn(move || {
+                        let (data, _total) =
+                            http_ref.fetch(url_ref, Some(start..end))?;
+                        Ok((start, data))
+                    }));
+                }
+                // Collect results, joining each thread
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect()
+            });
+
+        // Collect results and assemble in order
+        let mut assembled: Vec<(u64, Vec<u8>)> =
+            Vec::with_capacity(segment_results.len());
+        for result in segment_results {
+            let (range_start, data) = result?;
+            assembled.push((range_start, data));
+        }
+        assembled.sort_by_key(|(start, _)| *start);
+
+        // Concatenate all segment data in order
+        let mut full_data: Vec<u8> = Vec::with_capacity(total_size as usize);
+        for (_, data) in &assembled {
+            full_data.extend_from_slice(data);
+        }
+
+        // Apply bandwidth cap
+        if let Some(cap) = cap {
+            let cap_usize = cap as usize;
+            if full_data.len() > cap_usize {
+                full_data.truncate(cap_usize);
+            }
+        }
+
+        Ok((total_size, full_data))
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    /// Derive a filename from a URL.
+    fn filename_from_url(&self, url: &str) -> String {
+        url::Url::parse(url)
+            .ok()
+            .and_then(|u| {
+                u.path_segments()
+                    .and_then(|mut s| s.next_back())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "download".to_string())
+    }
+
+    /// Write (or append) data to a file on disk.
+    fn write_data_to_disk(
+        &self,
+        file_path: &std::path::Path,
+        data: &[u8],
+        append: bool,
+    ) -> Result<(), String> {
+        if append {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(file_path)
+                .and_then(|mut f| f.write_all(data))
+                .map_err(|e| format!("append {file_path:?}: {e}"))
+        } else {
+            std::fs::write(file_path, data)
+                .map_err(|e| format!("write {file_path:?}: {e}"))
+        }
     }
 }

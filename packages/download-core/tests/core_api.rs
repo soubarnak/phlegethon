@@ -65,12 +65,25 @@ impl HttpBackend for FakeHttp {
         let data = match range {
             Some(r) => {
                 let start = r.start.min(total);
-                full_body[start as usize..].to_vec()
+                let end = r.end.min(total).max(start);
+                full_body[start as usize..end as usize].to_vec()
             }
             None => full_body.clone(),
         };
 
         Ok((data, total))
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        let responses = self.responses.lock().unwrap();
+        let full_body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        Ok(full_body.len() as u64)
     }
 }
 
@@ -95,6 +108,14 @@ impl HttpBackend for FailingHttp {
         url: &str,
         _range: Option<std::ops::Range<u64>>,
     ) -> Result<(Vec<u8>, u64), String> {
+        Err(format!("simulated failure for {url}"))
+    }
+
+    fn supports_range(&self, url: &str) -> Result<bool, String> {
+        Err(format!("simulated failure for {url}"))
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
         Err(format!("simulated failure for {url}"))
     }
 }
@@ -474,11 +495,28 @@ impl HttpBackend for StagedFakeHttp {
             }
             Some(r) => {
                 let start = r.start.min(total);
-                let remaining = full_body[start as usize..].to_vec();
+                let end = r.end.min(total).max(start);
+                let remaining = full_body[start as usize..end as usize].to_vec();
                 sent.insert(url.to_string(), total);
                 Ok((remaining, total))
             }
         }
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        // Return false so new jobs use the single-connection path.
+        // StagedFakeHttp is designed for resumable-transfer tests:
+        // first call (no range) returns half, second call (with range)
+        // returns the rest.  Segmented transfer would bypass the staging.
+        Ok(false)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        let responses = self.responses.lock().unwrap();
+        let body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        Ok(body.len() as u64)
     }
 }
 
@@ -1803,5 +1841,355 @@ fn probe_created_jobs_use_same_storage_rules() {
     assert!(
         done.contains(&probe_job_ids[0]),
         "probe job should complete"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: Segmented Transfer (issue #19)
+// ---------------------------------------------------------------------------
+
+/// A fake HTTP backend that tracks all fetch calls for verification.
+///
+/// Supports exact byte ranges and lets tests inspect how many requests
+/// were made and what ranges were used.
+#[derive(Clone)]
+struct TrackedFakeHttp {
+    responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    /// (url, range) for every fetch call made.
+    calls: Arc<Mutex<Vec<(String, Option<std::ops::Range<u64>>)>>>,
+    range_supported: bool,
+}
+
+impl TrackedFakeHttp {
+    fn new(
+        responses: std::collections::HashMap<String, Vec<u8>>,
+        range_supported: bool,
+    ) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            range_supported,
+        }
+    }
+
+    /// Number of fetch calls made so far.
+    #[allow(dead_code)]
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+
+    /// Return a copy of all recorded (url, range) calls.
+    fn ranges(&self) -> Vec<(String, Option<std::ops::Range<u64>>)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl HttpBackend for TrackedFakeHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+    ) -> Result<(Vec<u8>, u64), String> {
+        let mut calls = self.calls.lock().unwrap();
+        calls.push((url.to_string(), range.clone()));
+
+        let responses = self.responses.lock().unwrap();
+        let full_body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        let total = full_body.len() as u64;
+
+        let data = match range {
+            Some(r) => {
+                let start = r.start.min(total);
+                let end = r.end.min(total).max(start);
+                full_body[start as usize..end as usize].to_vec()
+            }
+            None => full_body.clone(),
+        };
+
+        Ok((data, total))
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(self.range_supported)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        let responses = self.responses.lock().unwrap();
+        let full_body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        Ok(full_body.len() as u64)
+    }
+}
+
+#[test]
+fn segmented_transfer_completes_to_correct_file() {
+    // Given a 100-byte file hosted on a Range-supporting server
+    let content: Vec<u8> = (0u8..100).collect();
+    let mut map = std::collections::HashMap::new();
+    map.insert("https://example.com/segmented.bin".into(), content.clone());
+
+    let http = TrackedFakeHttp::new(map, true);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http.clone()), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
+
+    // Process pending — should complete in one call via segmented transfer
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    // Should have completed with the full content
+    let completed = events.iter().find_map(|e| match e {
+        CoreEvent::JobCompleted {
+            bytes_written, ..
+        } => Some(*bytes_written),
+        _ => None,
+    });
+    assert_eq!(
+        completed,
+        Some(100),
+        "segmented transfer should complete with 100 bytes, got events: {events:?}"
+    );
+
+    // Verify file on disk
+    let file_path = root.join("jobs").join(&job_id);
+    let files: Vec<_> = std::fs::read_dir(&file_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(files.len(), 1, "should have one file");
+    let on_disk = std::fs::read(files[0].path()).unwrap();
+    assert_eq!(on_disk, content, "file content should match original");
+    assert_eq!(on_disk.len(), 100);
+}
+
+#[test]
+fn segmented_transfer_makes_multiple_concurrent_range_requests() {
+    // Given a 100-byte file on a Range-supporting server
+    let content: Vec<u8> = (0u8..100).collect();
+    let mut map = std::collections::HashMap::new();
+    map.insert("https://example.com/segmented.bin".into(), content.clone());
+
+    let http = TrackedFakeHttp::new(map, true);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http.clone()), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let _job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
+
+    // Process
+    core.process_pending().unwrap();
+    collect_events(&rx);
+
+    // Inspect calls made to the HTTP backend
+    let calls = http.ranges();
+
+    // The first call should be the file_size probe (via file_size, not fetch)
+    // Then segments: for 100 bytes with DEFAULT_SEGMENT_COUNT=4:
+    //   seg_size = 25
+    //   segment 0: 0..25
+    //   segment 1: 25..50
+    //   segment 2: 50..75
+    //   segment 3: 75..100
+
+    // We should have exactly 4 fetch calls (one per segment)
+    assert_eq!(
+        calls.len(),
+        4,
+        "should make exactly 4 Range requests, got {len}: {calls:?}",
+        len = calls.len()
+    );
+
+    // All calls should be to the same URL
+    for (url, _) in &calls {
+        assert_eq!(url, "https://example.com/segmented.bin");
+    }
+
+    // Each call should have a specific range (not None)
+    for (_, range) in &calls {
+        assert!(
+            range.is_some(),
+            "each segmented fetch should have a Range header"
+        );
+    }
+
+    // There should be a range starting at 0 (first segment)
+    let starts_at_zero = calls.iter().any(|(_, r)| matches!(r, Some(rng) if rng.start == 0));
+    assert!(
+        starts_at_zero,
+        "should have a segment starting at 0: {calls:?}"
+    );
+
+    // The final segment should end at the total file size (100)
+    let ends_at_100 = calls.iter().any(|(_, r)| matches!(r, Some(rng) if rng.end == 100));
+    assert!(
+        ends_at_100,
+        "should have a segment ending at 100: {calls:?}"
+    );
+
+    // Ranges should be non-overlapping and cover 0..100
+    let mut ranges: Vec<_> = calls
+        .iter()
+        .filter_map(|(_, r)| r.clone())
+        .collect();
+    ranges.sort_by_key(|r| r.start);
+
+    // Check ranges are contiguous
+    let mut prev_end = 0u64;
+    for r in &ranges {
+        assert_eq!(
+            r.start, prev_end,
+            "ranges should be contiguous: prev_end={prev_end}, next.start={}",
+            r.start
+        );
+        prev_end = r.end;
+    }
+    assert_eq!(prev_end, 100, "ranges should cover exactly 100 bytes");
+}
+
+#[test]
+fn segmented_transfer_falls_back_to_single_connection_when_range_not_supported() {
+    // Given a 100-byte file on a server that does NOT support Range
+    let content: Vec<u8> = (0u8..100).collect();
+    let mut map = std::collections::HashMap::new();
+    map.insert("https://example.com/fallback.bin".into(), content.clone());
+
+    let http = TrackedFakeHttp::new(map, false); // range NOT supported
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http.clone()), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/fallback.bin");
+
+    // Process pending
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    // Should complete (via single-connection fallback)
+    let completed = events.iter().find_map(|e| match e {
+        CoreEvent::JobCompleted {
+            bytes_written, ..
+        } => Some(*bytes_written),
+        _ => None,
+    });
+    assert_eq!(
+        completed,
+        Some(100),
+        "fallback should complete with 100 bytes, got events: {events:?}"
+    );
+
+    // Verify only ONE fetch call was made (single connection, no Range)
+    let calls = http.ranges();
+    assert_eq!(
+        calls.len(),
+        1,
+        "fallback should make exactly 1 request, got {len}: {calls:?}",
+        len = calls.len()
+    );
+    assert!(
+        calls[0].1.is_none(),
+        "fallback request should NOT have a Range header, got {:?}",
+        calls[0].1
+    );
+
+    // Verify file on disk
+    let file_path = root.join("jobs").join(&job_id);
+    let files: Vec<_> = std::fs::read_dir(&file_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(files.len(), 1, "should have one file");
+    let on_disk = std::fs::read(files[0].path()).unwrap();
+    assert_eq!(on_disk, content, "file content should match original");
+    assert_eq!(on_disk.len(), 100);
+}
+
+#[test]
+fn segmented_transfer_handles_small_files_with_single_segment() {
+    // A file smaller than DEFAULT_SEGMENT_COUNT bytes should still work
+    // (seg_count will be min(4, 3) = 3, each segment 1 byte)
+    let content: Vec<u8> = b"abc".to_vec(); // 3 bytes
+    let mut map = std::collections::HashMap::new();
+    map.insert("https://example.com/small.bin".into(), content.clone());
+
+    let http = TrackedFakeHttp::new(map, true);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http.clone()), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/small.bin");
+
+    // Process
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    // Should complete
+    let completed = events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(completed, "small file should complete via segmented transfer");
+
+    // Should make seg_count (3) fetch calls, each getting 1 byte
+    let calls = http.ranges();
+    assert_eq!(
+        calls.len(),
+        3,
+        "3-byte file should make 3 segment requests, got {len}: {calls:?}",
+        len = calls.len()
+    );
+
+    // Verify file on disk
+    let file_path = root.join("jobs").join(&job_id);
+    let files: Vec<_> = std::fs::read_dir(&file_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    let on_disk = std::fs::read(files[0].path()).unwrap();
+    assert_eq!(on_disk, content, "small file content should match");
+    assert_eq!(on_disk.len(), 3);
+}
+
+#[test]
+fn segmented_transfer_zero_byte_file_fails_gracefully() {
+    // Zero-length file — segmented transfer should error, not crash
+    let content: Vec<u8> = vec![];
+    let mut map = std::collections::HashMap::new();
+    map.insert("https://example.com/empty.bin".into(), content.clone());
+
+    let http = TrackedFakeHttp::new(map, true);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let _job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/empty.bin");
+
+    // Processing an empty file should not panic
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    // Should emit a failed event (empty file is an error)
+    let has_failed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobFailed { .. }));
+    assert!(
+        has_failed,
+        "empty file should fail, got events: {events:?}"
     );
 }
