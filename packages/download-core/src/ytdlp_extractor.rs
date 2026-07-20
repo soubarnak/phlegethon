@@ -16,10 +16,15 @@
 //! [`FakeYtDlpExtractor`] returns canned yt-dlp JSON through the same parser.
 //! This module's unit tests use canned JSON strings.
 
-use crate::extractor::{ExtractorToolchain, MediaItem, ProbeResult, Quality};
+use crate::extractor::{
+    ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
+};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 
 // ---------------------------------------------------------------------------
@@ -560,14 +565,15 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         url: &str,
         format: &str,
         dest_dir: &std::path::Path,
-    ) -> Result<std::path::PathBuf, String> {
+        stop: &AtomicBool,
+    ) -> Result<ExtractorDownloadOutcome, String> {
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
         let format_selector = quality_id_to_ytdlp_format(format);
         let out_tmpl = dest_dir.join("%(title).200B [%(id)s].%(ext)s");
 
-        let mut cmd = std::process::Command::new(&self.config.binary_path);
+        let mut cmd = Command::new(&self.config.binary_path);
         cmd.arg("--no-warnings")
             .arg("-f")
             .arg(&format_selector)
@@ -585,35 +591,119 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
             cmd.arg("--ffmpeg-location").arg(ffmpeg_dir);
         }
 
-        let output = cmd
-            .output()
-            .map_err(|e| format!("failed to spawn yt-dlp download: {e}"))?;
+        match run_command_interruptible(cmd, stop, Duration::from_millis(50))? {
+            InterruptibleOutput::Stopped => Ok(ExtractorDownloadOutcome::Stopped),
+            InterruptibleOutput::Finished {
+                status,
+                stdout,
+                stderr,
+            } => {
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&stderr);
+                    return Err(format!(
+                        "yt-dlp download failed (exit {:?}): {stderr}",
+                        status.code()
+                    ));
+                }
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "yt-dlp download failed (exit {:?}): {stderr}",
-                output.status.code()
-            ));
+                let stdout = String::from_utf8_lossy(&stdout);
+                let path_line = stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .last()
+                    .ok_or_else(|| "yt-dlp download produced no output path".to_string())?;
+
+                let path = PathBuf::from(path_line);
+                if !path.is_file() {
+                    return Err(format!(
+                        "yt-dlp reported path '{}' but file is missing",
+                        path.display()
+                    ));
+                }
+                Ok(ExtractorDownloadOutcome::Completed(path))
+            }
         }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let path_line = stdout
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .last()
-            .ok_or_else(|| "yt-dlp download produced no output path".to_string())?;
-
-        let path = std::path::PathBuf::from(path_line);
-        if !path.is_file() {
-            return Err(format!(
-                "yt-dlp reported path '{}' but file is missing",
-                path.display()
-            ));
-        }
-        Ok(path)
     }
+}
+
+/// Outcome of waiting on a child process that may be hard-killed on stop.
+#[derive(Debug)]
+enum InterruptibleOutput {
+    Finished {
+        status: std::process::ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    Stopped,
+}
+
+/// Spawn `cmd`, poll `stop`, and hard-kill the child when stop is requested.
+fn run_command_interruptible(
+    mut cmd: Command,
+    stop: &AtomicBool,
+    poll_interval: Duration,
+) -> Result<InterruptibleOutput, String> {
+    if stop.load(Ordering::Acquire) {
+        return Ok(InterruptibleOutput::Stopped);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn yt-dlp download: {e}"))?;
+
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "yt-dlp download missing stdout pipe".to_string())?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "yt-dlp download missing stderr pipe".to_string())?;
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = stdout_pipe;
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = stderr_pipe;
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
+    let status = loop {
+        if stop.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            return Ok(InterruptibleOutput::Stopped);
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(poll_interval),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!("failed while waiting for yt-dlp download: {e}"));
+            }
+        }
+    };
+
+    let stdout = stdout_handle.join().unwrap_or_else(|_| Vec::new());
+    let stderr = stderr_handle.join().unwrap_or_else(|_| Vec::new());
+
+    Ok(InterruptibleOutput::Finished {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Map a probe quality id to a yt-dlp `-f` selector.
@@ -1375,6 +1465,36 @@ impl ExtractorToolchain for FakeYtDlpExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    // ---- Interruptible subprocess hard-kill ----
+
+    #[test]
+    fn run_command_interruptible_kills_long_running_child() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_worker = stop.clone();
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("30");
+            run_command_interruptible(cmd, &stop_for_worker, Duration::from_millis(20))
+        });
+
+        std::thread::sleep(Duration::from_millis(80));
+        stop.store(true, Ordering::Release);
+
+        let outcome = worker.join().expect("worker join").expect("interruptible wait");
+        assert!(
+            matches!(outcome, InterruptibleOutput::Stopped),
+            "expected Stopped after kill, got {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "hard-kill must stop promptly, elapsed {:?}",
+            started.elapsed()
+        );
+    }
 
     // ---- YtDlpConfig ----
 

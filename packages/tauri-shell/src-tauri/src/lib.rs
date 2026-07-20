@@ -301,8 +301,22 @@ fn list_jobs(state: State<AppState>) -> Result<Vec<download_core::JobSnapshot>, 
 
 #[tauri::command]
 fn pause_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+    // Validate + signal stop without blocking on process_pending's Core mutex.
+    {
+        let core = state.core.lock().map_err(|e| e.to_string())?;
+        core.can_pause_job(&job_id)?;
+    }
+
+    if let Some(flag) = state.job_signals.request_pause(&job_id) {
+        flag.store(true, Ordering::Release);
+    }
+
+    if state.job_signals.is_transfer_active(&job_id) {
+        return Ok(());
+    }
+
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.pause_job(&job_id)
+    core.finish_pause_if_idle(&job_id)
 }
 
 #[tauri::command]

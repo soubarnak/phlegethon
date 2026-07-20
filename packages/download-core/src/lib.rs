@@ -25,8 +25,8 @@ pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolcha
 pub use bandwidth::{Clock, ManualClock, SystemClock, TransferProgress};
 pub use event::CoreEvent;
 pub use extractor::{
-    ExtractorToolchain, FakeExtractorToolchain, ItemSelection, MediaItem, ProbeResult,
-    ProbeSelection, Quality,
+    ExtractorDownloadOutcome, ExtractorToolchain, FakeExtractorToolchain, ItemSelection,
+    MediaItem, ProbeResult, ProbeSelection, Quality,
 };
 pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
 pub use job::{EnqueueOutcome, JobState};
@@ -823,8 +823,17 @@ impl Core {
                     })
                     .map_err(|_| "event channel closed".to_string())?;
 
-                match self.extractor.download(&url, &format, &dest) {
-                    Ok(path) => {
+                // `pause_requested` is also set by Discard (`signal_discard_stop`);
+                // both Pause and Discard use it as the extractor stop signal.
+                let stop = &pause_requested;
+                transfer_active.store(true, Ordering::Release);
+                let download_result =
+                    self.extractor
+                        .download(&url, &format, &dest, stop);
+                transfer_active.store(false, Ordering::Release);
+
+                match download_result {
+                    Ok(ExtractorDownloadOutcome::Completed(path)) => {
                         let bytes = std::fs::metadata(&path)
                             .map(|m| m.len())
                             .unwrap_or(0);
@@ -838,15 +847,24 @@ impl Core {
                             .map_err(|_| "event channel closed".to_string())?;
                         self.persist_queue_now()?;
                     }
+                    Ok(ExtractorDownloadOutcome::Stopped) => {
+                        self.finalize_stop_after_transfer(&job_id)?;
+                    }
                     Err(err) => {
-                        self.jobs[i].mark_failed();
-                        self.event_tx
-                            .send(CoreEvent::JobFailed {
-                                job_id: job_id.clone(),
-                                error: err,
-                            })
-                            .map_err(|_| "event channel closed".to_string())?;
-                        self.persist_queue_now()?;
+                        // Kill/stop races can surface as toolchain errors; prefer
+                        // Pause/Discard finalize when the user already requested stop.
+                        if pause_requested.load(Ordering::Acquire) {
+                            self.finalize_stop_after_transfer(&job_id)?;
+                        } else {
+                            self.jobs[i].mark_failed();
+                            self.event_tx
+                                .send(CoreEvent::JobFailed {
+                                    job_id: job_id.clone(),
+                                    error: err,
+                                })
+                                .map_err(|_| "event channel closed".to_string())?;
+                            self.persist_queue_now()?;
+                        }
                     }
                 }
                 continue;

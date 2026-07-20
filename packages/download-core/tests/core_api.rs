@@ -729,6 +729,210 @@ fn discard_during_in_flight_transfer_stops_and_deletes_partials() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Acceptance: interruptible Extractor Toolchain Pause/Discard (issue #38)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn discard_during_in_flight_extractor_download_stops_and_deletes_partials() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=discard-ext",
+        "Discard Extractor Video",
+        "https://cdn.youtube.com/discard-ext.mp4",
+        vec![("720p", "720p")],
+    );
+    let chunks_written = toolchain.enable_slow_download(64, std::time::Duration::from_millis(20));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=discard-ext")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=discard-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    let job_id = job_ids[0].clone();
+    let signals = core.job_signals();
+    let job_dir = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .map(|j| PathBuf::from(j.destination))
+        .expect("job destination");
+
+    let core = Arc::new(Mutex::new(core));
+    let rx = Arc::new(rx);
+    let job_for_discard = job_id.clone();
+
+    let worker = {
+        let core = core.clone();
+        let rx = rx.clone();
+        std::thread::spawn(move || {
+            let mut guard = core.lock().unwrap();
+            guard.process_pending().unwrap();
+            collect_events(&rx)
+        })
+    };
+
+    // Wait until the slow extractor has written at least one chunk.
+    let started = std::time::Instant::now();
+    while *chunks_written.lock().unwrap() == 0 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "extractor download never became active"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert!(
+        signals.signal_discard_stop(&job_for_discard),
+        "in-flight extractor Discard should see an active transfer"
+    );
+
+    let events = worker.join().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)),
+        "discard during extractor download should emit JobDiscarded, got: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "discarded extractor transfer must not claim success"
+    );
+
+    let snapshots = core.lock().unwrap().list_job_snapshots();
+    assert!(
+        snapshots.iter().all(|j| j.job_id != job_id),
+        "discarded in-flight extractor job must leave the queue"
+    );
+    assert!(
+        !job_dir.exists(),
+        "in-flight extractor Discard must delete Job Destination including partials"
+    );
+    let written = *chunks_written.lock().unwrap();
+    assert!(
+        written > 0,
+        "some chunks should have been written before Discard stopped the transfer"
+    );
+    assert!(
+        written < 64,
+        "Discard must stop promptly before the fake extractor finishes, got {written}"
+    );
+}
+
+#[test]
+fn pause_during_in_flight_extractor_download_stops_promptly() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=pause-ext",
+        "Pause Extractor Video",
+        "https://cdn.youtube.com/pause-ext.mp4",
+        vec![("720p", "720p")],
+    );
+    let chunks_written = toolchain.enable_slow_download(64, std::time::Duration::from_millis(20));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=pause-ext")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=pause-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    let job_id = job_ids[0].clone();
+    let signals = core.job_signals();
+    let job_dir = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .map(|j| PathBuf::from(j.destination))
+        .expect("job destination");
+
+    let core = Arc::new(Mutex::new(core));
+    let rx = Arc::new(rx);
+    let job_for_pause = job_id.clone();
+
+    let worker = {
+        let core = core.clone();
+        let rx = rx.clone();
+        std::thread::spawn(move || {
+            let mut guard = core.lock().unwrap();
+            guard.process_pending().unwrap();
+            collect_events(&rx)
+        })
+    };
+
+    let started = std::time::Instant::now();
+    while *chunks_written.lock().unwrap() == 0 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "extractor download never became active"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    signals
+        .request_pause(&job_for_pause)
+        .expect("pause flag registered")
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let events = worker.join().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobPaused { job_id: id } if id == &job_id)),
+        "pause during extractor download should emit JobPaused, got: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "paused extractor transfer must not claim success"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobDiscarded { .. })),
+        "pause must not discard the job"
+    );
+
+    let snapshots = core.lock().unwrap().list_job_snapshots();
+    let snap = snapshots
+        .iter()
+        .find(|j| j.job_id == job_id)
+        .expect("paused job stays in queue");
+    assert_eq!(snap.status, "paused");
+    assert!(
+        job_dir.exists(),
+        "Pause keeps Job Destination (partials allowed)"
+    );
+    let written = *chunks_written.lock().unwrap();
+    assert!(
+        written > 0 && written < 64,
+        "Pause must stop promptly mid-download, got {written}"
+    );
+}
+
 #[test]
 fn pause_on_completed_job_errors() {
     let tmp = tempfile::tempdir().unwrap();

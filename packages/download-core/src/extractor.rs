@@ -5,6 +5,7 @@
 //! yt-dlp sidecar subprocess; in tests a fake returns canned items.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A single quality/format available for a media item.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +41,15 @@ pub struct ProbeResult {
     pub source_name: Option<String>,
 }
 
+/// Result of an Extractor Toolchain download attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtractorDownloadOutcome {
+    /// Media file written successfully.
+    Completed(std::path::PathBuf),
+    /// Pause or Discard requested; transfer stopped without completing.
+    Stopped,
+}
+
 /// The Extractor Toolchain — wraps yt-dlp (or a fake in tests).
 pub trait ExtractorToolchain: Send + Sync {
     /// Probe a URL and return discovered items with available qualities.
@@ -50,13 +60,18 @@ pub trait ExtractorToolchain: Send + Sync {
     /// `format` is a quality id from probe (e.g. `"720p"`, `"best"`) mapped to
     /// a yt-dlp `-f` selector by the production implementation.
     ///
+    /// `stop` is set by Core when Pause or Discard is requested. Implementations
+    /// must honor it promptly (fake: exit the download loop; production: kill
+    /// the yt-dlp subprocess) and return [`ExtractorDownloadOutcome::Stopped`].
+    ///
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
     fn download(
         &self,
         _url: &str,
         _format: &str,
         _dest_dir: &std::path::Path,
-    ) -> Result<std::path::PathBuf, String> {
+        _stop: &AtomicBool,
+    ) -> Result<ExtractorDownloadOutcome, String> {
         Err("extractor download not supported for this toolchain".into())
     }
 }
@@ -69,10 +84,23 @@ pub trait ExtractorToolchain: Send + Sync {
 ///
 /// Maps URLs to a list of `(item_id, title, url, qualities)` tuples.
 /// Unknown URLs return an error.
+///
+/// Optional slow-download mode writes in chunks and honors `stop` between
+/// chunks so Core Pause/Discard tests can assert prompt interruptibility.
 #[derive(Clone, Default)]
 pub struct FakeExtractorToolchain {
     /// URL → (source_name, items)
     responses: HashMap<String, FakeProbeResponse>,
+    /// When set, `download` sleeps between writes and checks `stop` each chunk.
+    slow_download: Option<SlowDownloadConfig>,
+}
+
+#[derive(Clone)]
+struct SlowDownloadConfig {
+    total_chunks: u32,
+    chunk_delay: std::time::Duration,
+    /// Shared counter so tests can wait until the download is in flight.
+    chunks_written: std::sync::Arc<std::sync::Mutex<u32>>,
 }
 
 #[derive(Clone)]
@@ -85,6 +113,23 @@ impl FakeExtractorToolchain {
     /// Create an empty fake (all URLs fail).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable a long download that stops when Pause/Discard sets `stop`.
+    ///
+    /// Returns a shared chunk counter so tests can wait until transfer is active.
+    pub fn enable_slow_download(
+        &mut self,
+        total_chunks: u32,
+        chunk_delay: std::time::Duration,
+    ) -> std::sync::Arc<std::sync::Mutex<u32>> {
+        let chunks_written = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        self.slow_download = Some(SlowDownloadConfig {
+            total_chunks,
+            chunk_delay,
+            chunks_written: chunks_written.clone(),
+        });
+        chunks_written
     }
 
     /// Insert a single-item probe response.
@@ -170,9 +215,40 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         url: &str,
         format: &str,
         dest_dir: &std::path::Path,
-    ) -> Result<std::path::PathBuf, String> {
+        stop: &AtomicBool,
+    ) -> Result<ExtractorDownloadOutcome, String> {
+        if stop.load(Ordering::Acquire) {
+            return Ok(ExtractorDownloadOutcome::Stopped);
+        }
+
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create extractor dest {dest_dir:?}: {e}"))?;
+
+        if let Some(slow) = &self.slow_download {
+            let path = dest_dir.join("extractor-partial.bin");
+            std::fs::write(&path, b"")
+                .map_err(|e| format!("create partial {path:?}: {e}"))?;
+
+            for chunk in 0..slow.total_chunks {
+                if stop.load(Ordering::Acquire) {
+                    return Ok(ExtractorDownloadOutcome::Stopped);
+                }
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .map_err(|e| format!("open partial {path:?}: {e}"))?;
+                write!(file, "chunk:{chunk}:{url}:{format}\n")
+                    .map_err(|e| format!("write partial {path:?}: {e}"))?;
+                *slow.chunks_written.lock().unwrap() = chunk + 1;
+                std::thread::sleep(slow.chunk_delay);
+            }
+
+            if stop.load(Ordering::Acquire) {
+                return Ok(ExtractorDownloadOutcome::Stopped);
+            }
+            return Ok(ExtractorDownloadOutcome::Completed(path));
+        }
 
         let filename = url::Url::parse(url)
             .ok()
@@ -188,7 +264,7 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         let body = format!("fake extractor download:{url}:{format}");
         std::fs::write(&path, body.as_bytes())
             .map_err(|e| format!("write extractor output {path:?}: {e}"))?;
-        Ok(path)
+        Ok(ExtractorDownloadOutcome::Completed(path))
     }
 }
 
