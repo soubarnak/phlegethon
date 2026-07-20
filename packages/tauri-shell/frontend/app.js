@@ -31,7 +31,7 @@ const queueList = $("queueList");
 const queueEmpty = $("queueEmpty");
 const probeOverlay = $("probeOverlay");
 const probeTitle = $("probeTitle");
-const probeUrl = $("probeUrl");
+const probeUrlEl = $("probeUrl");
 const probeItems = $("probeItems");
 const probeConfirm = $("probeConfirm");
 const probeCancel = $("probeCancel");
@@ -43,7 +43,7 @@ const dragOverlay = $("dragOverlay");
 function setTheme(theme) {
   state.theme = theme;
   document.documentElement.setAttribute("data-theme", theme);
-  themeToggle.textContent = theme === "dark" ? "☀️" : "🌓";
+  themeToggle.textContent = theme === "dark" ? "Light" : "Dark";
   localStorage.setItem("phlegethon-theme", theme);
 }
 
@@ -79,7 +79,7 @@ function handleEnqueueResult(url, result) {
     renderQueue();
     getInvoke()("process_pending").catch(() => {});
   } else if (result.type === "ProbeThenConfirm") {
-    probeUrl(url);
+    startProbe(url);
   } else {
     showError(`Unexpected enqueue result: ${JSON.stringify(result)}`);
   }
@@ -152,11 +152,11 @@ document.addEventListener("drop", (e) => {
 });
 
 // ---- Probe ----
-async function probeUrl(url) {
+async function startProbe(url) {
   try {
     probeOverlay.classList.add("open");
     probeTitle.textContent = "Probing…";
-    probeUrl.textContent = url;
+    probeUrlEl.textContent = url;
     probeItems.innerHTML =
       '<div class="queue-empty" style="padding:2rem"><span>Analyzing URL…</span></div>';
     probeConfirm.disabled = true;
@@ -171,7 +171,7 @@ async function probeUrl(url) {
 
 function showProbeResults(url, result) {
   probeTitle.textContent = result.source_name || "Probe Results";
-  probeUrl.textContent = url;
+  probeUrlEl.textContent = url;
   probeItems.innerHTML = "";
 
   if (!result.items || result.items.length === 0) {

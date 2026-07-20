@@ -380,7 +380,10 @@ body {
 
 /* ---- Theme toggle ---- */
 .theme-toggle {
-  font-size: var(--text-base);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: var(--space-2) var(--space-3);
 }
 
 /* ---- Hidden file input ---- */
