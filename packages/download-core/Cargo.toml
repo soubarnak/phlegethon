@@ -1,0 +1,12 @@
+[package]
+name = "download-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crossbeam-channel = "0.5"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
