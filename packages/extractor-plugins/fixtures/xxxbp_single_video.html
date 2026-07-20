@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <meta property="og:title" content="Sample XXXBP Video" />
+    <meta property="og:image" content="https://cdn.xxxbp.tv/thumbs/12345.jpg" />
+    <title>Sample XXXBP Video</title>
+  </head>
+  <body>
+    <div id="jwplayer">
+      <script>
+        jwplayer("player").setup({
+          sources: [
+            { file: "https://cdn.xxxbp.tv/media/12345_360.mp4", label: "360p" },
+            { file: "https://cdn.xxxbp.tv/media/12345_720.mp4", label: "720p" },
+            {
+              file: "https://cdn.xxxbp.tv/media/12345_hls.m3u8",
+              label: "auto",
+            },
+          ],
+          duration: 300,
+        });
+      </script>
+    </div>
+  </body>
+</html>
