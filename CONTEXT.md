@@ -45,15 +45,19 @@ The default flow for multi-item sources (channels, playlists, batches): discover
 _Avoid_: silent full-channel download, auto-start without review
 
 **Library Root**:
-The user-chosen base directory under which all downloads are stored.
-_Avoid_: hardcoded save path, app-managed-only storage
+The user-chosen base directory that is the default parent for Job Destinations; set in settings, not hardcoded by the app.
+_Avoid_: hardcoded save path, app-managed-only storage, required parent of every override path
 
 **Job Destination**:
-The folder for a specific download job, under the Library Root; batch/channel jobs use a dedicated subfolder derived from the source.
-_Avoid_: scattering batch items across unrelated folders by default
+The folder where a specific download job writes its files — by default a path under the Library Root (batch/channel jobs get a dedicated subfolder derived from the source); the user may override it to any absolute folder on disk for that job.
+_Avoid_: scattering batch items across unrelated folders by default, requiring every job to stay under Library Root
+
+**Discard**:
+User action that removes a job from the queue; for in-flight, Paused, or Failed jobs it also stops the transfer and deletes that job’s files under its Job Destination (including partials); for Completed jobs it removes the queue row only and leaves files on disk.
+_Avoid_: Cancel (as the product name for this action), Pause, deleting Completed outputs, leaving orphaned partials after removing an unfinished job
 
 **Resumable Transfer**:
-A download that can continue from the last successful byte after interruption, with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or discarded.
+A download that can continue from the last successful byte after interruption, with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded.
 _Avoid_: restart-from-zero on every failure, silent delete of partials
 
 **Segmented Transfer**:
