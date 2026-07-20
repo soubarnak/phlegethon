@@ -1,4 +1,251 @@
-//! Storage — Library Root and Job Destination management.
+//! Storage — Library Root queue persistence and load reconciliation.
 //!
-//! Library Root is the user-chosen base directory.
-//! Each job gets a subfolder under it (Job Destination).
+//! Queue state lives at `{library_root}/.phlegethon/jobs.json`.
+//! Writes are atomic (temp file + rename).
+
+use crate::job::{Job, JobState};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Directory under Library Root for Core metadata.
+pub const PHLEGETHON_DIR: &str = ".phlegethon";
+
+/// Filename for the persisted job queue index.
+pub const JOBS_FILENAME: &str = "jobs.json";
+
+const QUEUE_VERSION: u32 = 1;
+
+/// On-disk representation of the job queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedQueue {
+    pub version: u32,
+    pub global_bandwidth_cap: Option<u64>,
+    pub jobs: Vec<PersistedJob>,
+}
+
+/// On-disk representation of a single job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedJob {
+    pub id: String,
+    pub mirror_urls: Vec<String>,
+    pub mirror_index: usize,
+    pub state: PersistedJobState,
+    /// Absolute path to the Job Destination directory.
+    pub destination: PathBuf,
+    pub bytes_received: u64,
+    pub bandwidth_cap: Option<u64>,
+    pub source: Option<String>,
+    pub extractor_format: Option<String>,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PersistedJobState {
+    Pending,
+    Paused,
+    Failed,
+    Completed,
+}
+
+impl From<JobState> for PersistedJobState {
+    fn from(state: JobState) -> Self {
+        match state {
+            JobState::Pending => Self::Pending,
+            JobState::Paused => Self::Paused,
+            JobState::Failed => Self::Failed,
+            JobState::Completed => Self::Completed,
+        }
+    }
+}
+
+impl From<PersistedJobState> for JobState {
+    fn from(state: PersistedJobState) -> Self {
+        match state {
+            PersistedJobState::Pending => Self::Pending,
+            PersistedJobState::Paused => Self::Paused,
+            PersistedJobState::Failed => Self::Failed,
+            PersistedJobState::Completed => Self::Completed,
+        }
+    }
+}
+
+/// Path to the queue index file under a Library Root.
+pub fn queue_path(library_root: &Path) -> PathBuf {
+    library_root.join(PHLEGETHON_DIR).join(JOBS_FILENAME)
+}
+
+/// Load jobs from disk, reconciling each with its on-disk `.part` file.
+pub fn load_jobs(library_root: &Path) -> Result<Vec<Job>, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+
+    if queue.version != QUEUE_VERSION {
+        return Err(format!(
+            "unsupported queue version {} (expected {QUEUE_VERSION})",
+            queue.version
+        ));
+    }
+
+    let mut jobs = Vec::with_capacity(queue.jobs.len());
+    for persisted in queue.jobs {
+        let mut job = Job::from_persisted(persisted)?;
+        reconcile_job(&mut job)?;
+        jobs.push(job);
+    }
+    Ok(jobs)
+}
+
+/// Load the global bandwidth cap from the queue file, if present.
+pub fn load_global_bandwidth_cap(library_root: &Path) -> Result<Option<u64>, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    Ok(queue.global_bandwidth_cap)
+}
+
+/// Build a persisted queue snapshot from live jobs.
+pub fn build_queue(jobs: &[Job], global_bandwidth_cap: Option<u64>) -> PersistedQueue {
+    PersistedQueue {
+        version: QUEUE_VERSION,
+        global_bandwidth_cap,
+        jobs: jobs.iter().map(Job::to_persisted).collect(),
+    }
+}
+
+/// Atomically write the queue index to disk.
+pub fn save_queue(library_root: &Path, queue: &PersistedQueue) -> Result<(), String> {
+    let dir = library_root.join(PHLEGETHON_DIR);
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+
+    let path = dir.join(JOBS_FILENAME);
+    let tmp = dir.join(".jobs.json.tmp");
+    let raw = serde_json::to_string_pretty(queue)
+        .map_err(|e| format!("serialize queue: {e}"))?;
+    fs::write(&tmp, &raw).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+        format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Reconcile stored progress with the on-disk `.part` file length.
+///
+/// - When a `.part` exists, its length is authoritative.
+/// - When `.part` is missing but stored progress > 0 (and job not completed),
+///   the job is marked Failed.
+pub fn reconcile_job(job: &mut Job) -> Result<(), String> {
+    let part_path = part_path_for_job(job);
+    let stored = job.bytes_received();
+
+    match fs::metadata(&part_path) {
+        Ok(meta) => {
+            let part_len = meta.len();
+            if part_len != stored {
+                job.set_bytes_received(part_len);
+            }
+        }
+        Err(_) if stored > 0 && job.state() != JobState::Completed => {
+            job.mark_failed();
+        }
+        Err(_) => {}
+    }
+    Ok(())
+}
+
+/// Path for an in-progress download (`{final}.part`).
+pub fn part_path_for(final_path: &Path) -> PathBuf {
+    let mut part = final_path.as_os_str().to_os_string();
+    part.push(".part");
+    PathBuf::from(part)
+}
+
+fn part_path_for_job(job: &Job) -> PathBuf {
+    let file_path = job.destination().join(job.filename());
+    part_path_for(&file_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        fs::create_dir_all(&root).unwrap();
+
+        let job = Job::new("https://example.com/file.zip".into(), root.clone());
+
+        let queue = build_queue(&[job], Some(1024));
+        save_queue(&root, &queue).unwrap();
+
+        let loaded = load_jobs(&root).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id(), queue.jobs[0].id);
+    }
+
+    #[test]
+    fn reconcile_uses_part_length_when_meta_ahead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let mut job = Job::new("https://example.com/a.zip".into(), root);
+        let dest = job.destination().clone();
+        fs::create_dir_all(&dest).unwrap();
+        job.set_bytes_received(1000);
+
+        let part_path = part_path_for(&dest.join("a.zip"));
+        let mut f = fs::File::create(&part_path).unwrap();
+        f.write_all(&vec![0u8; 800]).unwrap();
+
+        reconcile_job(&mut job).unwrap();
+        assert_eq!(job.bytes_received(), 800);
+    }
+
+    #[test]
+    fn reconcile_uses_part_length_when_disk_ahead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let mut job = Job::new("https://example.com/a.zip".into(), root);
+        let dest = job.destination().clone();
+        fs::create_dir_all(&dest).unwrap();
+        job.set_bytes_received(500);
+
+        let part_path = part_path_for(&dest.join("a.zip"));
+        let mut f = fs::File::create(&part_path).unwrap();
+        f.write_all(&vec![0u8; 800]).unwrap();
+
+        reconcile_job(&mut job).unwrap();
+        assert_eq!(job.bytes_received(), 800);
+    }
+
+    #[test]
+    fn reconcile_marks_failed_when_partial_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let mut job = Job::new("https://example.com/a.zip".into(), root);
+        job.set_bytes_received(500);
+
+        reconcile_job(&mut job).unwrap();
+        assert_eq!(job.state(), JobState::Failed);
+    }
+}

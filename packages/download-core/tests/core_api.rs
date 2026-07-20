@@ -730,6 +730,73 @@ fn interrupt_then_resume_continues_from_last_byte() {
 }
 
 #[test]
+fn restart_restores_jobs_and_resumes_from_part() {
+    let content =
+        b"restart persistence test file with enough bytes to split cleanly".to_vec();
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "https://example.com/restart.zip".into(),
+        content.clone(),
+    );
+    let http = StagedFakeHttp::new(map);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+
+    {
+        let (mut core, rx) = make_core(Box::new(http.clone()));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = enqueue_direct_job_id(&mut core, "https://example.com/restart.zip");
+
+        core.process_pending().unwrap();
+        let events = collect_events(&rx);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+            "first pass should leave job incomplete"
+        );
+    }
+
+    let queue_path = root.join(".phlegethon").join("jobs.json");
+    assert!(
+        queue_path.exists(),
+        "queue index should be persisted under Library Root"
+    );
+    let queue_raw = std::fs::read_to_string(&queue_path).unwrap();
+    assert!(
+        queue_raw.contains(&job_id),
+        "persisted queue should contain job id"
+    );
+
+    let part_path = root
+        .join("jobs")
+        .join(&job_id)
+        .join("restart.zip.part");
+    assert!(part_path.exists(), "partial file should exist after first pass");
+    let partial_len = std::fs::metadata(&part_path).unwrap().len();
+    assert!(partial_len > 0 && partial_len < content.len() as u64);
+
+    let (mut core2, rx2) = make_core(Box::new(http));
+    core2.set_library_root(root.clone()).unwrap();
+
+    core2.process_pending().unwrap();
+    let events2 = collect_events(&rx2);
+    assert!(
+        events2
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "restarted core should complete the job, got {events2:?}"
+    );
+
+    let final_path = root.join("jobs").join(&job_id).join("restart.zip");
+    assert!(final_path.exists(), "final file should exist after restart resume");
+    let on_disk = std::fs::read(&final_path).unwrap();
+    assert_eq!(on_disk, content);
+}
+
+#[test]
 fn resume_starts_from_last_byte_not_zero() {
     // This test verifies that restart-from-zero is NOT the default path
     // when Range is available.
