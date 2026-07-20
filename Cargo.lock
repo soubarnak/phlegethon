@@ -2222,6 +2222,7 @@ dependencies = [
 name = "phlegethon-tauri"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "dirs 5.0.1",
  "download-core",
  "log",

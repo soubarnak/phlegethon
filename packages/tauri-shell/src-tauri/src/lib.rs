@@ -2,27 +2,27 @@
 //!
 //! Tauri commands expose the Core API to the frontend.
 
+use crossbeam_channel::TryRecvError;
 use download_core::{
-    Core, CoreEvent, EnqueueOutcome, HttpBackend, ItemSelection, ProbeSelection,
-    ProdHttpBackend,
+    Core, CoreEvent, EnqueueOutcome, ProbeSelection, ProdHttpBackend,
 };
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
 
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
 
-pub struct AppState {
-    pub core: Mutex<Core>,
-    pub event_rx: Mutex<crossbeam_channel::Receiver<CoreEvent>>,
-    pub library_root: Mutex<Option<PathBuf>>,
+struct AppState {
+    core: Mutex<Core>,
+    event_rx: Mutex<crossbeam_channel::Receiver<CoreEvent>>,
+    library_root: Mutex<Option<PathBuf>>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let http = Box::new(ProdHttpBackend::new());
         let extractor = Box::new(download_core::FakeExtractorToolchain::new());
         let (core, rx) = Core::new(http, extractor);
@@ -41,7 +41,7 @@ impl AppState {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum EnqueueResult {
+enum EnqueueResult {
     EnqueueDirect {
         job_id: String,
         destination: String,
@@ -69,19 +69,8 @@ impl From<EnqueueOutcome> for EnqueueResult {
 }
 
 #[derive(Serialize, Clone)]
-#[serde(rename_all = "snake_case")]
-pub struct JobSummary {
-    pub job_id: String,
-    pub url: String,
-    pub status: String,
-    pub bytes_downloaded: u64,
-    pub total_bytes: Option<u64>,
-    pub destination: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum EventSummary {
+enum EventSummary {
     JobProgress {
         job_id: String,
         bytes_downloaded: u64,
@@ -106,12 +95,6 @@ pub enum EventSummary {
     },
     JobDiscarded {
         job_id: String,
-    },
-    JobMirrorFailover {
-        job_id: String,
-        previous_url: String,
-        next_url: String,
-        error: String,
     },
 }
 
@@ -150,18 +133,8 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
         CoreEvent::JobDiscarded { job_id } => Some(EventSummary::JobDiscarded {
             job_id: job_id.clone(),
         }),
-        CoreEvent::JobMirrorFailover {
-            job_id,
-            previous_url,
-            next_url,
-            error,
-        } => Some(EventSummary::JobMirrorFailover {
-            job_id: job_id.clone(),
-            previous_url: previous_url.clone(),
-            next_url: next_url.clone(),
-            error: error.clone(),
-        }),
         CoreEvent::ProbeResult { .. } | CoreEvent::ProbeFailed { .. } => None,
+        CoreEvent::JobMirrorFailover { .. } => None,
     }
 }
 
@@ -169,25 +142,8 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
 // Tauri commands
 // ---------------------------------------------------------------------------
 
-/// Set the library root directory.
 #[tauri::command]
-pub fn set_library_root(
-    state: State<AppState>,
-    root: String,
-) -> Result<(), String> {
-    let path = PathBuf::from(&root);
-    {
-        let mut core = state.core.lock().map_err(|e| e.to_string())?;
-        core.set_library_root(path.clone())?;
-    }
-    let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
-    *stored = Some(path);
-    Ok(())
-}
-
-/// Enqueue a URL. Returns EnqueueDirect or ProbeThenConfirm.
-#[tauri::command]
-pub fn enqueue_url(state: State<AppState>, url: String) -> Result<EnqueueResult, String> {
+fn enqueue_url(state: State<AppState>, url: String) -> Result<EnqueueResult, String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
 
     // Auto-set library root if not set
@@ -201,9 +157,8 @@ pub fn enqueue_url(state: State<AppState>, url: String) -> Result<EnqueueResult,
     Ok(outcome.into())
 }
 
-/// Probe a URL for downloadable items.
 #[tauri::command]
-pub fn probe_url(
+fn probe_url(
     state: State<AppState>,
     url: String,
 ) -> Result<download_core::ProbeResult, String> {
@@ -211,9 +166,8 @@ pub fn probe_url(
     core.probe(&url)
 }
 
-/// Confirm a probe selection and create jobs.
 #[tauri::command]
-pub fn confirm_probe_selection(
+fn confirm_probe_selection(
     state: State<AppState>,
     selection: ProbeSelection,
 ) -> Result<Vec<String>, String> {
@@ -221,54 +175,38 @@ pub fn confirm_probe_selection(
     core.confirm_probe_selection(&selection)
 }
 
-/// Process pending jobs (run transfers).
 #[tauri::command]
-pub fn process_pending(state: State<AppState>) -> Result<(), String> {
+fn process_pending(state: State<AppState>) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.process_pending()
 }
 
-/// List all jobs with their current state.
 #[tauri::command]
-pub fn list_jobs(state: State<AppState>) -> Result<Vec<JobSummary>, String> {
-    // The Core doesn't expose a public jobs() iterator directly.
-    // We manage jobs via enqueue/process and track them on the frontend.
-    // This is a best-effort reflection if we add a job accessor later.
-    // For now, frontend manages its own job list and this is a no-op.
-    Ok(Vec::new())
-}
-
-/// Pause a job.
-#[tauri::command]
-pub fn pause_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+fn pause_job(state: State<AppState>, job_id: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.pause_job(&job_id)
 }
 
-/// Resume a paused job.
 #[tauri::command]
-pub fn resume_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+fn resume_job(state: State<AppState>, job_id: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.resume_job(&job_id)
 }
 
-/// Retry a failed job.
 #[tauri::command]
-pub fn retry_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+fn retry_job(state: State<AppState>, job_id: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.retry_job(&job_id)
 }
 
-/// Discard a job from the queue.
 #[tauri::command]
-pub fn discard_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+fn discard_job(state: State<AppState>, job_id: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.discard_job(&job_id)
 }
 
-/// Poll for new events. Drains the event channel.
 #[tauri::command]
-pub fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
+fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
     let rx = state.event_rx.lock().map_err(|e| e.to_string())?;
     let mut events = Vec::new();
     loop {
@@ -278,18 +216,11 @@ pub fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> 
                     events.push(summary);
                 }
             }
-            Err(crossbeam_channel::TryRecvError::Empty) => break,
-            Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
         }
     }
     Ok(events)
-}
-
-/// Get/set the theme preference (stored in app data dir).
-#[tauri::command]
-pub fn get_library_root(state: State<AppState>) -> Result<Option<String>, String> {
-    let stored = state.library_root.lock().map_err(|e| e.to_string())?;
-    Ok(stored.as_ref().map(|p| p.display().to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +250,7 @@ pub fn run() {
                 )?;
             }
 
-            // Auto-set library root to app data dir
+            // Auto-set library root
             let state: State<AppState> = app.state();
             let root = dirs_data_dir();
             {
@@ -334,18 +265,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            set_library_root,
             enqueue_url,
             probe_url,
             confirm_probe_selection,
             process_pending,
-            list_jobs,
             pause_job,
             resume_job,
             retry_job,
             discard_job,
             poll_events,
-            get_library_root,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
