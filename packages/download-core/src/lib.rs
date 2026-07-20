@@ -426,11 +426,13 @@ impl Core {
                 }
             });
 
-            let job = job::Job::new_with_source(
+            let mut job = job::Job::new_with_source(
                 item.url.clone(),
                 root.clone(),
                 job_source,
             );
+            // Launch Site media is fetched by yt-dlp, not plain HTTP of the page URL.
+            job.set_extractor_format(&sel.quality_id);
 
             job_ids.push(job.id().to_string());
             self.jobs.push(job);
@@ -481,7 +483,7 @@ impl Core {
                 break;
             }
 
-            let (job_id, url, dest, bytes_received, job_cap) = {
+            let (job_id, url, dest, bytes_received, job_cap, extractor_format) = {
                 let job = &self.jobs[i];
                 (
                     job.id().to_string(),
@@ -489,8 +491,38 @@ impl Core {
                     job.destination().to_path_buf(),
                     job.bytes_received(),
                     job.bandwidth_cap(),
+                    job.extractor_format().map(|s| s.to_string()),
                 )
             };
+
+            // Launch Site path: yt-dlp download (HLS / signed CDN), not HTTP page GET.
+            if let Some(format) = extractor_format {
+                match self.extractor.download(&url, &format, &dest) {
+                    Ok(path) => {
+                        let bytes = std::fs::metadata(&path)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        self.jobs[i].mark_completed();
+                        self.event_tx
+                            .send(CoreEvent::JobCompleted {
+                                job_id: job_id.clone(),
+                                bytes_written: bytes,
+                                path,
+                            })
+                            .map_err(|_| "event channel closed".to_string())?;
+                    }
+                    Err(err) => {
+                        self.jobs[i].mark_failed();
+                        self.event_tx
+                            .send(CoreEvent::JobFailed {
+                                job_id: job_id.clone(),
+                                error: err,
+                            })
+                            .map_err(|_| "event channel closed".to_string())?;
+                    }
+                }
+                continue;
+            }
 
             // Effective cap = min(global_remaining, per-job cap)
             let effective_cap: Option<u64> = match (global_remaining, job_cap) {

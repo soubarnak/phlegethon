@@ -24,7 +24,15 @@ struct AppState {
 impl AppState {
     fn new() -> Self {
         let http = Box::new(ProdHttpBackend::new());
-        let extractor = Box::new(download_core::FakeExtractorToolchain::new());
+        let ytdlp_bin = std::env::var_os("YTDLP_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("yt-dlp"));
+        let config = download_core::YtDlpConfig {
+            binary_path: ytdlp_bin,
+            ..download_core::YtDlpConfig::default()
+        }
+        .with_sidecar_plugins(dirs_data_dir());
+        let extractor = Box::new(download_core::YtDlpExtractorToolchain::new(config));
         let (core, rx) = Core::new(http, extractor);
 
         Self {
@@ -40,7 +48,7 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Clone)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(tag = "type")]
 enum EnqueueResult {
     EnqueueDirect {
         job_id: String,
@@ -69,7 +77,7 @@ impl From<EnqueueOutcome> for EnqueueResult {
 }
 
 #[derive(Serialize, Clone)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(tag = "type")]
 enum EventSummary {
     JobProgress {
         job_id: String,
@@ -176,9 +184,19 @@ fn confirm_probe_selection(
 }
 
 #[tauri::command]
-fn process_pending(state: State<AppState>) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.process_pending()
+fn process_pending(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+    // yt-dlp downloads can take minutes — don't block the UI invoke thread.
+    let _ = state; // ensure AppState is managed before spawn
+    std::thread::spawn(move || {
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut core) = state.core.lock() {
+                if let Err(e) = core.process_pending() {
+                    log::error!("process_pending failed: {e}");
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -277,4 +295,36 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enqueue_result_type_tags_match_frontend() {
+        let direct = EnqueueResult::EnqueueDirect {
+            job_id: "job-1".into(),
+            destination: "/tmp/x".into(),
+        };
+        let json = serde_json::to_value(&direct).unwrap();
+        assert_eq!(json["type"], "EnqueueDirect");
+
+        let probe = EnqueueResult::ProbeThenConfirm {
+            url: "https://example.com/v".into(),
+        };
+        let json = serde_json::to_value(&probe).unwrap();
+        assert_eq!(json["type"], "ProbeThenConfirm");
+    }
+
+    #[test]
+    fn event_summary_type_tags_match_frontend() {
+        let evt = EventSummary::JobProgress {
+            job_id: "job-1".into(),
+            bytes_downloaded: 10,
+            total_bytes: Some(100),
+        };
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["type"], "JobProgress");
+    }
 }

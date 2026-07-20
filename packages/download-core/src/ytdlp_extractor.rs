@@ -485,6 +485,92 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
 
         Ok(result)
     }
+
+    fn download(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf, String> {
+        std::fs::create_dir_all(dest_dir)
+            .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
+
+        let format_selector = quality_id_to_ytdlp_format(format);
+        let out_tmpl = dest_dir.join("%(title).200B [%(id)s].%(ext)s");
+
+        let mut cmd = std::process::Command::new(&self.config.binary_path);
+        cmd.arg("--no-warnings")
+            .arg("-f")
+            .arg(&format_selector)
+            .arg("-o")
+            .arg(&out_tmpl)
+            .arg("--print")
+            .arg("after_move:filepath")
+            .arg("--no-playlist")
+            .arg(url);
+
+        for dir in &self.config.plugin_dirs {
+            cmd.arg("--plugin-dirs").arg(dir);
+        }
+        if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
+            cmd.arg("--ffmpeg-location").arg(ffmpeg_dir);
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("failed to spawn yt-dlp download: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "yt-dlp download failed (exit {:?}): {stderr}",
+                output.status.code()
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let path_line = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .last()
+            .ok_or_else(|| "yt-dlp download produced no output path".to_string())?;
+
+        let path = std::path::PathBuf::from(path_line);
+        if !path.is_file() {
+            return Err(format!(
+                "yt-dlp reported path '{}' but file is missing",
+                path.display()
+            ));
+        }
+        Ok(path)
+    }
+}
+
+/// Map a probe quality id to a yt-dlp `-f` selector.
+fn quality_id_to_ytdlp_format(quality_id: &str) -> String {
+    match quality_id {
+        "best" | "worst" => quality_id.to_string(),
+        id if id.ends_with("-videoonly") => {
+            let height = id.trim_end_matches("-videoonly").trim_end_matches('p');
+            if height.chars().all(|c| c.is_ascii_digit()) {
+                format!("bestvideo[height={height}]/bestvideo[height<={height}]/bestvideo")
+            } else {
+                id.to_string()
+            }
+        }
+        id if id.ends_with("-audio") || id.ends_with("k-audio") => {
+            "bestaudio/best".to_string()
+        }
+        id if id.ends_with('p')
+            && id.trim_end_matches('p').chars().all(|c| c.is_ascii_digit()) =>
+        {
+            let height = id.trim_end_matches('p');
+            // Prefer HLS/combined streams; progressive xHamster formats are often unusable.
+            format!("best[height={height}]/best[height<={height}]/best")
+        }
+        other => other.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1795,6 +1881,16 @@ mod tests {
     }
 
     // ---- Edge cases ----
+
+    #[test]
+    fn quality_id_maps_to_ytdlp_height_selector() {
+        assert_eq!(
+            quality_id_to_ytdlp_format("720p"),
+            "best[height=720]/best[height<=720]/best"
+        );
+        assert_eq!(quality_id_to_ytdlp_format("best"), "best");
+        assert!(quality_id_to_ytdlp_format("720p-videoonly").contains("bestvideo"));
+    }
 
     #[test]
     fn formats_to_qualities_empty_list() {

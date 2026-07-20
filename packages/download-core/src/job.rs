@@ -73,6 +73,9 @@ pub struct Job {
     bandwidth_cap: Option<u64>,
     /// Optional source name for batch/channel subfolder naming.
     source: Option<String>,
+    /// When set, `process_pending` downloads via the Extractor Toolchain
+    /// (yt-dlp) using this quality id instead of plain HTTP.
+    extractor_format: Option<String>,
 }
 
 impl Job {
@@ -87,6 +90,7 @@ impl Job {
             bytes_received: 0,
             bandwidth_cap: None,
             source: None,
+            extractor_format: None,
         }
     }
 
@@ -115,7 +119,18 @@ impl Job {
             bytes_received: 0,
             bandwidth_cap: None,
             source,
+            extractor_format: None,
         }
+    }
+
+    /// Mark this job to download via the Extractor Toolchain (yt-dlp).
+    pub fn set_extractor_format(&mut self, format: impl Into<String>) {
+        self.extractor_format = Some(format.into());
+    }
+
+    /// Quality / format id for extractor-backed download, if any.
+    pub fn extractor_format(&self) -> Option<&str> {
+        self.extractor_format.as_deref()
     }
 
     pub fn id(&self) -> &str {

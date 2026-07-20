@@ -4,57 +4,69 @@
 /*  Communicates with Download Core via Tauri commands                 */
 /* ------------------------------------------------------------------ */
 
-// ---- Tauri API (vanilla — no framework) ----
-const { invoke } = window.__TAURI__?.core ?? {};
-const { listen } = window.__TAURI__?.event ?? {};
+// Resolve Tauri APIs lazily — withGlobalTauri must be enabled in tauri.conf.json.
+function getInvoke() {
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (typeof invoke !== "function") {
+    throw new Error(
+      "Tauri API unavailable (window.__TAURI__). Open the desktop app window, not a plain browser tab.",
+    );
+  }
+  return invoke;
+}
 
 // ---- State ----
 const state = {
-  jobs: [],           // array of job objects from Rust
+  jobs: [], // array of job objects from Rust
   pendingProbe: null, // { url, items, sourceName } — shown in probe sheet
-  theme: 'light',
+  theme: "light",
   selectedJobId: null,
 };
 
 // ---- DOM refs ----
 const $ = (id) => document.getElementById(id);
-const urlInput = $('urlInput');
-const enqueueBtn = $('enqueueBtn');
-const queueList = $('queueList');
-const queueEmpty = $('queueEmpty');
-const probeOverlay = $('probeOverlay');
-const probeTitle = $('probeTitle');
-const probeUrl = $('probeUrl');
-const probeItems = $('probeItems');
-const probeConfirm = $('probeConfirm');
-const probeCancel = $('probeCancel');
-const probeClose = $('probeClose');
-const themeToggle = $('themeToggle');
-const dragOverlay = $('dragOverlay');
+const urlInput = $("urlInput");
+const enqueueBtn = $("enqueueBtn");
+const queueList = $("queueList");
+const queueEmpty = $("queueEmpty");
+const probeOverlay = $("probeOverlay");
+const probeTitle = $("probeTitle");
+const probeUrl = $("probeUrl");
+const probeItems = $("probeItems");
+const probeConfirm = $("probeConfirm");
+const probeCancel = $("probeCancel");
+const probeClose = $("probeClose");
+const themeToggle = $("themeToggle");
+const dragOverlay = $("dragOverlay");
 
 // ---- Theme ----
 function setTheme(theme) {
   state.theme = theme;
-  document.documentElement.setAttribute('data-theme', theme);
-  themeToggle.textContent = theme === 'dark' ? '☀️' : '🌓';
-  localStorage.setItem('phlegethon-theme', theme);
+  document.documentElement.setAttribute("data-theme", theme);
+  themeToggle.textContent = theme === "dark" ? "☀️" : "🌓";
+  localStorage.setItem("phlegethon-theme", theme);
 }
 
-themeToggle.addEventListener('click', () => {
-  setTheme(state.theme === 'light' ? 'dark' : 'light');
+themeToggle.addEventListener("click", () => {
+  setTheme(state.theme === "light" ? "dark" : "light");
 });
 
 // Restore saved theme
-const savedTheme = localStorage.getItem('phlegethon-theme');
+const savedTheme = localStorage.getItem("phlegethon-theme");
 if (savedTheme) setTheme(savedTheme);
 
 // ---- URL Enqueue ----
 async function enqueueUrl(url) {
-  if (!url || !url.trim()) return;
+  if (!url || !url.trim()) {
+    showError("Paste or type a URL first.");
+    urlInput.focus();
+    return;
+  }
   const trimmed = url.trim();
 
   try {
-    const result = await invoke('enqueue_url', { url: trimmed });
+    const invoke = getInvoke();
+    const result = await invoke("enqueue_url", { url: trimmed });
     handleEnqueueResult(trimmed, result);
   } catch (err) {
     showError(`Enqueue failed: ${err}`);
@@ -62,27 +74,28 @@ async function enqueueUrl(url) {
 }
 
 function handleEnqueueResult(url, result) {
-  if (result.type === 'EnqueueDirect') {
-    // Job created directly
+  if (result.type === "EnqueueDirect") {
     addJobToState(result.job_id, url, result.destination);
     renderQueue();
-  } else if (result.type === 'ProbeThenConfirm') {
-    // Need to probe first
+    getInvoke()("process_pending").catch(() => {});
+  } else if (result.type === "ProbeThenConfirm") {
     probeUrl(url);
+  } else {
+    showError(`Unexpected enqueue result: ${JSON.stringify(result)}`);
   }
 }
 
-enqueueBtn.addEventListener('click', () => enqueueUrl(urlInput.value));
-urlInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
+enqueueBtn.addEventListener("click", () => enqueueUrl(urlInput.value));
+urlInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
     e.preventDefault();
     enqueueUrl(urlInput.value);
   }
 });
 
 // ---- Paste handler (Ctrl+V anywhere) ----
-document.addEventListener('paste', (e) => {
-  const text = e.clipboardData?.getData('text') || '';
+document.addEventListener("paste", (e) => {
+  const text = e.clipboardData?.getData("text") || "";
   if (text && isValidUrl(text)) {
     e.preventDefault();
     urlInput.value = text;
@@ -93,33 +106,38 @@ document.addEventListener('paste', (e) => {
 function isValidUrl(str) {
   try {
     new URL(str);
-    return str.startsWith('http://') || str.startsWith('https://');
-  } catch { return false; }
+    return str.startsWith("http://") || str.startsWith("https://");
+  } catch {
+    return false;
+  }
 }
 
 // ---- Drag & Drop ----
-document.addEventListener('dragenter', (e) => {
+document.addEventListener("dragenter", (e) => {
   e.preventDefault();
-  dragOverlay.classList.add('show');
+  dragOverlay.classList.add("show");
 });
 
-document.addEventListener('dragover', (e) => {
+document.addEventListener("dragover", (e) => {
   e.preventDefault();
-  dragOverlay.classList.add('show');
+  dragOverlay.classList.add("show");
 });
 
-document.addEventListener('dragleave', (e) => {
+document.addEventListener("dragleave", (e) => {
   e.preventDefault();
-  if (e.relatedTarget === null || e.relatedTarget === document.documentElement) {
-    dragOverlay.classList.remove('show');
+  if (
+    e.relatedTarget === null ||
+    e.relatedTarget === document.documentElement
+  ) {
+    dragOverlay.classList.remove("show");
   }
 });
 
-document.addEventListener('drop', (e) => {
+document.addEventListener("drop", (e) => {
   e.preventDefault();
-  dragOverlay.classList.remove('show');
+  dragOverlay.classList.remove("show");
 
-  const text = e.dataTransfer?.getData('text') || '';
+  const text = e.dataTransfer?.getData("text") || "";
   if (text && isValidUrl(text)) {
     enqueueUrl(text);
     return;
@@ -129,91 +147,97 @@ document.addEventListener('drop', (e) => {
   const files = e.dataTransfer?.files;
   if (files && files.length > 0) {
     // Could read file contents — for now, just notify
-    showError('File drop not yet supported. Paste URLs instead.');
+    showError("File drop not yet supported. Paste URLs instead.");
   }
 });
 
 // ---- Probe ----
 async function probeUrl(url) {
   try {
-    probeOverlay.classList.add('open');
-    probeTitle.textContent = 'Probing…';
+    probeOverlay.classList.add("open");
+    probeTitle.textContent = "Probing…";
     probeUrl.textContent = url;
-    probeItems.innerHTML = '<div class="queue-empty" style="padding:2rem"><span>Analyzing URL…</span></div>';
+    probeItems.innerHTML =
+      '<div class="queue-empty" style="padding:2rem"><span>Analyzing URL…</span></div>';
     probeConfirm.disabled = true;
 
-    const result = await invoke('probe_url', { url });
+    const result = await getInvoke()("probe_url", { url });
     showProbeResults(url, result);
   } catch (err) {
-    probeOverlay.classList.remove('open');
+    probeOverlay.classList.remove("open");
     showError(`Probe failed: ${err}`);
   }
 }
 
 function showProbeResults(url, result) {
-  probeTitle.textContent = result.source_name || 'Probe Results';
+  probeTitle.textContent = result.source_name || "Probe Results";
   probeUrl.textContent = url;
-  probeItems.innerHTML = '';
+  probeItems.innerHTML = "";
 
   if (!result.items || result.items.length === 0) {
-    probeItems.innerHTML = '<div class="queue-empty" style="padding:2rem"><span>No items found.</span></div>';
+    probeItems.innerHTML =
+      '<div class="queue-empty" style="padding:2rem"><span>No items found.</span></div>';
     return;
   }
 
-  state.pendingProbe = { url, items: result.items, sourceName: result.source_name };
+  state.pendingProbe = {
+    url,
+    items: result.items,
+    sourceName: result.source_name,
+  };
   probeConfirm.disabled = false;
 
   result.items.forEach((item, idx) => {
     // Format duration
-    const dur = item.duration ? formatDuration(item.duration) : '';
-    const row = document.createElement('div');
-    row.className = 'probe-item';
+    const dur = item.duration ? formatDuration(item.duration) : "";
+    const row = document.createElement("div");
+    row.className = "probe-item";
     row.dataset.itemIndex = idx;
 
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.className = 'probe-item-checkbox';
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "probe-item-checkbox";
     checkbox.checked = true;
     checkbox.dataset.itemIndex = idx;
 
-    const info = document.createElement('div');
-    info.className = 'probe-item-info';
+    const info = document.createElement("div");
+    info.className = "probe-item-info";
 
-    const title = document.createElement('div');
-    title.className = 'probe-item-title';
+    const title = document.createElement("div");
+    title.className = "probe-item-title";
     title.textContent = item.title;
     info.appendChild(title);
 
     if (dur) {
-      const duration = document.createElement('div');
-      duration.className = 'probe-item-duration';
+      const duration = document.createElement("div");
+      duration.className = "probe-item-duration";
       duration.textContent = dur;
       info.appendChild(duration);
     }
 
-    const qualitiesWrap = document.createElement('div');
-    qualitiesWrap.className = 'probe-item-qualities';
+    const qualitiesWrap = document.createElement("div");
+    qualitiesWrap.className = "probe-item-qualities";
 
     // Default quality selection
     const defaultQuality = findDefaultQuality(item.qualities);
 
     item.qualities.forEach((q) => {
-      const chip = document.createElement('span');
-      chip.className = 'quality-chip';
+      const chip = document.createElement("span");
+      chip.className = "quality-chip";
       chip.textContent = q.label || q.id;
       chip.dataset.qualityId = q.id;
       chip.dataset.itemIndex = idx;
 
       if (q.id === defaultQuality) {
-        chip.classList.add('selected');
+        chip.classList.add("selected");
       }
 
-      chip.addEventListener('click', () => {
+      chip.addEventListener("click", () => {
         // Deselect all qualities in this item, select this one
-        qualitiesWrap.querySelectorAll('.quality-chip').forEach((c) => {
-          c.classList.remove('selected');
+        qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
+          c.classList.remove("selected");
         });
-        chip.classList.add('selected');
+        chip.classList.add("selected");
         checkbox.checked = true;
       });
 
@@ -224,11 +248,11 @@ function showProbeResults(url, result) {
     row.appendChild(info);
     row.appendChild(qualitiesWrap);
 
-    checkbox.addEventListener('change', () => {
+    checkbox.addEventListener("change", () => {
       // When unchecked, deselect all qualities visually
       if (!checkbox.checked) {
-        qualitiesWrap.querySelectorAll('.quality-chip').forEach((c) => {
-          c.classList.remove('selected');
+        qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
+          c.classList.remove("selected");
         });
       }
     });
@@ -240,7 +264,7 @@ function showProbeResults(url, result) {
 function findDefaultQuality(qualities) {
   if (!qualities || qualities.length === 0) return null;
   // Prefer 720p or 1080p
-  for (const prefix of ['1080p', '720p', '480p', '360p']) {
+  for (const prefix of ["1080p", "720p", "480p", "360p"]) {
     const found = qualities.find((q) => q.id.startsWith(prefix));
     if (found) return found.id;
   }
@@ -250,23 +274,23 @@ function findDefaultQuality(qualities) {
 function formatDuration(seconds) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 // Confirm probe selection
-probeConfirm.addEventListener('click', async () => {
+probeConfirm.addEventListener("click", async () => {
   if (!state.pendingProbe) return;
 
   const selectedItems = [];
-  const rows = probeItems.querySelectorAll('.probe-item');
+  const rows = probeItems.querySelectorAll(".probe-item");
 
   rows.forEach((row) => {
-    const checkbox = row.querySelector('.probe-item-checkbox');
+    const checkbox = row.querySelector(".probe-item-checkbox");
     if (!checkbox.checked) return;
 
     const itemIndex = parseInt(checkbox.dataset.itemIndex);
     const item = state.pendingProbe.items[itemIndex];
-    const selectedChip = row.querySelector('.quality-chip.selected');
+    const selectedChip = row.querySelector(".quality-chip.selected");
 
     if (item && selectedChip) {
       selectedItems.push({
@@ -277,7 +301,7 @@ probeConfirm.addEventListener('click', async () => {
   });
 
   if (selectedItems.length === 0) {
-    showError('Select at least one item.');
+    showError("Select at least one item.");
     return;
   }
 
@@ -287,18 +311,19 @@ probeConfirm.addEventListener('click', async () => {
       items: selectedItems,
     };
 
-    const jobIds = await invoke('confirm_probe_selection', { selection });
-    probeOverlay.classList.remove('open');
+    const invoke = getInvoke();
+    const jobIds = await invoke("confirm_probe_selection", { selection });
+    probeOverlay.classList.remove("open");
     state.pendingProbe = null;
 
     // Add jobs to queue
     jobIds.forEach((id) => {
-      addJobToState(id, selection.url, '');
+      addJobToState(id, selection.url, "");
     });
     renderQueue();
 
     // Start processing
-    invoke('process_pending').catch(() => {});
+    invoke("process_pending").catch(() => {});
   } catch (err) {
     showError(`Confirmation failed: ${err}`);
   }
@@ -306,18 +331,18 @@ probeConfirm.addEventListener('click', async () => {
 
 // Close probe sheet
 function closeProbe() {
-  probeOverlay.classList.remove('open');
+  probeOverlay.classList.remove("open");
   state.pendingProbe = null;
 }
 
-probeCancel.addEventListener('click', closeProbe);
-probeClose.addEventListener('click', closeProbe);
-probeOverlay.addEventListener('click', (e) => {
+probeCancel.addEventListener("click", closeProbe);
+probeClose.addEventListener("click", closeProbe);
+probeOverlay.addEventListener("click", (e) => {
   if (e.target === probeOverlay) closeProbe();
 });
 
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeProbe();
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeProbe();
 });
 
 // ---- Queue State Management ----
@@ -329,7 +354,7 @@ function addJobToState(jobId, url, destination) {
     job_id: jobId,
     url,
     destination,
-    status: 'pending',
+    status: "pending",
     bytes_downloaded: 0,
     total_bytes: null,
     title: extractTitleFromUrl(url),
@@ -339,7 +364,7 @@ function addJobToState(jobId, url, destination) {
 function extractTitleFromUrl(url) {
   try {
     const u = new URL(url);
-    const path = u.pathname.split('/').filter(Boolean).pop() || u.hostname;
+    const path = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
     return decodeURIComponent(path);
   } catch {
     return url;
@@ -348,26 +373,30 @@ function extractTitleFromUrl(url) {
 
 function renderQueue() {
   if (state.jobs.length === 0) {
-    queueEmpty.style.display = 'flex';
-    queueList.innerHTML = '';
+    queueEmpty.style.display = "flex";
+    queueList.innerHTML = "";
     return;
   }
 
-  queueEmpty.style.display = 'none';
+  queueEmpty.style.display = "none";
 
-  let html = '';
+  let html = "";
   state.jobs.forEach((job) => {
-    const pct = job.total_bytes > 0
-      ? Math.round((job.bytes_downloaded / job.total_bytes) * 100)
-      : job.bytes_downloaded > 0 ? 0 : 0;
+    const pct =
+      job.total_bytes > 0
+        ? Math.round((job.bytes_downloaded / job.total_bytes) * 100)
+        : job.bytes_downloaded > 0
+          ? 0
+          : 0;
 
     const statusClass = `status-${job.status}`;
-    const statusLabel = job.status.charAt(0).toUpperCase() + job.status.slice(1);
-    const sizeLabel = job.total_bytes ? formatBytes(job.total_bytes) : '';
+    const statusLabel =
+      job.status.charAt(0).toUpperCase() + job.status.slice(1);
+    const sizeLabel = job.total_bytes ? formatBytes(job.total_bytes) : "";
     const progressWidth = Math.min(pct, 100);
 
     html += `
-      <div class="queue-row ${state.selectedJobId === job.job_id ? 'selected' : ''}" data-job-id="${job.job_id}">
+      <div class="queue-row ${state.selectedJobId === job.job_id ? "selected" : ""}" data-job-id="${job.job_id}">
         <div class="row-info">
           <div class="row-title" title="${escapeHtml(job.title)}">${escapeHtml(job.title)}</div>
           <div class="row-url" title="${escapeHtml(job.url)}">${escapeHtml(job.url)}</div>
@@ -378,11 +407,11 @@ function renderQueue() {
             <div class="progress-fill" style="width:${progressWidth}%"></div>
           </div>
         </div>
-        <div class="row-meta">${formatBytes(job.bytes_downloaded)}${sizeLabel ? ` / ${sizeLabel}` : ''}</div>
+        <div class="row-meta">${formatBytes(job.bytes_downloaded)}${sizeLabel ? ` / ${sizeLabel}` : ""}</div>
         <div class="row-actions">
-          ${job.status === 'pending' || job.status === 'downloading' ? `<button class="btn-icon btn-sm" data-action="pause" data-job-id="${job.job_id}" title="Pause">⏸</button>` : ''}
-          ${job.status === 'paused' ? `<button class="btn-icon btn-sm" data-action="resume" data-job-id="${job.job_id}" title="Resume">▶</button>` : ''}
-          ${job.status === 'failed' ? `<button class="btn-icon btn-sm" data-action="retry" data-job-id="${job.job_id}" title="Retry">↻</button>` : ''}
+          ${job.status === "pending" || job.status === "downloading" ? `<button class="btn-icon btn-sm" data-action="pause" data-job-id="${job.job_id}" title="Pause">⏸</button>` : ""}
+          ${job.status === "paused" ? `<button class="btn-icon btn-sm" data-action="resume" data-job-id="${job.job_id}" title="Resume">▶</button>` : ""}
+          ${job.status === "failed" ? `<button class="btn-icon btn-sm" data-action="retry" data-job-id="${job.job_id}" title="Retry">↻</button>` : ""}
           <button class="btn-icon btn-sm btn-danger" data-action="discard" data-job-id="${job.job_id}" title="Discard">✕</button>
         </div>
       </div>
@@ -392,8 +421,8 @@ function renderQueue() {
   queueList.innerHTML = html;
 
   // Attach action handlers
-  queueList.querySelectorAll('[data-action]').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
+  queueList.querySelectorAll("[data-action]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const action = btn.dataset.action;
       const jobId = btn.dataset.jobId;
@@ -402,8 +431,8 @@ function renderQueue() {
   });
 
   // Select row
-  queueList.querySelectorAll('.queue-row').forEach((row) => {
-    row.addEventListener('click', () => {
+  queueList.querySelectorAll(".queue-row").forEach((row) => {
+    row.addEventListener("click", () => {
       state.selectedJobId = row.dataset.jobId;
       renderQueue();
     });
@@ -411,36 +440,37 @@ function renderQueue() {
 }
 
 function escapeHtml(str) {
-  const div = document.createElement('div');
+  const div = document.createElement("div");
   div.textContent = str;
   return div.innerHTML;
 }
 
 function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
+  if (bytes === 0) return "0 B";
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const sizes = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
 // ---- Job Actions ----
 async function handleJobAction(action, jobId) {
   try {
+    const invoke = getInvoke();
     switch (action) {
-      case 'pause':
-        await invoke('pause_job', { jobId });
+      case "pause":
+        await invoke("pause_job", { jobId });
         break;
-      case 'resume':
-        await invoke('resume_job', { jobId });
+      case "resume":
+        await invoke("resume_job", { jobId });
         break;
-      case 'retry':
-        await invoke('retry_job', { jobId });
+      case "retry":
+        await invoke("retry_job", { jobId });
         break;
-      case 'discard':
+      case "discard":
         state.jobs = state.jobs.filter((j) => j.job_id !== jobId);
         renderQueue();
-        await invoke('discard_job', { jobId }).catch(() => {});
+        await invoke("discard_job", { jobId }).catch(() => {});
         return;
     }
     // Refresh state
@@ -452,7 +482,7 @@ async function handleJobAction(action, jobId) {
 
 async function refreshJobs() {
   try {
-    const jobs = await invoke('list_jobs');
+    const jobs = await getInvoke()("list_jobs");
     // Merge server state into our local state
     jobs.forEach((serverJob) => {
       const local = state.jobs.find((j) => j.job_id === serverJob.job_id);
@@ -461,17 +491,21 @@ async function refreshJobs() {
       }
     });
     renderQueue();
-  } catch { /* silent */ }
+  } catch {
+    /* silent */
+  }
 }
 
 // ---- Event polling (pull-based) ----
 async function pollEvents() {
   try {
-    const events = await invoke('poll_events');
+    const events = await getInvoke()("poll_events");
     events.forEach((evt) => {
       handleCoreEvent(evt);
     });
-  } catch { /* silent */ }
+  } catch {
+    /* silent */
+  }
   // Poll every 500ms
   setTimeout(pollEvents, 500);
 }
@@ -481,26 +515,26 @@ function handleCoreEvent(evt) {
   if (!job) return;
 
   switch (evt.type) {
-    case 'JobProgress':
+    case "JobProgress":
       job.bytes_downloaded = evt.bytes_downloaded;
       if (evt.total_bytes) job.total_bytes = evt.total_bytes;
-      job.status = 'downloading';
+      job.status = "downloading";
       break;
-    case 'JobCompleted':
-      job.status = 'completed';
+    case "JobCompleted":
+      job.status = "completed";
       job.bytes_downloaded = evt.bytes_written || job.bytes_downloaded;
       break;
-    case 'JobFailed':
-      job.status = 'failed';
+    case "JobFailed":
+      job.status = "failed";
       break;
-    case 'JobPaused':
-      job.status = 'paused';
+    case "JobPaused":
+      job.status = "paused";
       break;
-    case 'JobResumed':
-      job.status = 'pending';
+    case "JobResumed":
+      job.status = "pending";
       break;
-    case 'JobRetried':
-      job.status = 'pending';
+    case "JobRetried":
+      job.status = "pending";
       break;
   }
   renderQueue();
@@ -510,44 +544,53 @@ function handleCoreEvent(evt) {
 let errorTimeout = null;
 
 function showError(msg) {
-  // Simple ephemeral error display
-  const existing = document.querySelector('.error-toast');
+  console.error(msg);
+  const existing = document.querySelector(".error-toast");
   if (existing) existing.remove();
 
-  const toast = document.createElement('div');
-  toast.className = 'error-toast';
+  const toast = document.createElement("div");
+  toast.className = "error-toast";
   toast.textContent = msg;
   Object.assign(toast.style, {
-    position: 'fixed',
-    bottom: '48px',
-    left: '50%',
-    transform: 'translateX(-50%)',
-    background: 'var(--error-bg)',
-    color: 'var(--error-fg)',
-    padding: '8px 16px',
-    borderRadius: 'var(--radius-md)',
-    fontFamily: 'var(--font-sans)',
-    fontSize: 'var(--text-sm)',
-    zIndex: '300',
-    border: '1px solid var(--border-error)',
-    boxShadow: 'var(--shadow-lg)',
-    maxWidth: '80%',
-    textAlign: 'center',
+    position: "fixed",
+    bottom: "48px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    background: "var(--error-bg, #fee2e2)",
+    color: "var(--error-fg, #991b1b)",
+    padding: "8px 16px",
+    borderRadius: "var(--radius-md, 8px)",
+    fontFamily: "var(--font-sans, sans-serif)",
+    fontSize: "var(--text-sm, 14px)",
+    zIndex: "9999",
+    border: "1px solid var(--border-error, #fca5a5)",
+    boxShadow: "var(--shadow-lg, 0 8px 24px rgba(0,0,0,.2))",
+    maxWidth: "80%",
+    textAlign: "center",
   });
   document.body.appendChild(toast);
 
   if (errorTimeout) clearTimeout(errorTimeout);
-  errorTimeout = setTimeout(() => toast.remove(), 4000);
+  errorTimeout = setTimeout(() => toast.remove(), 8000);
 }
 
 // ---- Init ----
-document.addEventListener('DOMContentLoaded', () => {
-  // Focus URL input
+document.addEventListener("DOMContentLoaded", () => {
   urlInput.focus();
 
-  // Start polling
-  pollEvents();
+  try {
+    getInvoke();
+  } catch (err) {
+    showError(String(err.message || err));
+  }
 
-  // Initial job list
+  pollEvents();
   refreshJobs();
+});
+
+window.addEventListener("error", (e) => {
+  showError(`JS error: ${e.message}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  showError(`Promise error: ${e.reason}`);
 });

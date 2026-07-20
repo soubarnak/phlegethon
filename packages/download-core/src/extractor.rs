@@ -44,6 +44,21 @@ pub struct ProbeResult {
 pub trait ExtractorToolchain: Send + Sync {
     /// Probe a URL and return discovered items with available qualities.
     fn probe(&self, url: &str) -> Result<ProbeResult, String>;
+
+    /// Download media for a Launch Site URL into `dest_dir` via the toolchain.
+    ///
+    /// `format` is a quality id from probe (e.g. `"720p"`, `"best"`) mapped to
+    /// a yt-dlp `-f` selector by the production implementation.
+    ///
+    /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
+    fn download(
+        &self,
+        _url: &str,
+        _format: &str,
+        _dest_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf, String> {
+        Err("extractor download not supported for this toolchain".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
