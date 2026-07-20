@@ -2033,6 +2033,66 @@ impl HttpBackend for TrackedFakeHttp {
 }
 
 #[test]
+fn segmented_transfer_writes_matching_bytes_via_part_file() {
+    let content: Vec<u8> = (0u8..100).collect();
+    let mut map = std::collections::HashMap::new();
+    map.insert("https://example.com/segmented.bin".into(), content.clone());
+
+    let http = TrackedFakeHttp::new(map, true);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    let job_dir = root.join("jobs").join(&job_id);
+    let final_path = job_dir.join("segmented.bin");
+    let part_path = job_dir.join("segmented.bin.part");
+
+    assert!(final_path.exists(), "final file should exist after rename");
+    assert!(
+        !part_path.exists(),
+        "partial file should be renamed away on success"
+    );
+
+    let on_disk = std::fs::read(&final_path).unwrap();
+    assert_eq!(on_disk, content, "on-disk bytes should match source");
+
+    let progress_bytes = events.iter().rev().find_map(|e| match e {
+        CoreEvent::JobProgress {
+            bytes_downloaded,
+            total_bytes: Some(total),
+            ..
+        } => Some((*bytes_downloaded, *total)),
+        _ => None,
+    });
+    assert!(
+        progress_bytes.is_some(),
+        "should emit progress with total bytes"
+    );
+    let (downloaded, total) = progress_bytes.unwrap();
+    assert_eq!(downloaded, content.len() as u64);
+    assert_eq!(total, content.len() as u64);
+    assert_eq!(
+        downloaded,
+        on_disk.len() as u64,
+        "progress bytes should match on-disk size"
+    );
+
+    let completed_path = events.iter().find_map(|e| match e {
+        CoreEvent::JobCompleted { path, .. } => Some(path.clone()),
+        _ => None,
+    });
+    assert_eq!(completed_path, Some(final_path));
+}
+
+#[test]
 fn segmented_transfer_completes_to_correct_file() {
     // Given a 100-byte file hosted on a Range-supporting server
     let content: Vec<u8> = (0u8..100).collect();

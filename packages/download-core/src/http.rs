@@ -43,19 +43,6 @@ pub trait HttpBackend: Send + Sync {
     /// In tests it returns the length of canned data.
     fn file_size(&self, url: &str) -> Result<u64, String>;
 }
-
-/// Collect a fetch into memory. Used by segmented transfer for per-range bodies.
-pub(crate) fn fetch_into_vec(
-    backend: &dyn HttpBackend,
-    url: &str,
-    range: Option<Range<u64>>,
-) -> Result<(Vec<u8>, u64), String> {
-    let mut buf = Vec::new();
-    let meta = backend.fetch(url, range, &mut buf)?;
-    Ok((buf, meta.total_length))
-}
-
-// ---------------------------------------------------------------------------
 // Production HTTP backend (ureq-based)
 // ---------------------------------------------------------------------------
 

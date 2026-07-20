@@ -29,7 +29,7 @@ pub use job::EnqueueOutcome;
 pub use mirror_set::MirrorSet;
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -545,6 +545,12 @@ impl Core {
                 };
 
                 if supports_range {
+                    std::fs::create_dir_all(&dest)
+                        .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
+                    let filename = self.filename_from_url(&url);
+                    let file_path = dest.join(&filename);
+                    let part_path = Self::part_path_for(&file_path);
+
                     // Segmented fetch loop: retry with next mirror on failure
                     let seg_result = 'seg_loop: loop {
                         let current_url = {
@@ -552,9 +558,11 @@ impl Core {
                             job.url().to_string()
                         };
 
-                        match self.segmented_fetch(&current_url, effective_cap) {
+                        match self.segmented_fetch(&current_url, &part_path, effective_cap) {
                             Ok(result) => break 'seg_loop Some(result),
                             Err(err) => {
+                                // Drop partial segmented data before mirror failover.
+                                let _ = std::fs::remove_file(&part_path);
                                 // Try next mirror
                                 if self.jobs[i].advance_mirror() {
                                     let next_url = {
@@ -585,52 +593,42 @@ impl Core {
                     };
 
                     match seg_result {
-                        Some((total_size, full_data)) => {
-                            let bytes_this_call = full_data.len() as u64;
-
+                        Some((total_size, bytes_written)) => {
                             if let Some(ref mut remaining) = global_remaining {
-                                *remaining = remaining.saturating_sub(bytes_this_call);
+                                *remaining = remaining.saturating_sub(bytes_written);
                             }
 
-                            // Emit progress before write
+                            let on_disk = std::fs::metadata(&part_path)
+                                .map(|m| m.len())
+                                .map_err(|e| format!("stat partial {part_path:?}: {e}"))?;
+
+                            if on_disk > 0 {
+                                if let Some(job) =
+                                    self.jobs.iter_mut().find(|j| j.id() == job_id)
+                                {
+                                    job.add_bytes_received(on_disk);
+                                }
+                            }
+
+                            // Emit progress; on-disk bytes are authoritative.
                             self.event_tx
                                 .send(CoreEvent::JobProgress {
                                     job_id: job_id.clone(),
-                                    bytes_downloaded: 0,
+                                    bytes_downloaded: on_disk,
                                     total_bytes: Some(total_size),
                                 })
                                 .map_err(|_| "event channel closed".to_string())?;
 
-                            // Write to disk
-                            std::fs::create_dir_all(&dest)
-                                .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
-                            let filename = self.filename_from_url(&url);
-                            let file_path = dest.join(&filename);
-                            self.write_data_to_disk(&file_path, &full_data, false)?;
+                            // Mark complete only if we have all the bytes, then rename partial.
+                            if on_disk >= total_size {
+                                std::fs::rename(&part_path, &file_path).map_err(|e| {
+                                    format!("rename {part_path:?} -> {file_path:?}: {e}")
+                                })?;
 
-                            // Update job state
-                            let final_bytes = bytes_this_call.min(total_size);
-                            if let Some(job) =
-                                self.jobs.iter_mut().find(|j| j.id() == job_id)
-                            {
-                                job.add_bytes_received(final_bytes);
-                            }
-
-                            // Emit final progress
-                            self.event_tx
-                                .send(CoreEvent::JobProgress {
-                                    job_id: job_id.clone(),
-                                    bytes_downloaded: final_bytes,
-                                    total_bytes: Some(total_size),
-                                })
-                                .map_err(|_| "event channel closed".to_string())?;
-
-                            // Mark complete if we got all the bytes
-                            if final_bytes >= total_size {
                                 self.event_tx
                                     .send(CoreEvent::JobCompleted {
                                         job_id: job_id.clone(),
-                                        bytes_written: final_bytes,
+                                        bytes_written: total_size,
                                         path: file_path,
                                     })
                                     .map_err(|_| "event channel closed".to_string())?;
@@ -784,22 +782,30 @@ impl Core {
     /// 1. Probes the file size via [`HttpBackend::file_size`].
     /// 2. Splits the file into [`DEFAULT_SEGMENT_COUNT`] byte ranges.
     /// 3. Fetches each range concurrently via scoped threads.
-    /// 4. Assembles data in order.
+    /// 4. Writes each range at the correct offset in `part_path`.
     ///
-    /// Returns the total file size and the assembled (possibly capped) bytes.
-    /// This does NOT write to disk or update job state — the caller does that
+    /// Returns the total file size and bytes written to `part_path`.
+    /// This does NOT rename the partial or update job state — the caller does that
     /// so that `&mut self` is available for job mutation.
     fn segmented_fetch(
         &self,
         url: &str,
+        part_path: &Path,
         cap: Option<u64>,
-    ) -> Result<(u64, Vec<u8>), String> {
+    ) -> Result<(u64, u64), String> {
         // Determine total file size (does not download the body)
         let total_size = self.http.file_size(url)?;
 
         if total_size == 0 {
             return Err("empty file, nothing to download".to_string());
         }
+
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(part_path)
+            .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
 
         // Calculate segment boundaries
         let seg_count = DEFAULT_SEGMENT_COUNT.min(total_size); // at most one per byte
@@ -821,52 +827,40 @@ impl Core {
         // We clone the Arc<dyn HttpBackend> so each thread gets its own ref.
         let http = self.http.clone();
         let url_owned = url.to_string();
+        let part_path_owned = part_path.to_path_buf();
 
-        let segment_results: Vec<Result<(u64, Vec<u8>), String>> =
-            std::thread::scope(|scope| {
-                let mut handles = Vec::new();
-                for range in &segments {
-                    let start = range.start;
-                    let end = range.end;
-                    let http_ref = &http;
-                    let url_ref = &url_owned;
-                    handles.push(scope.spawn(move || {
-                        let (data, _total) =
-                            http::fetch_into_vec(http_ref.as_ref(), url_ref, Some(start..end))?;
-                        Ok((start, data))
-                    }));
+        let segment_results: Vec<Result<u64, String>> = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for range in &segments {
+                let fetch_range = clip_range_to_cap(range.clone(), cap);
+                if fetch_range.start >= fetch_range.end {
+                    continue;
                 }
-                // Collect results, joining each thread
-                handles
-                    .into_iter()
-                    .map(|h| h.join().unwrap())
-                    .collect()
-            });
 
-        // Collect results and assemble in order
-        let mut assembled: Vec<(u64, Vec<u8>)> =
-            Vec::with_capacity(segment_results.len());
-        for result in segment_results {
-            let (range_start, data) = result?;
-            assembled.push((range_start, data));
-        }
-        assembled.sort_by_key(|(start, _)| *start);
-
-        // Concatenate all segment data in order
-        let mut full_data: Vec<u8> = Vec::with_capacity(total_size as usize);
-        for (_, data) in &assembled {
-            full_data.extend_from_slice(data);
-        }
-
-        // Apply bandwidth cap
-        if let Some(cap) = cap {
-            let cap_usize = cap as usize;
-            if full_data.len() > cap_usize {
-                full_data.truncate(cap_usize);
+                let start = fetch_range.start;
+                let end = fetch_range.end;
+                let http_ref = &http;
+                let url_ref = &url_owned;
+                let part_ref = &part_path_owned;
+                handles.push(scope.spawn(move || {
+                    let mut writer = OffsetWriter::new(part_ref, start)?;
+                    let result = http_ref.fetch(url_ref, Some(start..end), &mut writer)?;
+                    Ok(result.bytes_written)
+                }));
             }
+            // Collect results, joining each thread
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect()
+        });
+
+        let mut bytes_written = 0u64;
+        for result in segment_results {
+            bytes_written = bytes_written.saturating_add(result?);
         }
 
-        Ok((total_size, full_data))
+        Ok((total_size, bytes_written))
     }
 
     // -----------------------------------------------------------------------
@@ -892,25 +886,41 @@ impl Core {
             })
             .unwrap_or_else(|| "download".to_string())
     }
+}
 
-    /// Write (or append) data to a file on disk.
-    fn write_data_to_disk(
-        &self,
-        file_path: &std::path::Path,
-        data: &[u8],
-        append: bool,
-    ) -> Result<(), String> {
-        if append {
-            std::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(file_path)
-                .and_then(|mut f| f.write_all(data))
-                .map_err(|e| format!("append {file_path:?}: {e}"))
-        } else {
-            std::fs::write(file_path, data)
-                .map_err(|e| format!("write {file_path:?}: {e}"))
-        }
+/// Clip a segment range to the global bandwidth cap (prefix of the object).
+fn clip_range_to_cap(range: Range<u64>, cap: Option<u64>) -> Range<u64> {
+    match cap {
+        None => range,
+        Some(cap) if range.start >= cap => range.start..range.start,
+        Some(cap) => range.start..range.end.min(cap),
+    }
+}
+
+/// Writes to a fixed offset in an on-disk file.
+struct OffsetWriter {
+    file: std::fs::File,
+}
+
+impl OffsetWriter {
+    fn new(path: &Path, offset: u64) -> Result<Self, String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| format!("open {path:?} for offset write: {e}"))?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("seek {path:?} to {offset}: {e}"))?;
+        Ok(Self { file })
+    }
+}
+
+impl Write for OffsetWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
     }
 }
 
