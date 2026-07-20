@@ -21,6 +21,8 @@ pub enum EnqueueOutcome {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JobState {
     Pending,
+    Paused,
+    Failed,
     Completed,
 }
 
@@ -68,5 +70,48 @@ impl Job {
 
     pub fn mark_completed(&mut self) {
         self.state = JobState::Completed;
+    }
+
+    pub fn pause(&mut self) -> Result<(), String> {
+        match self.state {
+            JobState::Pending => {
+                self.state = JobState::Paused;
+                Ok(())
+            }
+            _ => Err(format!(
+                "cannot pause job {}: current state is {:?}",
+                self.id, self.state
+            )),
+        }
+    }
+
+    pub fn resume(&mut self) -> Result<(), String> {
+        match self.state {
+            JobState::Paused => {
+                self.state = JobState::Pending;
+                Ok(())
+            }
+            _ => Err(format!(
+                "cannot resume job {}: current state is {:?}",
+                self.id, self.state
+            )),
+        }
+    }
+
+    pub fn mark_failed(&mut self) {
+        self.state = JobState::Failed;
+    }
+
+    pub fn retry(&mut self) -> Result<(), String> {
+        match self.state {
+            JobState::Failed => {
+                self.state = JobState::Pending;
+                Ok(())
+            }
+            _ => Err(format!(
+                "cannot retry job {}: current state is {:?}",
+                self.id, self.state
+            )),
+        }
     }
 }

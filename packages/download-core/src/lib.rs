@@ -50,6 +50,10 @@ impl Core {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // Enqueue
+    // -----------------------------------------------------------------------
+
     /// Classify and enqueue a URL.
     ///
     /// Returns the classification outcome.  For `EnqueueDirect`, a job is
@@ -81,12 +85,108 @@ impl Core {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Lifecycle commands
+    // -----------------------------------------------------------------------
+
+    /// Pause a pending job.  Emits `CoreEvent::JobPaused`.
+    ///
+    /// A paused job is skipped by `process_pending` until resumed.
+    pub fn pause_job(&mut self, job_id: &str) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+
+        job.pause()?;
+
+        self.event_tx
+            .send(CoreEvent::JobPaused {
+                job_id: job_id.to_string(),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+
+        Ok(())
+    }
+
+    /// Resume a paused job.  Emits `CoreEvent::JobResumed`.
+    ///
+    /// The job is marked as pending and will be processed on the next
+    /// `process_pending` call.
+    pub fn resume_job(&mut self, job_id: &str) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+
+        job.resume()?;
+
+        self.event_tx
+            .send(CoreEvent::JobResumed {
+                job_id: job_id.to_string(),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+
+        Ok(())
+    }
+
+    /// Retry a failed job.  Emits `CoreEvent::JobRetried`.
+    ///
+    /// The job is marked as pending and eligible for processing again.
+    pub fn retry_job(&mut self, job_id: &str) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+
+        job.retry()?;
+
+        self.event_tx
+            .send(CoreEvent::JobRetried {
+                job_id: job_id.to_string(),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+
+        Ok(())
+    }
+
+    /// Discard a job from the queue.  Emits `CoreEvent::JobDiscarded`.
+    ///
+    /// Once discarded the job is removed and cannot be paused/resumed/retried.
+    /// Discarding an already-discarded (or non-existent) job returns an error.
+    pub fn discard_job(&mut self, job_id: &str) -> Result<(), String> {
+        let pos = self
+            .jobs
+            .iter()
+            .position(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+
+        self.jobs.remove(pos);
+
+        self.event_tx
+            .send(CoreEvent::JobDiscarded {
+                job_id: job_id.to_string(),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Processing
+    // -----------------------------------------------------------------------
+
     /// Process pending jobs — runs transfers for any queued jobs.
     ///
     /// In a real Core this runs the transfer loop.  For now, it processes
-    /// the work synchronously.
+    /// the work synchronously.  Paused and failed jobs are skipped.
+    /// HTTP failures cause the job to transition to `Failed` state and emit
+    /// `CoreEvent::JobFailed`; processing continues with the next job.
     pub fn process_pending(&mut self) -> Result<(), String> {
-        // Collect indices of jobs that need work
+        // Collect indices of jobs that need work (pending only)
         let indices: Vec<usize> = self
             .jobs
             .iter()
@@ -111,7 +211,22 @@ impl Core {
                 .map_err(|_| "event channel closed".to_string())?;
 
             // Fetch from HTTP backend
-            let (data, total) = self.http.fetch(&url, None)?;
+            let (data, total) = match self.http.fetch(&url, None) {
+                Ok(result) => result,
+                Err(err) => {
+                    // Mark job as failed and emit event
+                    if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
+                        job.mark_failed();
+                    }
+                    self.event_tx
+                        .send(CoreEvent::JobFailed {
+                            job_id: job_id.clone(),
+                            error: err,
+                        })
+                        .map_err(|_| "event channel closed".to_string())?;
+                    continue;
+                }
+            };
 
             // Write to disk
             std::fs::create_dir_all(&dest)
@@ -129,8 +244,19 @@ impl Core {
                 .unwrap_or_else(|| "download".to_string());
 
             let file_path = dest.join(&filename);
-            std::fs::write(&file_path, &data)
-                .map_err(|e| format!("write {file_path:?}: {e}"))?;
+            if let Err(e) = std::fs::write(&file_path, &data) {
+                // I/O error — mark as failed
+                if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
+                    job.mark_failed();
+                }
+                self.event_tx
+                    .send(CoreEvent::JobFailed {
+                        job_id: job_id.clone(),
+                        error: format!("write {file_path:?}: {e}"),
+                    })
+                    .map_err(|_| "event channel closed".to_string())?;
+                continue;
+            }
 
             // Emit progress (complete)
             self.event_tx

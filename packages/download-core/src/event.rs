@@ -17,4 +17,25 @@ pub enum CoreEvent {
         bytes_written: u64,
         path: std::path::PathBuf,
     },
+    /// A job was paused by the user.
+    JobPaused {
+        job_id: String,
+    },
+    /// A paused job was resumed.
+    JobResumed {
+        job_id: String,
+    },
+    /// A job failed due to an HTTP or I/O error.
+    JobFailed {
+        job_id: String,
+        error: String,
+    },
+    /// A failed job was retried by the user.
+    JobRetried {
+        job_id: String,
+    },
+    /// A job was discarded (removed from the queue) by the user.
+    JobDiscarded {
+        job_id: String,
+    },
 }
