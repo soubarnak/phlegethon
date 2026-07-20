@@ -33,6 +33,12 @@ use std::io::{Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Debounce interval for progress-only queue flushes.
+const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// Debounce byte threshold for progress-only queue flushes.
+const PROGRESS_FLUSH_BYTES: u64 = 1024 * 1024;
 
 /// The Download Core instance.
 ///
@@ -52,6 +58,12 @@ pub struct Core {
     /// Pending probe results, keyed by URL.
     /// Stored until confirm or replaced by a new probe for the same URL.
     pending_probes: HashMap<String, ProbeResult>,
+    /// Last time a debounced progress flush was written to disk.
+    last_progress_flush: Instant,
+    /// Bytes written since the last debounced progress flush.
+    bytes_since_progress_flush: u64,
+    /// Whether a debounced progress flush is pending.
+    progress_flush_pending: bool,
 }
 
 impl Core {
@@ -72,16 +84,59 @@ impl Core {
             event_tx: tx,
             bandwidth_cap: None,
             pending_probes: HashMap::new(),
+            last_progress_flush: Instant::now(),
+            bytes_since_progress_flush: 0,
+            progress_flush_pending: false,
         };
         (core, rx)
     }
 
     /// Set the Library Root — the base directory for all downloads.
     ///
-    /// Creates the directory if it does not exist.
+    /// Creates the directory if it does not exist and restores any persisted
+    /// queue state from `{library_root}/.phlegethon/jobs.json`.
     pub fn set_library_root(&mut self, root: PathBuf) -> Result<(), String> {
         std::fs::create_dir_all(&root).map_err(|e| format!("create library root: {e}"))?;
+        self.jobs = storage::load_jobs(&root)?;
+        if let Some(cap) = storage::load_global_bandwidth_cap(&root)? {
+            self.bandwidth_cap = Some(cap);
+        }
         self.library_root = Some(root);
+        self.last_progress_flush = Instant::now();
+        self.bytes_since_progress_flush = 0;
+        self.progress_flush_pending = false;
+        Ok(())
+    }
+
+    fn persist_queue_now(&mut self) -> Result<(), String> {
+        if let Some(root) = &self.library_root {
+            let queue = storage::build_queue(&self.jobs, self.bandwidth_cap);
+            storage::save_queue(root, &queue)?;
+        }
+        self.last_progress_flush = Instant::now();
+        self.bytes_since_progress_flush = 0;
+        self.progress_flush_pending = false;
+        Ok(())
+    }
+
+    fn note_progress_bytes(&mut self, bytes: u64) -> Result<(), String> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.bytes_since_progress_flush += bytes;
+        self.progress_flush_pending = true;
+        let due = self.bytes_since_progress_flush >= PROGRESS_FLUSH_BYTES
+            || self.last_progress_flush.elapsed() >= PROGRESS_FLUSH_INTERVAL;
+        if due {
+            self.persist_queue_now()?;
+        }
+        Ok(())
+    }
+
+    fn flush_pending_progress(&mut self) -> Result<(), String> {
+        if self.progress_flush_pending {
+            self.persist_queue_now()?;
+        }
         Ok(())
     }
 
@@ -107,6 +162,7 @@ impl Core {
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
                 self.jobs.push(job);
+                self.persist_queue_now()?;
                 Ok(EnqueueOutcome::EnqueueDirect {
                     job_id,
                     destination: dest,
@@ -142,6 +198,7 @@ impl Core {
             })
             .map_err(|_| "event channel closed".to_string())?;
 
+        self.persist_queue_now()?;
         Ok(())
     }
 
@@ -164,6 +221,7 @@ impl Core {
             })
             .map_err(|_| "event channel closed".to_string())?;
 
+        self.persist_queue_now()?;
         Ok(())
     }
 
@@ -185,6 +243,7 @@ impl Core {
             })
             .map_err(|_| "event channel closed".to_string())?;
 
+        self.persist_queue_now()?;
         Ok(())
     }
 
@@ -207,6 +266,7 @@ impl Core {
             })
             .map_err(|_| "event channel closed".to_string())?;
 
+        self.persist_queue_now()?;
         Ok(())
     }
 
@@ -221,11 +281,13 @@ impl Core {
     /// None/unset = globally uncapped.
     pub fn set_global_bandwidth_cap(&mut self, cap: u64) {
         self.bandwidth_cap = Some(cap);
+        let _ = self.persist_queue_now();
     }
 
     /// Remove the global bandwidth cap (restore uncapped default).
     pub fn remove_global_bandwidth_cap(&mut self) {
         self.bandwidth_cap = None;
+        let _ = self.persist_queue_now();
     }
 
     /// Return the current global bandwidth cap, if set.
@@ -244,6 +306,7 @@ impl Core {
             .find(|j| j.id() == job_id)
             .ok_or_else(|| format!("job {job_id} not found"))?;
         job.set_bandwidth_cap(cap);
+        self.persist_queue_now()?;
         Ok(())
     }
 
@@ -255,6 +318,7 @@ impl Core {
             .find(|j| j.id() == job_id)
             .ok_or_else(|| format!("job {job_id} not found"))?;
         job.remove_bandwidth_cap();
+        self.persist_queue_now()?;
         Ok(())
     }
 
@@ -283,6 +347,7 @@ impl Core {
             .find(|j| j.id() == job_id)
             .ok_or_else(|| format!("job {job_id} not found"))?;
         job.add_mirror(url);
+        self.persist_queue_now()?;
         Ok(())
     }
 
@@ -302,6 +367,7 @@ impl Core {
         for url in urls {
             job.add_mirror(url);
         }
+        self.persist_queue_now()?;
         Ok(count)
     }
 
@@ -439,6 +505,7 @@ impl Core {
             self.jobs.push(job);
         }
 
+        self.persist_queue_now()?;
         Ok(job_ids)
     }
 
@@ -484,12 +551,13 @@ impl Core {
                 break;
             }
 
-            let (job_id, url, dest, bytes_received, job_cap, extractor_format) = {
+            let (job_id, url, dest, filename, bytes_received, job_cap, extractor_format) = {
                 let job = &self.jobs[i];
                 (
                     job.id().to_string(),
                     job.url().to_string(),
                     job.destination().to_path_buf(),
+                    job.filename().to_string(),
                     job.bytes_received(),
                     job.bandwidth_cap(),
                     job.extractor_format().map(|s| s.to_string()),
@@ -511,6 +579,7 @@ impl Core {
                                 path,
                             })
                             .map_err(|_| "event channel closed".to_string())?;
+                        self.persist_queue_now()?;
                     }
                     Err(err) => {
                         self.jobs[i].mark_failed();
@@ -520,6 +589,7 @@ impl Core {
                                 error: err,
                             })
                             .map_err(|_| "event channel closed".to_string())?;
+                        self.persist_queue_now()?;
                     }
                 }
                 continue;
@@ -547,7 +617,6 @@ impl Core {
                 if supports_range {
                     std::fs::create_dir_all(&dest)
                         .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
-                    let filename = self.filename_from_url(&url);
                     let file_path = dest.join(&filename);
                     let part_path = Self::part_path_for(&file_path);
 
@@ -577,6 +646,7 @@ impl Core {
                                             error: err,
                                         })
                                         .map_err(|_| "event channel closed".to_string())?;
+                                    self.persist_queue_now()?;
                                     continue 'seg_loop;
                                 }
                                 // All mirrors exhausted
@@ -587,6 +657,7 @@ impl Core {
                                         error: err,
                                     })
                                     .map_err(|_| "event channel closed".to_string())?;
+                                self.persist_queue_now()?;
                                 break 'seg_loop None;
                             }
                         }
@@ -606,7 +677,12 @@ impl Core {
                                 if let Some(job) =
                                     self.jobs.iter_mut().find(|j| j.id() == job_id)
                                 {
-                                    job.add_bytes_received(on_disk);
+                                    let prev = job.bytes_received();
+                                    if on_disk > prev {
+                                        let delta = on_disk - prev;
+                                        job.add_bytes_received(delta);
+                                        self.note_progress_bytes(delta)?;
+                                    }
                                 }
                             }
 
@@ -638,6 +714,9 @@ impl Core {
                                 {
                                     job.mark_completed();
                                 }
+                                self.persist_queue_now()?;
+                            } else {
+                                self.flush_pending_progress()?;
                             }
                         }
                         None => {
@@ -669,7 +748,6 @@ impl Core {
             std::fs::create_dir_all(&dest)
                 .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
 
-            let filename = self.filename_from_url(&url);
             let file_path = dest.join(&filename);
             let part_path = Self::part_path_for(&file_path);
 
@@ -713,6 +791,7 @@ impl Core {
                                     error: err,
                                 })
                                 .map_err(|_| "event channel closed".to_string())?;
+                            self.persist_queue_now()?;
                             continue 'fetch_loop;
                         }
                         // All mirrors exhausted
@@ -723,6 +802,7 @@ impl Core {
                                 error: err,
                             })
                             .map_err(|_| "event channel closed".to_string())?;
+                        self.persist_queue_now()?;
                         break 'fetch_loop None;
                     }
                 }
@@ -744,7 +824,9 @@ impl Core {
 
             if on_disk > bytes_received {
                 if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
-                    job.add_bytes_received(on_disk - bytes_received);
+                    let delta = on_disk - bytes_received;
+                    job.add_bytes_received(delta);
+                    self.note_progress_bytes(delta)?;
                 }
             }
 
@@ -771,9 +853,13 @@ impl Core {
                     .map_err(|_| "event channel closed".to_string())?;
 
                 self.jobs[i].mark_completed();
+                self.persist_queue_now()?;
+            } else {
+                self.flush_pending_progress()?;
             }
         }
 
+        self.flush_pending_progress()?;
         Ok(())
     }
 
@@ -869,22 +955,13 @@ impl Core {
 
     /// Path for an in-progress download (`{final}.part`).
     fn part_path_for(final_path: &Path) -> PathBuf {
-        let mut part = final_path.as_os_str().to_os_string();
-        part.push(".part");
-        PathBuf::from(part)
+        storage::part_path_for(final_path)
     }
+}
 
-    /// Derive a filename from a URL.
-    fn filename_from_url(&self, url: &str) -> String {
-        url::Url::parse(url)
-            .ok()
-            .and_then(|u| {
-                u.path_segments()
-                    .and_then(|mut s| s.next_back())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| "download".to_string())
+impl Drop for Core {
+    fn drop(&mut self) {
+        let _ = self.flush_pending_progress();
     }
 }
 

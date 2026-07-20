@@ -116,6 +116,19 @@ impl MirrorSet {
     pub fn reset(&mut self) {
         self.current = 0;
     }
+
+    /// Reconstruct a MirrorSet from persisted URLs and active index.
+    pub fn from_persisted(urls: Vec<String>, current: usize) -> Result<Self, String> {
+        let mut set = Self::from_urls(urls)?;
+        if current >= set.urls.len() {
+            return Err(format!(
+                "mirror index {current} out of range (len {})",
+                set.urls.len()
+            ));
+        }
+        set.current = current;
+        Ok(set)
+    }
 }
 
 #[cfg(test)]

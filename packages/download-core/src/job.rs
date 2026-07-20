@@ -1,6 +1,7 @@
 //! Job struct — state machine per download job.
 
 use crate::mirror_set::MirrorSet;
+use crate::storage::{PersistedJob, PersistedJobState};
 use std::path::PathBuf;
 
 /// Outcome returned from `Core::enqueue`.
@@ -16,6 +17,19 @@ pub enum EnqueueOutcome {
     ProbeThenConfirm {
         url: String,
     },
+}
+
+/// Derive a filename from a URL path segment.
+pub fn filename_from_url(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.path_segments()
+                .and_then(|mut s| s.next_back())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "download".to_string())
 }
 
 /// Sanitize a source name for use as a folder name.
@@ -76,12 +90,15 @@ pub struct Job {
     /// When set, `process_pending` downloads via the Extractor Toolchain
     /// (yt-dlp) using this quality id instead of plain HTTP.
     extractor_format: Option<String>,
+    /// Final filename under the Job Destination (stable across restarts).
+    filename: String,
 }
 
 impl Job {
     pub fn new(url: String, library_root: PathBuf) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let destination = library_root.join("jobs").join(&id);
+        let filename = filename_from_url(&url);
         Self {
             id,
             mirrors: MirrorSet::new(url),
@@ -91,6 +108,7 @@ impl Job {
             bandwidth_cap: None,
             source: None,
             extractor_format: None,
+            filename,
         }
     }
 
@@ -111,6 +129,7 @@ impl Job {
             }
             None => library_root.join("jobs").join(&id),
         };
+        let filename = filename_from_url(&url);
         Self {
             id,
             mirrors: MirrorSet::new(url),
@@ -120,6 +139,43 @@ impl Job {
             bandwidth_cap: None,
             source,
             extractor_format: None,
+            filename,
+        }
+    }
+
+    /// Reconstruct a job from persisted queue metadata.
+    pub fn from_persisted(persisted: PersistedJob) -> Result<Self, String> {
+        let mirrors = MirrorSet::from_persisted(persisted.mirror_urls, persisted.mirror_index)?;
+        let mut job = Self {
+            id: persisted.id,
+            mirrors,
+            state: JobState::from(persisted.state),
+            destination: persisted.destination,
+            bytes_received: persisted.bytes_received,
+            bandwidth_cap: persisted.bandwidth_cap,
+            source: persisted.source,
+            extractor_format: persisted.extractor_format,
+            filename: persisted.filename,
+        };
+        if job.filename.is_empty() {
+            job.filename = filename_from_url(job.url());
+        }
+        Ok(job)
+    }
+
+    /// Snapshot this job for queue persistence.
+    pub fn to_persisted(&self) -> PersistedJob {
+        PersistedJob {
+            id: self.id.clone(),
+            mirror_urls: self.mirror_urls().to_vec(),
+            mirror_index: self.mirrors.current_index(),
+            state: PersistedJobState::from(self.state),
+            destination: self.destination.clone(),
+            bytes_received: self.bytes_received,
+            bandwidth_cap: self.bandwidth_cap,
+            source: self.source.clone(),
+            extractor_format: self.extractor_format.clone(),
+            filename: self.filename.clone(),
         }
     }
 
@@ -197,8 +253,25 @@ impl Job {
         self.bytes_received
     }
 
+    pub fn set_bytes_received(&mut self, n: u64) {
+        self.bytes_received = n;
+    }
+
     pub fn add_bytes_received(&mut self, n: u64) {
         self.bytes_received += n;
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn set_filename(&mut self, filename: impl Into<String>) {
+        self.filename = filename.into();
+    }
+
+    /// Final file path for this job under its Job Destination.
+    pub fn final_path(&self) -> PathBuf {
+        self.destination.join(&self.filename)
     }
 
     pub fn bandwidth_cap(&self) -> Option<u64> {
