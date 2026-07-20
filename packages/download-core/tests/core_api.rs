@@ -3965,6 +3965,108 @@ fn http_emits_mid_transfer_job_progress_with_unknown_total() {
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance: Extractor progress via on-disk poll (issue #39)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn silent_extractor_download_emits_mid_transfer_job_progress_from_disk_growth() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=progress-ext",
+        "Progress Extractor Video",
+        "https://cdn.youtube.com/progress-ext.mp4",
+        vec![("720p", "720p")],
+    );
+    // Silent toolchain: grows a file on disk, never reports progress itself.
+    let _chunks = toolchain.enable_slow_download(48, std::time::Duration::from_millis(15));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=progress-ext")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=progress-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    let job_id = job_ids[0].clone();
+
+    let core = Arc::new(Mutex::new(core));
+    let worker = {
+        let core = core.clone();
+        std::thread::spawn(move || {
+            core.lock().unwrap().process_pending().unwrap();
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut saw_mid = false;
+    let mut mid_total = Some(999u64); // sentinel — silent extractor has no known total
+    let mut progress_events = 0u32;
+    let mut last_bytes = 0u64;
+    let mut saw_growth = false;
+
+    while std::time::Instant::now() < deadline {
+        for e in collect_events(&rx) {
+            if let CoreEvent::JobProgress {
+                job_id: id,
+                bytes_downloaded,
+                total_bytes,
+            } = e
+            {
+                assert_eq!(id, job_id);
+                progress_events += 1;
+                if bytes_downloaded > last_bytes {
+                    saw_growth = true;
+                    last_bytes = bytes_downloaded;
+                }
+                if bytes_downloaded > 0 {
+                    saw_mid = true;
+                    mid_total = total_bytes;
+                }
+            }
+        }
+        if saw_mid && saw_growth && progress_events >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    worker.join().unwrap();
+
+    assert!(
+        saw_mid,
+        "expected mid-transfer JobProgress with bytes > 0 from on-disk growth"
+    );
+    assert!(
+        saw_growth && progress_events >= 2,
+        "expected repeated JobProgress as Job Destination files grow, got {progress_events} events (last_bytes={last_bytes})"
+    );
+    assert_eq!(
+        mid_total, None,
+        "silent extractor without known size must expose total_bytes: None"
+    );
+
+    let snap = core
+        .lock()
+        .unwrap()
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .expect("job snapshot");
+    assert!(
+        snap.bytes_downloaded > 0,
+        "snapshot should expose bytes downloaded after extractor job"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Acceptance: Library Root + absolute Job Destination override (issue #37)
 // ---------------------------------------------------------------------------
 

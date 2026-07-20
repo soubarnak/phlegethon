@@ -38,6 +38,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use transfer::{
@@ -61,6 +62,8 @@ pub struct JobSnapshot {
 const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// Debounce byte threshold for progress-only queue flushes.
 const PROGRESS_FLUSH_BYTES: u64 = 1024 * 1024;
+/// How often Core samples Job Destination size while a silent Extractor runs.
+const EXTRACTOR_DISK_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The Download Core instance.
 ///
@@ -815,28 +818,74 @@ impl Core {
             };
 
             if let Some(format) = extractor_format {
+                let live_bytes = self.jobs[i].live_downloaded();
+                live_bytes.store(0, Ordering::Release);
+                let total_for_progress = self.jobs[i].total_bytes();
+
                 self.event_tx
                     .send(CoreEvent::JobProgress {
                         job_id: job_id.clone(),
                         bytes_downloaded: 0,
-                        total_bytes: None,
+                        total_bytes: total_for_progress,
                     })
                     .map_err(|_| "event channel closed".to_string())?;
 
                 // `pause_requested` is also set by Discard (`signal_discard_stop`);
                 // both Pause and Discard use it as the extractor stop signal.
-                let stop = &pause_requested;
+                let stop = pause_requested.as_ref();
                 transfer_active.store(true, Ordering::Release);
-                let download_result =
-                    self.extractor
-                        .download(&url, &format, &dest, stop);
+                // Extractor Toolchain is often silent mid-transfer: run it on a
+                // scoped thread and emit JobProgress from on-disk growth under
+                // the Job Destination until it finishes or stops.
+                let download_result = std::thread::scope(|s| {
+                    let (result_tx, result_rx) = mpsc::channel();
+                    let extractor = self.extractor.as_ref();
+                    let dest_ref = dest.as_path();
+                    let url_ref = url.as_str();
+                    let format_ref = format.as_str();
+                    s.spawn(move || {
+                        let outcome =
+                            extractor.download(url_ref, format_ref, dest_ref, stop);
+                        let _ = result_tx.send(outcome);
+                    });
+
+                    let mut last_emitted: Option<u64> = None;
+                    loop {
+                        match result_rx.try_recv() {
+                            Ok(outcome) => break outcome,
+                            Err(mpsc::TryRecvError::Empty) => {
+                                let on_disk = Self::destination_byte_total(&dest);
+                                if last_emitted != Some(on_disk) {
+                                    live_bytes.store(on_disk, Ordering::Release);
+                                    let _ = self.event_tx.send(CoreEvent::JobProgress {
+                                        job_id: job_id.clone(),
+                                        bytes_downloaded: on_disk,
+                                        total_bytes: total_for_progress,
+                                    });
+                                    last_emitted = Some(on_disk);
+                                }
+                                std::thread::sleep(EXTRACTOR_DISK_POLL_INTERVAL);
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                break Err(
+                                    "extractor download thread disconnected".into(),
+                                );
+                            }
+                        }
+                    }
+                });
                 transfer_active.store(false, Ordering::Release);
 
                 match download_result {
                     Ok(ExtractorDownloadOutcome::Completed(path)) => {
-                        let bytes = std::fs::metadata(&path)
-                            .map(|m| m.len())
-                            .unwrap_or(0);
+                        let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        let bytes = Self::destination_byte_total(&dest).max(file_bytes);
+                        live_bytes.store(bytes, Ordering::Release);
+                        let _ = self.event_tx.send(CoreEvent::JobProgress {
+                            job_id: job_id.clone(),
+                            bytes_downloaded: bytes,
+                            total_bytes: total_for_progress,
+                        });
                         self.jobs[i].mark_completed();
                         self.event_tx
                             .send(CoreEvent::JobCompleted {
@@ -1132,6 +1181,32 @@ impl Core {
             }
         }
         Ok(on_disk)
+    }
+
+    /// Sum sizes of regular files under a Job Destination (recursive).
+    ///
+    /// Used when the Extractor Toolchain is silent mid-transfer so Core can
+    /// still emit [`CoreEvent::JobProgress`] from on-disk growth.
+    fn destination_byte_total(dest: &Path) -> u64 {
+        fn walk(path: &Path) -> u64 {
+            let mut total = 0u64;
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return 0;
+            };
+            for entry in entries.flatten() {
+                let child = entry.path();
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    total = total.saturating_add(walk(&child));
+                } else if meta.is_file() {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+            total
+        }
+        walk(dest)
     }
 
     fn complete_job_file(
