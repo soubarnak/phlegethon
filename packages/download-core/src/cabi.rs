@@ -185,6 +185,34 @@ pub unsafe extern "C" fn core_set_library_root(
     })
 }
 
+/// Read the current Library Root into `out_path_buf`.
+///
+/// Returns 0 on success, -1 if unset or on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_get_library_root(
+    handle: *mut Core,
+    out_path_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_ref().unwrap();
+        match core.library_root() {
+            Some(root) => {
+                write_str_to_buf(&root.to_string_lossy(), out_path_buf, out_buf_len);
+                0
+            }
+            None => {
+                write_str_to_buf("Library Root not set", error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Enqueue
 // ---------------------------------------------------------------------------
@@ -198,6 +226,9 @@ pub unsafe extern "C" fn core_set_library_root(
 /// {"type":"probe_then_confirm","url":"..."}
 /// ```
 /// Returns 0 on success, -1 on error.
+///
+/// Destination defaults under the Library Root.  For an absolute Job
+/// Destination override, use [`core_enqueue_with_destination`].
 #[no_mangle]
 pub unsafe extern "C" fn core_enqueue(
     handle: *mut Core,
@@ -207,13 +238,46 @@ pub unsafe extern "C" fn core_enqueue(
     error_buf: *mut c_char,
     error_buf_len: usize,
 ) -> i32 {
+    core_enqueue_with_destination(
+        handle,
+        url,
+        std::ptr::null(),
+        out_json_buf,
+        out_buf_len,
+        error_buf,
+        error_buf_len,
+    )
+}
+
+/// Like [`core_enqueue`], but `destination` may be an absolute Job Destination
+/// override (null or empty = default under Library Root).
+#[no_mangle]
+pub unsafe extern "C" fn core_enqueue_with_destination(
+    handle: *mut Core,
+    url: *const c_char,
+    destination: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
     catch_panic_i32!({
         let ctx = &*(handle as *mut CoreContext);
         let url_str = cstr_to_str(url);
+        let dest = if destination.is_null() {
+            None
+        } else {
+            let s = cstr_to_str(destination);
+            if s.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(s))
+            }
+        };
         let mut core_guard = ctx.core.lock().unwrap();
         let core = core_guard.as_mut().unwrap();
 
-        match core.enqueue(url_str) {
+        match core.enqueue(url_str, dest) {
             Ok(outcome) => {
                 let json = match outcome {
                     EnqueueOutcome::EnqueueDirect {
@@ -287,6 +351,11 @@ pub unsafe extern "C" fn core_probe(
 /// ```json
 /// {"url":"https://...","items":[{"item_id":"...","quality_id":"..."}]}
 /// ```
+/// Confirm a probe selection and create download jobs.
+///
+/// `selection_json` is a [`ProbeSelection`] object.  Optional top-level
+/// `"destination"` (absolute path string) overrides the Job Destination.
+///
 /// On success writes a JSON array of job IDs to `out_json_buf`.
 /// Returns 0 on success, -1 on error.
 #[no_mangle]
@@ -302,8 +371,15 @@ pub unsafe extern "C" fn core_confirm_probe_selection(
         let ctx = &*(handle as *mut CoreContext);
         let json_str = cstr_to_str(selection_json);
 
-        // Parse selection JSON
-        let selection: ProbeSelection = match serde_json::from_str(json_str) {
+        #[derive(serde::Deserialize)]
+        struct ConfirmArgs {
+            url: String,
+            items: Vec<crate::extractor::ItemSelection>,
+            #[serde(default)]
+            destination: Option<std::path::PathBuf>,
+        }
+
+        let args: ConfirmArgs = match serde_json::from_str(json_str) {
             Ok(s) => s,
             Err(e) => {
                 let err = format!("invalid selection JSON: {e}");
@@ -312,10 +388,15 @@ pub unsafe extern "C" fn core_confirm_probe_selection(
             }
         };
 
+        let selection = ProbeSelection {
+            url: args.url,
+            items: args.items,
+        };
+
         let mut core_guard = ctx.core.lock().unwrap();
         let core = core_guard.as_mut().unwrap();
 
-        match core.confirm_probe_selection(&selection) {
+        match core.confirm_probe_selection(&selection, args.destination) {
             Ok(job_ids) => {
                 let json = serde_json::json!(job_ids);
                 let s = json.to_string();

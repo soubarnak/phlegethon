@@ -13,14 +13,20 @@
   <header class="app-header">
     <h1>Phlegethon</h1>
     <div class="header-actions">
-      <button class="btn-icon theme-toggle" id="themeToggle" title="Toggle theme">Dark</button>
+      <button class="btn-icon" id="settingsBtn" type="button" title="Settings">Settings</button>
+      <button class="btn-icon theme-toggle" id="themeToggle" type="button" title="Toggle theme">Dark</button>
     </div>
   </header>
 
   <!-- URL Bar -->
   <div class="url-bar">
     <input type="text" class="url-input" id="urlInput" placeholder="Paste or type a URL… then press Enter or click Enqueue" autofocus />
-    <button class="btn btn-primary" id="enqueueBtn">Enqueue</button>
+    <button class="btn" id="saveToBtn" type="button" title="Save to…">Save to…</button>
+    <button class="btn btn-primary" id="enqueueBtn" type="button">Enqueue</button>
+  </div>
+  <div class="save-to-hint" id="saveToHint" hidden>
+    <span id="saveToPath"></span>
+    <button class="btn-link" id="saveToClear" type="button">Use Library Root default</button>
   </div>
 
   <!-- Drop zone (invisible, activated on dragover) -->
@@ -50,13 +56,38 @@
         <div class="probe-header-actions">
           <button class="btn btn-sm" id="probeSelectAll" type="button">Select all</button>
           <button class="btn btn-sm" id="probeDeselectAll" type="button">Deselect all</button>
-          <button class="btn-icon" id="probeClose" title="Cancel">✕</button>
+          <button class="btn-icon" id="probeClose" type="button" title="Cancel">✕</button>
         </div>
       </div>
       <div class="probe-items" id="probeItems"></div>
       <div class="probe-footer">
-        <button class="btn" id="probeCancel">Cancel</button>
-        <button class="btn btn-primary" id="probeConfirm">Download Selected</button>
+        <div class="probe-save-to">
+          <button class="btn" id="probeSaveToBtn" type="button">Save to…</button>
+          <span class="probe-save-to-path" id="probeSaveToPath">Library Root default</span>
+        </div>
+        <div class="probe-footer-actions">
+          <button class="btn" id="probeCancel" type="button">Cancel</button>
+          <button class="btn btn-primary" id="probeConfirm" type="button">Download Selected</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings overlay -->
+  <div class="settings-overlay" id="settingsOverlay" hidden>
+    <div class="settings-sheet" role="dialog" aria-labelledby="settingsTitle">
+      <div class="settings-header">
+        <h2 id="settingsTitle">Settings</h2>
+        <button class="btn-icon" id="settingsClose" type="button" title="Close">✕</button>
+      </div>
+      <div class="settings-body">
+        <label class="settings-label" for="libraryRootPath">Library Root</label>
+        <p class="settings-help">Default parent for Job Destinations. Core metadata lives here too.</p>
+        <div class="settings-row">
+          <input type="text" class="url-input" id="libraryRootPath" readonly />
+          <button class="btn" id="libraryRootPick" type="button">Choose…</button>
+          <button class="btn btn-primary" id="libraryRootApply" type="button">Apply</button>
+        </div>
       </div>
     </div>
   </div>

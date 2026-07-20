@@ -7,10 +7,11 @@ use download_core::{
     Core, CoreEvent, EnqueueOutcome, JobSignals, ProbeSelection, ProdHttpBackend,
 };
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 // ---------------------------------------------------------------------------
 // App state
@@ -161,18 +162,39 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
 // Tauri commands
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn enqueue_url(state: State<AppState>, url: String) -> Result<EnqueueResult, String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+fn parse_optional_destination(destination: Option<String>) -> Option<PathBuf> {
+    destination.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
+        }
+    })
+}
 
-    // Auto-set library root if not set
-    if state.library_root.lock().map_err(|e| e.to_string())?.is_none() {
-        let default_root = dirs_data_dir();
-        core.set_library_root(default_root.clone())?;
-        *state.library_root.lock().map_err(|e| e.to_string())? = Some(default_root);
+fn ensure_library_root(state: &AppState) -> Result<PathBuf, String> {
+    let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
+    if let Some(ref root) = *stored {
+        return Ok(root.clone());
     }
+    let default_root = default_library_root();
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_library_root(default_root.clone())?;
+    *stored = Some(default_root.clone());
+    Ok(default_root)
+}
 
-    let outcome = core.enqueue(&url)?;
+#[tauri::command]
+fn enqueue_url(
+    state: State<AppState>,
+    url: String,
+    destination: Option<String>,
+) -> Result<EnqueueResult, String> {
+    ensure_library_root(&state)?;
+    let dest = parse_optional_destination(destination);
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let outcome = core.enqueue(&url, dest)?;
     Ok(outcome.into())
 }
 
@@ -189,9 +211,53 @@ fn probe_url(
 fn confirm_probe_selection(
     state: State<AppState>,
     selection: ProbeSelection,
+    destination: Option<String>,
 ) -> Result<Vec<String>, String> {
+    ensure_library_root(&state)?;
+    let dest = parse_optional_destination(destination);
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.confirm_probe_selection(&selection)
+    core.confirm_probe_selection(&selection, dest)
+}
+
+#[tauri::command]
+fn get_library_root(state: State<AppState>) -> Result<Option<String>, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core
+        .library_root()
+        .map(|p| p.display().to_string()))
+}
+
+#[tauri::command]
+fn set_library_root(state: State<AppState>, path: String) -> Result<String, String> {
+    let root = PathBuf::from(path.trim());
+    if !root.is_absolute() {
+        return Err(format!(
+            "Library Root must be an absolute path, got: {}",
+            root.display()
+        ));
+    }
+    {
+        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        core.set_library_root(root.clone())?;
+    }
+    {
+        let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
+        *stored = Some(root.clone());
+    }
+    persist_library_root_preference(&root)?;
+    Ok(root.display().to_string())
+}
+
+#[tauri::command]
+fn pick_folder(app: tauri::AppHandle, title: Option<String>) -> Result<Option<String>, String> {
+    let label = title.unwrap_or_else(|| "Choose folder".to_string());
+    // Command runs off the UI event loop — blocking picker is correct here.
+    let folder = app
+        .dialog()
+        .file()
+        .set_title(label)
+        .blocking_pick_folder();
+    Ok(folder.and_then(|path| path.into_path().ok()).map(|p| p.display().to_string()))
 }
 
 #[tauri::command]
@@ -290,6 +356,36 @@ fn dirs_data_dir() -> PathBuf {
         .join("phlegethon")
 }
 
+fn default_library_root() -> PathBuf {
+    dirs_data_dir().join("library")
+}
+
+fn library_root_preference_path() -> PathBuf {
+    dirs_data_dir().join("library_root.txt")
+}
+
+fn load_library_root_preference() -> Option<PathBuf> {
+    let path = library_root_preference_path();
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let root = PathBuf::from(trimmed);
+    if root.is_absolute() {
+        Some(root)
+    } else {
+        None
+    }
+}
+
+fn persist_library_root_preference(root: &Path) -> Result<(), String> {
+    let data = dirs_data_dir();
+    std::fs::create_dir_all(&data).map_err(|e| format!("create data dir: {e}"))?;
+    std::fs::write(library_root_preference_path(), root.to_string_lossy().as_bytes())
+        .map_err(|e| format!("persist library root: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -297,6 +393,7 @@ fn dirs_data_dir() -> PathBuf {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -307,17 +404,17 @@ pub fn run() {
                 )?;
             }
 
-            // Auto-set library root
             let state: State<AppState> = app.state();
-            let root = dirs_data_dir();
+            let root = load_library_root_preference().unwrap_or_else(default_library_root);
             {
                 let mut core = state.core.lock().unwrap();
                 let _ = core.set_library_root(root.clone());
             }
             {
                 let mut stored = state.library_root.lock().unwrap();
-                *stored = Some(root);
+                *stored = Some(root.clone());
             }
+            let _ = persist_library_root_preference(&root);
 
             Ok(())
         })
@@ -325,6 +422,9 @@ pub fn run() {
             enqueue_url,
             probe_url,
             confirm_probe_selection,
+            get_library_root,
+            set_library_root,
+            pick_folder,
             process_pending,
             list_jobs,
             pause_job,
@@ -349,12 +449,15 @@ mod tests {
         };
         let json = serde_json::to_value(&direct).unwrap();
         assert_eq!(json["type"], "EnqueueDirect");
+        assert_eq!(json["job_id"], "job-1");
+        assert_eq!(json["destination"], "/tmp/x");
 
         let probe = EnqueueResult::ProbeThenConfirm {
-            url: "https://example.com/v".into(),
+            url: "https://example.com".into(),
         };
         let json = serde_json::to_value(&probe).unwrap();
         assert_eq!(json["type"], "ProbeThenConfirm");
+        assert_eq!(json["url"], "https://example.com");
     }
 
     #[test]

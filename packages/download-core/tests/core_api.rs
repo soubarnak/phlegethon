@@ -6,6 +6,7 @@
 
 use download_core::*;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -149,7 +150,7 @@ fn fake_toolchain() -> FakeExtractorToolchain {
 }
 
 fn enqueue_direct_job_id(core: &mut Core, url: &str) -> String {
-    let result = core.enqueue(url).unwrap();
+    let result = core.enqueue(url, None).unwrap();
     match result {
         EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
         _ => panic!("expected enqueue_direct, got probe_then_confirm"),
@@ -192,7 +193,7 @@ fn enqueue_clear_http_returns_enqueue_direct() {
     let (mut core, _rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let result = core.enqueue("https://example.com/file.zip");
+    let result = core.enqueue("https://example.com/file.zip", None);
     assert!(
         matches!(result, Ok(EnqueueOutcome::EnqueueDirect { job_id: _, destination: _ }))
     );
@@ -209,7 +210,7 @@ fn enqueue_direct_job_writes_bytes_to_disk() {
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let result = core.enqueue("https://example.com/file.zip").unwrap();
+    let result = core.enqueue("https://example.com/file.zip", None).unwrap();
     let (_job_id, destination) = match result {
         EnqueueOutcome::EnqueueDirect { job_id, destination } => (job_id, destination),
         _ => panic!("expected enqueue_direct"),
@@ -273,7 +274,7 @@ fn single_connection_enqueue_writes_matching_bytes_via_part_file() {
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let result = core.enqueue("https://example.com/file.zip").unwrap();
+    let result = core.enqueue("https://example.com/file.zip", None).unwrap();
     let (job_id, destination) = match result {
         EnqueueOutcome::EnqueueDirect { job_id, destination } => (job_id, destination),
         _ => panic!("expected enqueue_direct"),
@@ -335,7 +336,7 @@ fn enqueue_launch_site_url_returns_probe_then_confirm() {
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     // A YouTube URL is not a clear single-file HTTP URL
-    let result = core.enqueue("https://www.youtube.com/watch?v=abc123");
+    let result = core.enqueue("https://www.youtube.com/watch?v=abc123", None);
     assert!(
         matches!(result, Ok(EnqueueOutcome::ProbeThenConfirm { .. })),
         "Launch Site URL should be probe_then_confirm, got {:?}",
@@ -1952,7 +1953,7 @@ fn confirm_probe_selection_creates_jobs_for_selected_items() {
             quality_id: "720p".to_string(),
         }],
     };
-    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1, "should create exactly one job");
 
     // The job should be pending and processable
@@ -2019,7 +2020,7 @@ fn confirm_probe_selection_creates_multiple_jobs_for_batch() {
             },
         ],
     };
-    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 2, "should create two jobs");
 
     // Both jobs should process and complete
@@ -2044,7 +2045,7 @@ fn confirm_without_previous_probe_errors() {
             quality_id: "1080p".to_string(),
         }],
     };
-    let err = core.confirm_probe_selection(&selection).unwrap_err();
+    let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
         err.contains("no pending probe"),
         "should mention no pending probe, got: {err}"
@@ -2076,7 +2077,7 @@ fn confirm_with_invalid_item_id_errors() {
             quality_id: "1080p".to_string(),
         }],
     };
-    let err = core.confirm_probe_selection(&selection).unwrap_err();
+    let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
         err.contains("not found"),
         "should mention item not found, got: {err}"
@@ -2108,7 +2109,7 @@ fn confirm_with_invalid_quality_id_errors() {
             quality_id: "8k".to_string(),
         }],
     };
-    let err = core.confirm_probe_selection(&selection).unwrap_err();
+    let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
         err.contains("quality"),
         "should mention quality not found, got: {err}"
@@ -2138,7 +2139,7 @@ fn confirm_without_library_root_errors() {
             quality_id: "1080p".to_string(),
         }],
     };
-    let err = core.confirm_probe_selection(&selection).unwrap_err();
+    let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
         err.contains("Library Root"),
         "should mention Library Root not set, got: {err}"
@@ -2184,7 +2185,7 @@ fn batch_job_destination_derives_from_source_name() {
             quality_id: "1080p".to_string(),
         }],
     };
-    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
 
     // Process to create directories on disk
@@ -2234,7 +2235,7 @@ fn single_video_probe_without_source_name_uses_title_for_subfolder() {
             quality_id: "1080p".to_string(),
         }],
     };
-    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
 
     // Process to create directories on disk
@@ -2288,7 +2289,7 @@ fn probe_created_jobs_share_same_lifecycle_as_direct_jobs() {
             quality_id: "1080p".to_string(),
         }],
     };
-    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
 
     let video_job_id = &job_ids[0];
@@ -2361,7 +2362,7 @@ fn probe_created_jobs_use_same_storage_rules() {
             quality_id: "1080p".to_string(),
         }],
     };
-    let probe_job_ids = core.confirm_probe_selection(&selection).unwrap();
+    let probe_job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(probe_job_ids.len(), 1);
 
     // Process to create directories and complete both jobs
@@ -3757,4 +3758,215 @@ fn http_emits_mid_transfer_job_progress_with_unknown_total() {
         snap.bytes_downloaded > 0,
         "snapshot should expose bytes downloaded"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: Library Root + absolute Job Destination override (issue #37)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn library_root_getter_returns_set_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    assert!(core.library_root().is_none());
+    core.set_library_root(root.clone()).unwrap();
+    assert_eq!(core.library_root(), Some(root.as_path()));
+}
+
+#[test]
+fn changing_library_root_affects_default_destination_for_new_jobs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root_a = tmp.path().join("library-a");
+    let root_b = tmp.path().join("library-b");
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+
+    core.set_library_root(root_a.clone()).unwrap();
+    let dest_a = match core
+        .enqueue("https://example.com/a.zip", None)
+        .unwrap()
+    {
+        EnqueueOutcome::EnqueueDirect { destination, .. } => destination,
+        _ => panic!("expected enqueue_direct"),
+    };
+    assert!(dest_a.starts_with(root_a.join("jobs")));
+
+    core.set_library_root(root_b.clone()).unwrap();
+    let dest_b = match core
+        .enqueue("https://example.com/b.zip", None)
+        .unwrap()
+    {
+        EnqueueOutcome::EnqueueDirect { destination, .. } => destination,
+        _ => panic!("expected enqueue_direct"),
+    };
+    assert!(dest_b.starts_with(root_b.join("jobs")));
+    assert!(!dest_b.starts_with(&root_a));
+}
+
+#[test]
+fn enqueue_accepts_absolute_destination_outside_library_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let off_root = tmp.path().join("elsewhere").join("save-here");
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(root).unwrap();
+
+    let (job_id, destination) = match core
+        .enqueue(
+            "https://example.com/offroot.zip",
+            Some(off_root.clone()),
+        )
+        .unwrap()
+    {
+        EnqueueOutcome::EnqueueDirect {
+            job_id,
+            destination,
+        } => (job_id, destination),
+        _ => panic!("expected enqueue_direct"),
+    };
+
+    assert_eq!(destination, off_root);
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .expect("job snapshot");
+    assert_eq!(snap.destination, off_root.display().to_string());
+}
+
+#[test]
+fn enqueue_rejects_relative_destination_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let err = core
+        .enqueue(
+            "https://example.com/file.zip",
+            Some(PathBuf::from("relative/path")),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_lowercase().contains("absolute"),
+        "expected absolute-path error, got: {err}"
+    );
+}
+
+#[test]
+fn off_root_destination_persists_across_queue_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let off_root = tmp.path().join("off-root-dest");
+    let job_id;
+
+    {
+        let (mut core, _rx) = make_core(Box::new(fake_http()));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = match core
+            .enqueue(
+                "https://example.com/persist-off.zip",
+                Some(off_root.clone()),
+            )
+            .unwrap()
+        {
+            EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
+            _ => panic!("expected enqueue_direct"),
+        };
+    }
+
+    let (mut core2, _rx2) = make_core(Box::new(fake_http()));
+    core2.set_library_root(root).unwrap();
+    let snap = core2
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .expect("reloaded job");
+    assert_eq!(snap.destination, off_root.display().to_string());
+}
+
+#[test]
+fn confirm_probe_selection_accepts_absolute_destination_override() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=offroot",
+        "Off Root Video",
+        "https://cdn.example.com/off.mp4",
+        vec![("720p", "720p")],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let off_root = tmp.path().join("probe-save-to");
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(root.clone()).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=offroot")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=offroot".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core
+        .confirm_probe_selection(&selection, Some(off_root.clone()))
+        .unwrap();
+    assert_eq!(job_ids.len(), 1);
+
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_ids[0])
+        .expect("confirmed job");
+    assert_eq!(snap.destination, off_root.display().to_string());
+    assert!(!PathBuf::from(&snap.destination).starts_with(&root));
+}
+
+#[test]
+fn confirm_off_root_destination_persists_across_queue_reload() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=persist-off",
+        "Persist Off Root",
+        "https://cdn.example.com/persist-off.mp4",
+        vec![("720p", "720p")],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let off_root = tmp.path().join("probe-persist-dest");
+    let job_id;
+
+    {
+        let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+        core.set_library_root(root.clone()).unwrap();
+        core.probe("https://www.youtube.com/watch?v=persist-off")
+            .unwrap();
+        collect_events(&rx);
+
+        let selection = ProbeSelection {
+            url: "https://www.youtube.com/watch?v=persist-off".to_string(),
+            items: vec![ItemSelection {
+                item_id: "item-1".to_string(),
+                quality_id: "720p".to_string(),
+            }],
+        };
+        let job_ids = core
+            .confirm_probe_selection(&selection, Some(off_root.clone()))
+            .unwrap();
+        assert_eq!(job_ids.len(), 1);
+        job_id = job_ids[0].clone();
+    }
+
+    let (mut core2, _rx2) = make_core(Box::new(fake_http()));
+    core2.set_library_root(root).unwrap();
+    let snap = core2
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .expect("reloaded confirm job");
+    assert_eq!(snap.destination, off_root.display().to_string());
 }

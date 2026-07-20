@@ -376,19 +376,22 @@ fn youtube_playlist_probe_then_confirm_creates_jobs_only_after_confirm() {
     }
 
     let job_ids = core
-        .confirm_probe_selection(&ProbeSelection {
-            url: "https://www.youtube.com/playlist?list=PLabc123".to_string(),
-            items: vec![
-                ItemSelection {
-                    item_id: "yt-vidOne111".to_string(),
-                    quality_id: "best".to_string(),
-                },
-                ItemSelection {
-                    item_id: "yt-vidTwo222".to_string(),
-                    quality_id: "best".to_string(),
-                },
-            ],
-        })
+        .confirm_probe_selection(
+            &ProbeSelection {
+                url: "https://www.youtube.com/playlist?list=PLabc123".to_string(),
+                items: vec![
+                    ItemSelection {
+                        item_id: "yt-vidOne111".to_string(),
+                        quality_id: "best".to_string(),
+                    },
+                    ItemSelection {
+                        item_id: "yt-vidTwo222".to_string(),
+                        quality_id: "best".to_string(),
+                    },
+                ],
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(job_ids.len(), 2, "confirm creates jobs; probe alone does not");
 }
@@ -418,13 +421,16 @@ fn xhamster_single_probe_then_confirm_creates_job_only_after_confirm() {
     }
 
     let job_ids = core
-        .confirm_probe_selection(&ProbeSelection {
-            url: "https://xhamster.com/videos/example-xh-video-12345".to_string(),
-            items: vec![ItemSelection {
-                item_id: "xh-xh-video-12345".to_string(),
-                quality_id: "720p".to_string(),
-            }],
-        })
+        .confirm_probe_selection(
+            &ProbeSelection {
+                url: "https://xhamster.com/videos/example-xh-video-12345".to_string(),
+                items: vec![ItemSelection {
+                    item_id: "xh-xh-video-12345".to_string(),
+                    quality_id: "720p".to_string(),
+                }],
+            },
+            None,
+        )
         .unwrap();
     assert_eq!(job_ids.len(), 1);
 }

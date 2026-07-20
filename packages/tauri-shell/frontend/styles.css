@@ -400,10 +400,132 @@ body {
 
 .probe-footer {
   display: flex;
-  justify-content: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--space-3);
   padding: var(--space-4) var(--space-5);
   border-top: var(--border-width) solid var(--border-base);
+}
+
+.probe-save-to {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  flex: 1;
+}
+
+.probe-save-to-path {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.probe-footer-actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+/* ---- Save to… hint under URL bar ---- */
+.save-to-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  border-bottom: var(--border-width) solid var(--border-base);
+  background: var(--bg-surface);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.save-to-hint span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--accent-fg, var(--text-primary));
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+  white-space: nowrap;
+}
+
+/* ---- Settings ---- */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg, rgba(0, 0, 0, 0.45));
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+
+.settings-overlay[hidden] {
+  display: none;
+}
+
+.settings-sheet {
+  width: min(560px, 100%);
+  background: var(--bg-surface);
+  border: var(--border-width) solid var(--border-base);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0, 0, 0, 0.25));
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: var(--border-width) solid var(--border-base);
+}
+
+.settings-header h2 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.settings-body {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-label {
+  font-weight: 600;
+  font-size: var(--text-base);
+}
+
+.settings-help {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.settings-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.settings-row .url-input {
+  flex: 1;
+  min-width: 0;
 }
 
 /* ---- Theme toggle ---- */

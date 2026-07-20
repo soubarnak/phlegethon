@@ -12,7 +12,7 @@ pub enum EnqueueOutcome {
     /// The URL was classified as a direct download — a job was created.
     EnqueueDirect {
         job_id: String,
-        /// Path under Library Root for this job's files.
+        /// Path for this job's files (under Library Root by default; may be an override).
         destination: PathBuf,
     },
     /// The URL requires probe-then-confirm.
@@ -110,29 +110,20 @@ impl Job {
     pub fn new(url: String, library_root: PathBuf) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let destination = library_root.join("jobs").join(&id);
-        let filename = filename_from_url(&url);
-        Self {
-            id,
-            mirrors: MirrorSet::new(url),
-            state: JobState::Pending,
-            destination,
-            bytes_received: 0,
-            live_downloaded: Arc::new(AtomicU64::new(0)),
-            total_bytes: None,
-            bandwidth_cap: None,
-            pause_requested: Arc::new(AtomicBool::new(false)),
-            discard_requested: Arc::new(AtomicBool::new(false)),
-            transfer_active: Arc::new(AtomicBool::new(false)),
-            source: None,
-            extractor_format: None,
-            filename,
-        }
+        Self::assemble(id, url, destination, None)
+    }
+
+    /// Create a job whose Job Destination is an absolute folder override.
+    pub fn new_at_destination(url: String, destination: PathBuf) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        Self::assemble(id, url, destination, None)
     }
 
     /// Create a new job for a probe-then-confirm item.
     ///
     /// `source_name` is optional; when present (batch/channel), the Job
-    /// Destination is a dedicated subfolder derived from the source.
+    /// Destination is a dedicated subfolder derived from the source under
+    /// `{library_root}/jobs/`.
     pub fn new_with_source(
         url: String,
         library_root: PathBuf,
@@ -142,10 +133,39 @@ impl Job {
         let destination = match &source {
             Some(name) => {
                 let safe_name = sanitize_folder_name(name);
-                library_root.join("jobs").join(format!("{}-{}", safe_name, &id[..8]))
+                library_root
+                    .join("jobs")
+                    .join(format!("{}-{}", safe_name, &id[..8]))
             }
             None => library_root.join("jobs").join(&id),
         };
+        Self::assemble(id, url, destination, source)
+    }
+
+    /// Like [`Self::new_with_source`], but destinations live directly under
+    /// `destination_parent` (no `jobs/` segment) — used for Save to… overrides.
+    pub fn new_with_source_at(
+        url: String,
+        destination_parent: PathBuf,
+        source: Option<String>,
+    ) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        let destination = match &source {
+            Some(name) => {
+                let safe_name = sanitize_folder_name(name);
+                destination_parent.join(format!("{}-{}", safe_name, &id[..8]))
+            }
+            None => destination_parent.join(&id),
+        };
+        Self::assemble(id, url, destination, source)
+    }
+
+    fn assemble(
+        id: String,
+        url: String,
+        destination: PathBuf,
+        source: Option<String>,
+    ) -> Self {
         let filename = filename_from_url(&url);
         Self {
             id,

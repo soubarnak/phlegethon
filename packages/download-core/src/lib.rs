@@ -202,7 +202,8 @@ impl Core {
         self.persist_queue_now()
     }
 
-    /// Set the Library Root — the base directory for all downloads.
+    /// Set the Library Root — the base directory for default Job Destinations
+    /// and Core metadata (`.phlegethon/`).
     ///
     /// Creates the directory if it does not exist and restores any persisted
     /// queue state from `{library_root}/.phlegethon/jobs.json`.
@@ -220,6 +221,22 @@ impl Core {
         self.bytes_since_progress_flush = 0;
         self.progress_flush_pending = false;
         Ok(())
+    }
+
+    /// Current Library Root, if set.
+    pub fn library_root(&self) -> Option<&Path> {
+        self.library_root.as_deref()
+    }
+
+    fn require_absolute_destination(path: &Path) -> Result<(), String> {
+        if path.is_absolute() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Job Destination override must be an absolute path, got: {}",
+                path.display()
+            ))
+        }
     }
 
     fn persist_queue_now(&mut self) -> Result<(), String> {
@@ -263,16 +280,32 @@ impl Core {
     /// Returns the classification outcome.  For `EnqueueDirect`, a job is
     /// created and ready to process.  For `ProbeThenConfirm`, the shell
     /// should present a probe sheet and call back with selections.
-    pub fn enqueue(&mut self, url_str: &str) -> Result<EnqueueOutcome, String> {
+    ///
+    /// `destination` — optional absolute Job Destination override.  When
+    /// `None`, the destination is derived under the Library Root.  When
+    /// `Some`, it may be any absolute folder (including outside the Library
+    /// Root).  Relative paths are rejected.
+    pub fn enqueue(
+        &mut self,
+        url_str: &str,
+        destination: Option<PathBuf>,
+    ) -> Result<EnqueueOutcome, String> {
         let parsed = url::Url::parse(url_str).map_err(|_| "invalid URL".to_string())?;
         let root = self
             .library_root
             .as_ref()
             .ok_or_else(|| "Library Root not set".to_string())?;
 
+        if let Some(ref dest) = destination {
+            Self::require_absolute_destination(dest)?;
+        }
+
         match classification::classify(&parsed) {
             classification::Kind::EnqueueDirect => {
-                let job = job::Job::new(url_str.to_string(), root.clone());
+                let job = match destination {
+                    Some(dest) => job::Job::new_at_destination(url_str.to_string(), dest),
+                    None => job::Job::new(url_str.to_string(), root.clone()),
+                };
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
                 self.register_job_signals(&job);
@@ -623,19 +656,29 @@ impl Core {
     /// and lists which items at which qualities to download.  Returns the
     /// job IDs of the created jobs.
     ///
-    /// Each selected item creates one job.  Batch/channel jobs use a
-    /// dedicated Job Destination subfolder derived from the source name.
+    /// Each selected item creates one job.  Without `destination`, batch/
+    /// channel jobs use a dedicated Job Destination subfolder under the
+    /// Library Root derived from the source name.  With an absolute
+    /// `destination` override: a single selected item uses that folder as
+    /// its Job Destination; multiple selected items each get a unique
+    /// subfolder under it (same naming rules as under Library Root, without
+    /// an extra `jobs/` segment).
     ///
     /// Errors if no pending probe exists for the URL, or if the selection
     /// references unknown items or qualities.
     pub fn confirm_probe_selection(
         &mut self,
         selection: &ProbeSelection,
+        destination: Option<PathBuf>,
     ) -> Result<Vec<String>, String> {
         let root = self
             .library_root
             .as_ref()
             .ok_or_else(|| "Library Root not set".to_string())?;
+
+        if let Some(ref dest) = destination {
+            Self::require_absolute_destination(dest)?;
+        }
 
         let probe = self
             .pending_probes
@@ -652,6 +695,7 @@ impl Core {
             probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
 
         let source_name = probe.source_name.clone();
+        let single_override = destination.is_some() && selection.items.len() == 1;
         let mut job_ids = Vec::new();
 
         for sel in &selection.items {
@@ -686,11 +730,16 @@ impl Core {
                 }
             });
 
-            let mut job = job::Job::new_with_source(
-                item.url.clone(),
-                root.clone(),
-                job_source,
-            );
+            let mut job = if single_override {
+                job::Job::new_at_destination(
+                    item.url.clone(),
+                    destination.clone().expect("single_override implies Some"),
+                )
+            } else if let Some(ref dest_parent) = destination {
+                job::Job::new_with_source_at(item.url.clone(), dest_parent.clone(), job_source)
+            } else {
+                job::Job::new_with_source(item.url.clone(), root.clone(), job_source)
+            };
             // Launch Site media is fetched by yt-dlp, not plain HTTP of the page URL.
             job.set_extractor_format(&sel.quality_id);
 

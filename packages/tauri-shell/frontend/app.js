@@ -21,6 +21,12 @@ const state = {
   pendingProbe: null, // { url, items, sourceName } — shown in probe sheet
   theme: "light",
   selectedJobId: null,
+  /** Absolute Job Destination override for quick URL enqueue (null = Library Root default). */
+  saveToDestination: null,
+  /** Absolute Job Destination override for Probe-then-Confirm (null = Library Root default). */
+  probeSaveToDestination: null,
+  /** Pending Library Root path chosen in settings (applied via Core on Apply). */
+  pendingLibraryRoot: null,
 };
 
 // ---- DOM refs ----
@@ -40,6 +46,18 @@ const probeSelectAll = $("probeSelectAll");
 const probeDeselectAll = $("probeDeselectAll");
 const themeToggle = $("themeToggle");
 const dragOverlay = $("dragOverlay");
+const saveToBtn = $("saveToBtn");
+const saveToHint = $("saveToHint");
+const saveToPath = $("saveToPath");
+const saveToClear = $("saveToClear");
+const probeSaveToBtn = $("probeSaveToBtn");
+const probeSaveToPath = $("probeSaveToPath");
+const settingsBtn = $("settingsBtn");
+const settingsOverlay = $("settingsOverlay");
+const settingsClose = $("settingsClose");
+const libraryRootPath = $("libraryRootPath");
+const libraryRootPick = $("libraryRootPick");
+const libraryRootApply = $("libraryRootApply");
 
 // ---- Theme ----
 function setTheme(theme) {
@@ -68,7 +86,11 @@ async function enqueueUrl(url) {
 
   try {
     const invoke = getInvoke();
-    const result = await invoke("enqueue_url", { url: trimmed });
+    const args = { url: trimmed };
+    if (state.saveToDestination) {
+      args.destination = state.saveToDestination;
+    }
+    const result = await invoke("enqueue_url", args);
     handleEnqueueResult(trimmed, result);
   } catch (err) {
     showError(`Enqueue failed: ${err}`);
@@ -164,6 +186,11 @@ async function startProbe(url) {
     probeConfirm.disabled = true;
     probeSelectAll.disabled = true;
     probeDeselectAll.disabled = true;
+    // Carry quick-URL Save to… into the probe sheet when present.
+    if (state.saveToDestination && !state.probeSaveToDestination) {
+      state.probeSaveToDestination = state.saveToDestination;
+    }
+    updateProbeSaveToHint();
 
     const result = await getInvoke()("probe_url", { url });
     showProbeResults(url, result);
@@ -368,9 +395,15 @@ probeConfirm.addEventListener("click", async () => {
     };
 
     const invoke = getInvoke();
-    const jobIds = await invoke("confirm_probe_selection", { selection });
+    const args = { selection };
+    if (state.probeSaveToDestination) {
+      args.destination = state.probeSaveToDestination;
+    }
+    const jobIds = await invoke("confirm_probe_selection", args);
     probeOverlay.classList.remove("open");
     state.pendingProbe = null;
+    state.probeSaveToDestination = null;
+    updateProbeSaveToHint();
 
     await refreshJobs();
     jobIds.forEach((id) => {
@@ -388,6 +421,8 @@ probeConfirm.addEventListener("click", async () => {
 function closeProbe() {
   probeOverlay.classList.remove("open");
   state.pendingProbe = null;
+  state.probeSaveToDestination = null;
+  updateProbeSaveToHint();
 }
 
 probeCancel.addEventListener("click", closeProbe);
@@ -397,7 +432,13 @@ probeOverlay.addEventListener("click", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeProbe();
+  if (e.key === "Escape") {
+    if (!settingsOverlay.hidden) {
+      closeSettings();
+      return;
+    }
+    closeProbe();
+  }
 });
 
 // ---- Queue State Management ----
@@ -663,9 +704,113 @@ function showError(msg) {
   errorTimeout = setTimeout(() => toast.remove(), 8000);
 }
 
+// ---- Save to… (Job Destination override) ----
+function updateSaveToHint() {
+  if (state.saveToDestination) {
+    saveToHint.hidden = false;
+    saveToPath.textContent = state.saveToDestination;
+  } else {
+    saveToHint.hidden = true;
+    saveToPath.textContent = "";
+  }
+}
+
+function updateProbeSaveToHint() {
+  if (!probeSaveToPath) return;
+  probeSaveToPath.textContent = state.probeSaveToDestination
+    ? state.probeSaveToDestination
+    : "Library Root default";
+}
+
+async function pickAbsoluteFolder(title) {
+  const invoke = getInvoke();
+  const path = await invoke("pick_folder", { title });
+  return path || null;
+}
+
+saveToBtn.addEventListener("click", async () => {
+  try {
+    const path = await pickAbsoluteFolder("Save to…");
+    if (!path) return;
+    state.saveToDestination = path;
+    updateSaveToHint();
+  } catch (err) {
+    showError(`Save to… failed: ${err}`);
+  }
+});
+
+saveToClear.addEventListener("click", () => {
+  state.saveToDestination = null;
+  updateSaveToHint();
+});
+
+probeSaveToBtn.addEventListener("click", async () => {
+  try {
+    const path = await pickAbsoluteFolder("Save to…");
+    if (!path) return;
+    state.probeSaveToDestination = path;
+    updateProbeSaveToHint();
+  } catch (err) {
+    showError(`Save to… failed: ${err}`);
+  }
+});
+
+// ---- Settings (Library Root) ----
+async function openSettings() {
+  try {
+    const invoke = getInvoke();
+    const root = await invoke("get_library_root");
+    state.pendingLibraryRoot = root;
+    libraryRootPath.value = root || "";
+    settingsOverlay.hidden = false;
+  } catch (err) {
+    showError(`Settings failed: ${err}`);
+  }
+}
+
+function closeSettings() {
+  settingsOverlay.hidden = true;
+}
+
+settingsBtn.addEventListener("click", openSettings);
+settingsClose.addEventListener("click", closeSettings);
+settingsOverlay.addEventListener("click", (e) => {
+  if (e.target === settingsOverlay) closeSettings();
+});
+
+libraryRootPick.addEventListener("click", async () => {
+  try {
+    const path = await pickAbsoluteFolder("Choose Library Root");
+    if (!path) return;
+    state.pendingLibraryRoot = path;
+    libraryRootPath.value = path;
+  } catch (err) {
+    showError(`Choose Library Root failed: ${err}`);
+  }
+});
+
+libraryRootApply.addEventListener("click", async () => {
+  const path = (state.pendingLibraryRoot || libraryRootPath.value || "").trim();
+  if (!path) {
+    showError("Choose a Library Root folder first.");
+    return;
+  }
+  try {
+    const invoke = getInvoke();
+    const applied = await invoke("set_library_root", { path });
+    libraryRootPath.value = applied;
+    state.pendingLibraryRoot = applied;
+    closeSettings();
+  } catch (err) {
+    showError(`Apply Library Root failed: ${err}`);
+  }
+});
+
 // ---- Init ----
 document.addEventListener("DOMContentLoaded", async () => {
   urlInput.focus();
+  updateSaveToHint();
+  updateProbeSaveToHint();
 
   try {
     getInvoke();
