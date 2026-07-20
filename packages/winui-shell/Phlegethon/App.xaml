@@ -1,0 +1,14 @@
+<!-- Phlegethon WinUI Shell — Application root -->
+<Application
+    x:Class="Phlegethon.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- Geist token theme dictionary -->
+                <ResourceDictionary Source="ms-appx:///design/geist/GeistTheme.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

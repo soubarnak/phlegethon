@@ -1,0 +1,168 @@
+<!-- DownloadQueueControl — Dense-row download queue (prototype A). -->
+
+<UserControl
+    x:Class="Phlegethon.Controls.DownloadQueueControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Phlegethon.Controls">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Column header (batch header) -->
+        <Border
+            Grid.Row="0"
+            BorderBrush="{ThemeResource GeistBorderBrush}"
+            BorderThickness="0,0,0,1"
+            Padding="12,4"
+            Background="{ThemeResource GeistSurfaceBrush}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="80" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock
+                    Grid.Column="0"
+                    Text="Queue"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize13}"
+                    FontWeight="{ThemeResource GeistTypeWeightSemiBold}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    Margin="24,0,0,0" />
+            </Grid>
+        </Border>
+
+        <!-- List of download items -->
+        <ListView
+            Grid.Row="1"
+            x:Name="DownloadList"
+            Background="Transparent"
+            BorderThickness="0"
+            SelectionMode="None"
+            ItemContainerStyle="{StaticResource GeistListViewItemStyle}">
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <Border
+                        Background="Transparent"
+                        BorderBrush="{ThemeResource GeistBorderBrush}"
+                        BorderThickness="0,0,0,1"
+                        Height="{ThemeResource GeistRowHeight}"
+                        Padding="12,0">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="80" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Status icon -->
+                            <Border
+                                Grid.Column="0"
+                                Width="24"
+                                Height="24"
+                                CornerRadius="4"
+                                Background="{ThemeResource GeistGray100}"
+                                VerticalAlignment="Center">
+                                <TextBlock
+                                    Text="{Binding StatusIcon}"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="14"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Foreground="{ThemeResource GeistTextSecondaryBrush}" />
+                            </Border>
+
+                            <!-- Info column -->
+                            <StackPanel
+                                Grid.Column="1"
+                                VerticalAlignment="Center"
+                                Spacing="2">
+                                <TextBlock
+                                    Text="{Binding Title}"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="{ThemeResource GeistTypeSize14}"
+                                    FontWeight="{ThemeResource GeistTypeWeightMedium}"
+                                    Foreground="{ThemeResource GeistTextPrimaryBrush}"
+                                    TextTrimming="CharacterEllipsis"
+                                    TextWrapping="NoWrap"
+                                    MaxLines="1" />
+                                <TextBlock
+                                    Text="{Binding Subtitle}"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="{ThemeResource GeistTypeSize12}"
+                                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                                    TextTrimming="CharacterEllipsis"
+                                    TextWrapping="NoWrap"
+                                    MaxLines="1" />
+                            </StackPanel>
+
+                            <!-- Progress bar -->
+                            <Grid
+                                Grid.Column="2"
+                                VerticalAlignment="Center"
+                                Height="3">
+                                <Border
+                                    Height="3"
+                                    CornerRadius="{ThemeResource GeistProgressTrackRadius}"
+                                    Background="{ThemeResource GeistGray200}" />
+                                <Border
+                                    x:Name="ProgressFill"
+                                    Width="{Binding ProgressPercent, Converter={StaticResource PercentToWidthConverter}}"
+                                    Height="3"
+                                    CornerRadius="{ThemeResource GeistProgressTrackRadius}"
+                                    Background="{ThemeResource GeistProgressActiveBrush}"
+                                    HorizontalAlignment="Left" />
+                            </Grid>
+
+                            <!-- Action button -->
+                            <Button
+                                Grid.Column="3"
+                                Content="{Binding ActionLabel}"
+                                FontFamily="{ThemeResource GeistSansFont}"
+                                FontSize="{ThemeResource GeistTypeSize12}"
+                                Height="28"
+                                MinWidth="64"
+                                Padding="8,0"
+                                VerticalAlignment="Center"
+                                Click="OnItemAction" />
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- Empty state -->
+        <TextBlock
+            Grid.Row="1"
+            x:Name="EmptyStateText"
+            Text="No active downloads. Paste a URL or drop a file."
+            FontFamily="{ThemeResource GeistSansFont}"
+            FontSize="{ThemeResource GeistTypeSize14}"
+            Foreground="{ThemeResource GeistTextSecondaryBrush}"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Visibility="Visible" />
+
+        <!-- Footer status bar -->
+        <Border
+            Grid.Row="2"
+            BorderBrush="{ThemeResource GeistBorderBrush}"
+            BorderThickness="0,1,0,0"
+            Padding="12,6"
+            Background="{ThemeResource GeistSurfaceBrush}">
+            <TextBlock
+                x:Name="StatusFooter"
+                Text="Ready"
+                FontFamily="{ThemeResource GeistSansFont}"
+                FontSize="{ThemeResource GeistTypeSize12}"
+                Foreground="{ThemeResource GeistTextSecondaryBrush}" />
+        </Border>
+    </Grid>
+</UserControl>

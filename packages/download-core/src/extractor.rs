@@ -156,7 +156,7 @@ impl ExtractorToolchain for FakeExtractorToolchain {
 // ---------------------------------------------------------------------------
 
 /// A single item selection: which item at which quality to download.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct ItemSelection {
     /// The item ID from the probe result.
     pub item_id: String,
@@ -165,7 +165,7 @@ pub struct ItemSelection {
 }
 
 /// User confirmation payload after viewing probe results.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct ProbeSelection {
     /// The URL that was probed (links back to the pending probe).
     pub url: String,

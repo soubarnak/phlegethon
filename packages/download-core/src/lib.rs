@@ -3,6 +3,7 @@
 //! The Core owns URL classification, job lifecycle, and storage.
 //! Platform shells consume this library via its public command/event API.
 
+mod cabi;
 mod classification;
 mod event;
 mod extractor;
@@ -10,6 +11,8 @@ mod http;
 mod job;
 mod mirror_set;
 mod storage;
+pub mod ytdlp_extractor;
+pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
 pub use event::CoreEvent;
 pub use extractor::{

@@ -1,0 +1,681 @@
+//! C ABI exports for the Download Core — consumed by WinUI 3 via csbindgen.
+//!
+//! # Design
+//!
+//! - Opaque `CoreHandle` (`*mut Core`) passed through FFI.
+//! - Every function returns `i32`: 0 = success, non‑zero = error.
+//! - Error details are written into an optional `error_buf` parameter.
+//! - Structured I/O (probe results, confirmations, events) uses **JSON strings**
+//!   to keep the ABI stable and narrow.
+//! - Progress events are batched via `core_drain_events_json`.
+//! - Never unwind a Rust panic across the FFI boundary: every public export
+//!   wraps its body in `std::panic::catch_unwind`.
+//!
+//! # csbindgen usage
+//!
+//! ```ignore
+//! // build.rs
+//! csbindgen::Builder::default()
+//!     .input_extern_file("src/cabi.rs")
+//!     .csharp_dll_name("download_core")
+//!     .generate_csharp_file("bindings/CoreBindings.g.cs")
+//!     .expect("csbindgen generation failed");
+//! ```
+
+use crate::job::EnqueueOutcome;
+use crate::extractor::ProbeSelection;
+pub use crate::{Core, CoreEvent};
+use serde::Serialize;
+use std::ffi::CStr;
+use std::os::raw::c_char;
+use std::panic::{self, AssertUnwindSafe};
+use std::ptr;
+use std::sync::Mutex;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Wrapper to catch panics.
+///
+/// On success returns the expression result.
+/// On panic returns the fallback value (-1 for i32, null for pointers).
+macro_rules! catch_panic_i32 {
+    ($expr:expr) => {
+        match panic::catch_unwind(AssertUnwindSafe(|| $expr)) {
+            Ok(v) => v,
+            Err(_) => {
+                error_last_error_str(
+                    "internal panic in Download Core FFI".to_string(),
+                );
+                -1
+            }
+        }
+    };
+}
+
+/// Same as catch_panic_i32 but returns a null pointer on panic.
+macro_rules! catch_panic_ptr {
+    ($expr:expr) => {
+        match panic::catch_unwind(AssertUnwindSafe(|| $expr)) {
+            Ok(v) => v,
+            Err(_) => {
+                error_last_error_str(
+                    "internal panic in Download Core FFI".to_string(),
+                );
+                ptr::null_mut()
+            }
+        }
+    };
+}
+
+// Thread-local (or global) error buffer.  We use a global Mutex<String> so
+// that error messages survive across FFI calls without requiring the caller
+// to pre-allocate.
+use std::sync::OnceLock;
+
+fn error_buf() -> &'static Mutex<String> {
+    static BUF: OnceLock<Mutex<String>> = OnceLock::new();
+    BUF.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn error_last_error_str(msg: String) {
+    *error_buf().lock().unwrap() = msg;
+}
+
+fn take_error() -> String {
+    error_buf().lock().unwrap().clone()
+}
+
+/// Convert a C string pointer to a Rust &str (returns empty on null/error).
+unsafe fn cstr_to_str<'a>(ptr: *const c_char) -> &'a str {
+    if ptr.is_null() {
+        return "";
+    }
+    CStr::from_ptr(ptr).to_str().unwrap_or("")
+}
+
+/// Copy a Rust string into a caller-supplied buffer.  Includes NUL terminator.
+unsafe fn write_str_to_buf(s: &str, buf: *mut c_char, len: usize) {
+    if buf.is_null() || len == 0 {
+        return;
+    }
+    let bytes = s.as_bytes();
+    let copy_len = bytes.len().min(len - 1);
+    ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, copy_len);
+    *buf.add(copy_len) = 0; // NUL-terminate
+}
+
+// ---------------------------------------------------------------------------
+// Core lifecycle
+// ---------------------------------------------------------------------------
+
+/// Create a new Download Core instance.
+/// Create a new Download Core instance with production backends.
+///
+/// Uses `ProdHttpBackend` for HTTP and `YtDlpExtractorToolchain` for probing.
+///
+/// Returns an opaque handle.  The caller must call `core_destroy` when done.
+#[no_mangle]
+pub unsafe extern "C" fn core_create() -> *mut Core {
+    catch_panic_ptr!({
+        let http = Box::new(crate::http::ProdHttpBackend::new());
+        let config = crate::ytdlp_extractor::YtDlpConfig::default();
+        let extractor = Box::new(crate::ytdlp_extractor::YtDlpExtractorToolchain::new(config));
+        let (core, rx) = Core::new(http, extractor);
+
+        // We need to keep the receiver alive to drain events.
+        // We store it in a leaked box alongside the core.
+        let ctx = Box::new(CoreContext {
+            core: Mutex::new(Some(core)),
+            event_rx: Mutex::new(Some(rx)),
+        });
+        Box::into_raw(ctx) as *mut Core
+    })
+}
+
+/// Internal context stored alongside the Core handle.
+struct CoreContext {
+    core: Mutex<Option<Core>>,
+    event_rx: Mutex<Option<crossbeam_channel::Receiver<CoreEvent>>>,
+}
+
+/// Destroy a Core instance created by `core_create`.
+///
+/// Safe to call with NULL (no-op).
+#[no_mangle]
+pub unsafe extern "C" fn core_destroy(handle: *mut Core) {
+    if handle.is_null() {
+        return;
+    }
+    let _ = Box::from_raw(handle as *mut CoreContext);
+}
+
+/// Set the Library Root directory.
+///
+/// Returns 0 on success, -1 on error (error details written to `error_buf`).
+#[no_mangle]
+pub unsafe extern "C" fn core_set_library_root(
+    handle: *mut Core,
+    path: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let path_str = cstr_to_str(path);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+        match core.set_library_root(std::path::PathBuf::from(path_str)) {
+            Ok(()) => 0,
+            Err(e) => {
+                let err = format!("set_library_root: {e}");
+                write_str_to_buf(&err, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Enqueue
+// ---------------------------------------------------------------------------
+
+/// Enqueue a URL for download.
+///
+/// On success writes a JSON string to `out_json_buf`:
+/// ```json
+/// {"type":"enqueue_direct","job_id":"...","destination":"..."}
+/// // or
+/// {"type":"probe_then_confirm","url":"..."}
+/// ```
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_enqueue(
+    handle: *mut Core,
+    url: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let url_str = cstr_to_str(url);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+
+        match core.enqueue(url_str) {
+            Ok(outcome) => {
+                let json = match outcome {
+                    EnqueueOutcome::EnqueueDirect {
+                        job_id,
+                        destination,
+                    } => serde_json::json!({
+                        "type": "enqueue_direct",
+                        "job_id": job_id,
+                        "destination": destination.to_string_lossy(),
+                    }),
+                    EnqueueOutcome::ProbeThenConfirm { url } => {
+                        serde_json::json!({
+                            "type": "probe_then_confirm",
+                            "url": url,
+                        })
+                    }
+                };
+                let s = json.to_string();
+                write_str_to_buf(&s, out_json_buf, out_buf_len);
+                0
+            }
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Probe-then-Confirm
+// ---------------------------------------------------------------------------
+
+/// Probe a URL using the Extractor Toolchain.
+///
+/// On success writes the probe result as JSON to `out_json_buf`.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_probe(
+    handle: *mut Core,
+    url: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let url_str = cstr_to_str(url);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+
+        match core.probe(url_str) {
+            Ok(result) => {
+                let json = serde_json::to_value(&result).unwrap();
+                let s = json.to_string();
+                write_str_to_buf(&s, out_json_buf, out_buf_len);
+                0
+            }
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+/// Confirm a probe selection and create download jobs.
+///
+/// `selection_json` is a JSON string:
+/// ```json
+/// {"url":"https://...","items":[{"item_id":"...","quality_id":"..."}]}
+/// ```
+/// On success writes a JSON array of job IDs to `out_json_buf`.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_confirm_probe_selection(
+    handle: *mut Core,
+    selection_json: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let json_str = cstr_to_str(selection_json);
+
+        // Parse selection JSON
+        let selection: ProbeSelection = match serde_json::from_str(json_str) {
+            Ok(s) => s,
+            Err(e) => {
+                let err = format!("invalid selection JSON: {e}");
+                write_str_to_buf(&err, error_buf, error_buf_len);
+                return -1;
+            }
+        };
+
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+
+        match core.confirm_probe_selection(&selection) {
+            Ok(job_ids) => {
+                let json = serde_json::json!(job_ids);
+                let s = json.to_string();
+                write_str_to_buf(&s, out_json_buf, out_buf_len);
+                0
+            }
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle commands
+// ---------------------------------------------------------------------------
+
+macro_rules! lifecycle_cmd {
+    ($name:ident, $method:ident) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(
+            handle: *mut Core,
+            job_id: *const c_char,
+            error_buf: *mut c_char,
+            error_buf_len: usize,
+        ) -> i32 {
+            catch_panic_i32!({
+                let ctx = &*(handle as *mut CoreContext);
+                let jid = cstr_to_str(job_id);
+                let mut core_guard = ctx.core.lock().unwrap();
+                let core = core_guard.as_mut().unwrap();
+                match core.$method(jid) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        write_str_to_buf(&e, error_buf, error_buf_len);
+                        -1
+                    }
+                }
+            })
+        }
+    };
+}
+
+lifecycle_cmd!(core_pause_job, pause_job);
+lifecycle_cmd!(core_resume_job, resume_job);
+lifecycle_cmd!(core_retry_job, retry_job);
+lifecycle_cmd!(core_discard_job, discard_job);
+
+// ---------------------------------------------------------------------------
+// Processing
+// ---------------------------------------------------------------------------
+
+/// Process pending jobs — run transfers for any queued jobs.
+///
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_process_pending(
+    handle: *mut Core,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+        match core.process_pending() {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+/// Drain pending events and write them as a JSON array to `out_json_buf`.
+///
+/// ```json
+/// [{"type":"JobProgress","job_id":"...","bytes_downloaded":0,"total_bytes":100}]
+/// ```
+///
+/// Returns the number of events drained.  Returns -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_drain_events_json(
+    handle: *mut Core,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let rx_guard = ctx.event_rx.lock().unwrap();
+        let rx = rx_guard.as_ref().unwrap();
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        let count = events.len() as i32;
+
+        // Serialise to JSON array
+        let json = serde_json::to_value(&events).unwrap();
+        let s = json.to_string();
+        write_str_to_buf(&s, out_json_buf, out_buf_len);
+        count
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Bandwidth caps
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn core_set_global_bandwidth_cap(
+    handle: *mut Core,
+    cap: u64,
+) {
+    let ctx = &*(handle as *mut CoreContext);
+    let mut core_guard = ctx.core.lock().unwrap();
+    let core = core_guard.as_mut().unwrap();
+    core.set_global_bandwidth_cap(cap);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_remove_global_bandwidth_cap(
+    handle: *mut Core,
+) {
+    let ctx = &*(handle as *mut CoreContext);
+    let mut core_guard = ctx.core.lock().unwrap();
+    let core = core_guard.as_mut().unwrap();
+    core.remove_global_bandwidth_cap();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_set_job_bandwidth_cap(
+    handle: *mut Core,
+    job_id: *const c_char,
+    cap: u64,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let jid = cstr_to_str(job_id);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+        match core.set_job_bandwidth_cap(jid, cap) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_remove_job_bandwidth_cap(
+    handle: *mut Core,
+    job_id: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let jid = cstr_to_str(job_id);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+        match core.remove_job_bandwidth_cap(jid) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Mirror Sets
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn core_add_job_mirror(
+    handle: *mut Core,
+    job_id: *const c_char,
+    url: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let jid = cstr_to_str(job_id);
+        let url_str = cstr_to_str(url);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+        match core.add_job_mirror(jid, url_str.to_string()) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_job_mirrors(
+    handle: *mut Core,
+    job_id: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let jid = cstr_to_str(job_id);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+        match core.job_mirrors(jid) {
+            Ok(mirrors) => {
+                let json = serde_json::json!(mirrors);
+                let s = json.to_string();
+                write_str_to_buf(&s, out_json_buf, out_buf_len);
+                0
+            }
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Serialisation support for C ABI types
+// ---------------------------------------------------------------------------
+
+impl Serialize for crate::extractor::ProbeResult {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("ProbeResult", 3)?;
+        st.serialize_field("url", &self.url)?;
+        st.serialize_field("items", &self.items)?;
+        st.serialize_field("source_name", &self.source_name)?;
+        st.end()
+    }
+}
+
+impl Serialize for crate::extractor::MediaItem {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("MediaItem", 4)?;
+        st.serialize_field("id", &self.id)?;
+        st.serialize_field("title", &self.title)?;
+        st.serialize_field("url", &self.url)?;
+        st.serialize_field("qualities", &self.qualities)?;
+        st.end()
+    }
+}
+
+impl Serialize for crate::extractor::Quality {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("Quality", 2)?;
+        st.serialize_field("id", &self.id)?;
+        st.serialize_field("label", &self.label)?;
+        st.end()
+    }
+}
+
+impl Serialize for CoreEvent {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        match self {
+            CoreEvent::ProbeResult {
+                url,
+                items,
+                source_name,
+            } => {
+                let mut st = s.serialize_struct("CoreEvent", 4)?;
+                st.serialize_field("type", "ProbeResult")?;
+                st.serialize_field("url", url)?;
+                st.serialize_field("items", items)?;
+                st.serialize_field("source_name", source_name)?;
+                st.end()
+            }
+            CoreEvent::ProbeFailed { url, error } => {
+                let mut st = s.serialize_struct("CoreEvent", 3)?;
+                st.serialize_field("type", "ProbeFailed")?;
+                st.serialize_field("url", url)?;
+                st.serialize_field("error", error)?;
+                st.end()
+            }
+            CoreEvent::JobProgress {
+                job_id,
+                bytes_downloaded,
+                total_bytes,
+            } => {
+                let mut st = s.serialize_struct("CoreEvent", 4)?;
+                st.serialize_field("type", "JobProgress")?;
+                st.serialize_field("job_id", job_id)?;
+                st.serialize_field("bytes_downloaded", bytes_downloaded)?;
+                st.serialize_field("total_bytes", total_bytes)?;
+                st.end()
+            }
+            CoreEvent::JobCompleted {
+                job_id,
+                bytes_written,
+                path,
+            } => {
+                let mut st = s.serialize_struct("CoreEvent", 4)?;
+                st.serialize_field("type", "JobCompleted")?;
+                st.serialize_field("job_id", job_id)?;
+                st.serialize_field("bytes_written", bytes_written)?;
+                st.serialize_field("path", &path.to_string_lossy().to_string())?;
+                st.end()
+            }
+            CoreEvent::JobPaused { job_id } => {
+                let mut st = s.serialize_struct("CoreEvent", 2)?;
+                st.serialize_field("type", "JobPaused")?;
+                st.serialize_field("job_id", job_id)?;
+                st.end()
+            }
+            CoreEvent::JobResumed { job_id } => {
+                let mut st = s.serialize_struct("CoreEvent", 2)?;
+                st.serialize_field("type", "JobResumed")?;
+                st.serialize_field("job_id", job_id)?;
+                st.end()
+            }
+            CoreEvent::JobFailed { job_id, error } => {
+                let mut st = s.serialize_struct("CoreEvent", 3)?;
+                st.serialize_field("type", "JobFailed")?;
+                st.serialize_field("job_id", job_id)?;
+                st.serialize_field("error", error)?;
+                st.end()
+            }
+            CoreEvent::JobRetried { job_id } => {
+                let mut st = s.serialize_struct("CoreEvent", 2)?;
+                st.serialize_field("type", "JobRetried")?;
+                st.serialize_field("job_id", job_id)?;
+                st.end()
+            }
+            CoreEvent::JobDiscarded { job_id } => {
+                let mut st = s.serialize_struct("CoreEvent", 2)?;
+                st.serialize_field("type", "JobDiscarded")?;
+                st.serialize_field("job_id", job_id)?;
+                st.end()
+            }
+            CoreEvent::JobMirrorFailover {
+                job_id,
+                previous_url,
+                next_url,
+                error,
+            } => {
+                let mut st = s.serialize_struct("CoreEvent", 5)?;
+                st.serialize_field("type", "JobMirrorFailover")?;
+                st.serialize_field("job_id", job_id)?;
+                st.serialize_field("previous_url", previous_url)?;
+                st.serialize_field("next_url", next_url)?;
+                st.serialize_field("error", error)?;
+                st.end()
+            }
+        }
+    }
+}

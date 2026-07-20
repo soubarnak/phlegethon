@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Phlegethon</title>
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    /* Geist font loading via @fontsource or CDN — uses system fallback */
+    @import url('https://fonts.cdnfonts.com/css/geist');
+    @import url('https://fonts.cdnfonts.com/css/geist-mono');
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="app-header">
+    <h1>⏬ Phlegethon</h1>
+    <div class="header-actions">
+      <button class="btn-icon theme-toggle" id="themeToggle" title="Toggle theme">🌓</button>
+    </div>
+  </header>
+
+  <!-- URL Bar -->
+  <div class="url-bar">
+    <input type="text" class="url-input" id="urlInput" placeholder="Paste or type a URL… then press Enter or click Enqueue" autofocus />
+    <button class="btn btn-primary" id="enqueueBtn">Enqueue</button>
+  </div>
+
+  <!-- Drop zone (invisible, activated on dragover) -->
+  <div class="drag-overlay" id="dragOverlay">Drop URL to enqueue</div>
+
+  <!-- Queue -->
+  <main class="app-main" id="appMain">
+    <div class="queue-container" id="queueContainer">
+      <div class="queue-empty" id="queueEmpty">
+        <span class="queue-empty-icon">📥</span>
+        <span>No downloads yet. Paste a URL above or drag one in.</span>
+      </div>
+      <div id="queueList"></div>
+    </div>
+    <div class="shortcuts-hint">
+      <kbd>Ctrl+V</kbd> paste &amp; enqueue &nbsp;·&nbsp; <kbd>Esc</kbd> close probe sheet
+    </div>
+  </main>
+
+  <!-- Probe Sheet (hidden by default) -->
+  <div class="probe-overlay" id="probeOverlay">
+    <div class="probe-sheet">
+      <div class="probe-header">
+        <div>
+          <h2 id="probeTitle">Probe Results</h2>
+          <span class="probe-header-url" id="probeUrl"></span>
+        </div>
+        <button class="btn-icon" id="probeClose" title="Cancel">✕</button>
+      </div>
+      <div class="probe-items" id="probeItems"></div>
+      <div class="probe-footer">
+        <button class="btn" id="probeCancel">Cancel</button>
+        <button class="btn btn-primary" id="probeConfirm">Download Selected</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden file input for drop-to-enqueue -->
+  <input type="file" id="fileDropZone" multiple hidden />
+
+  <script src="app.js"></script>
+</body>
+</html>
