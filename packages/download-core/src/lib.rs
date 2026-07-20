@@ -24,13 +24,14 @@ pub use extractor::{
     ExtractorToolchain, FakeExtractorToolchain, ItemSelection, MediaItem, ProbeResult,
     ProbeSelection, Quality,
 };
-pub use http::{HttpBackend, ProdHttpBackend};
+pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
 pub use job::EnqueueOutcome;
 pub use mirror_set::MirrorSet;
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The Download Core instance.
@@ -667,6 +668,20 @@ impl Core {
                 })
                 .map_err(|_| "event channel closed".to_string())?;
 
+            std::fs::create_dir_all(&dest)
+                .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
+
+            let filename = self.filename_from_url(&url);
+            let file_path = dest.join(&filename);
+            let part_path = Self::part_path_for(&file_path);
+
+            // Segmented partials may have written the final path; migrate before resume.
+            if bytes_received > 0 && !part_path.exists() && file_path.exists() {
+                std::fs::rename(&file_path, &part_path).map_err(|e| {
+                    format!("migrate partial {file_path:?} -> {part_path:?}: {e}")
+                })?;
+            }
+
             // Fetch loop: retry with next mirror on failure
             let job_fetch = 'fetch_loop: loop {
                 let current_url = {
@@ -674,8 +689,17 @@ impl Core {
                     job.url().to_string()
                 };
 
-                match self.http.fetch(&current_url, range.clone()) {
-                    Ok(result) => break 'fetch_loop Some(result),
+                let mut part_file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .append(bytes_received > 0)
+                    .truncate(bytes_received == 0)
+                    .open(&part_path)
+                    .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
+
+                let mut capped = CappedWriter::new(&mut part_file, effective_cap);
+                match self.http.fetch(&current_url, range.clone(), &mut capped) {
+                    Ok(result) => break 'fetch_loop Some((result, capped.bytes_written())),
                     Err(err) => {
                         // Try next mirror
                         if self.jobs[i].advance_mirror() {
@@ -706,52 +730,40 @@ impl Core {
                 }
             };
 
-            let (mut data, total) = match job_fetch {
+            let (fetch_result, bytes_this_call) = match job_fetch {
                 Some(r) => r,
                 None => continue, // all mirrors exhausted, move to next job
             };
+            let total = fetch_result.total_length;
 
-            // Apply bandwidth cap: truncate data if it exceeds the effective cap
-            let bytes_this_call = if let Some(cap) = effective_cap {
-                let cap_usize = cap as usize;
-                if data.len() > cap_usize {
-                    data.truncate(cap_usize);
-                }
-                let actual = data.len() as u64;
-                if let Some(ref mut remaining) = global_remaining {
-                    *remaining = remaining.saturating_sub(actual);
-                }
-                actual
-            } else {
-                data.len() as u64
-            };
-
-            // Write to disk
-            std::fs::create_dir_all(&dest)
-                .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
-
-            let filename = self.filename_from_url(&url);
-            let file_path = dest.join(&filename);
-
-            self.write_data_to_disk(&file_path, &data, bytes_received > 0)?;
-
-            // Update bytes_received with what we just wrote
-            let new_bytes = bytes_received + bytes_this_call;
-            if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
-                job.add_bytes_received(bytes_this_call);
+            if let Some(ref mut remaining) = global_remaining {
+                *remaining = remaining.saturating_sub(bytes_this_call);
             }
 
-            // Emit progress with cumulative total
+            let on_disk = std::fs::metadata(&part_path)
+                .map(|m| m.len())
+                .map_err(|e| format!("stat partial {part_path:?}: {e}"))?;
+
+            if on_disk > bytes_received {
+                if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
+                    job.add_bytes_received(on_disk - bytes_received);
+                }
+            }
+
+            // Emit progress with cumulative total; on-disk bytes are authoritative.
             self.event_tx
                 .send(CoreEvent::JobProgress {
                     job_id: job_id.clone(),
-                    bytes_downloaded: new_bytes,
+                    bytes_downloaded: on_disk,
                     total_bytes: Some(total),
                 })
                 .map_err(|_| "event channel closed".to_string())?;
 
-            // Mark complete only if we have all the bytes
-            if new_bytes >= total {
+            // Mark complete only if we have all the bytes, then rename partial.
+            if on_disk >= total {
+                std::fs::rename(&part_path, &file_path)
+                    .map_err(|e| format!("rename {part_path:?} -> {file_path:?}: {e}"))?;
+
                 self.event_tx
                     .send(CoreEvent::JobCompleted {
                         job_id: job_id.clone(),
@@ -820,7 +832,7 @@ impl Core {
                     let url_ref = &url_owned;
                     handles.push(scope.spawn(move || {
                         let (data, _total) =
-                            http_ref.fetch(url_ref, Some(start..end))?;
+                            http::fetch_into_vec(http_ref.as_ref(), url_ref, Some(start..end))?;
                         Ok((start, data))
                     }));
                 }
@@ -861,6 +873,13 @@ impl Core {
     // Internal helpers
     // -----------------------------------------------------------------------
 
+    /// Path for an in-progress download (`{final}.part`).
+    fn part_path_for(final_path: &Path) -> PathBuf {
+        let mut part = final_path.as_os_str().to_os_string();
+        part.push(".part");
+        PathBuf::from(part)
+    }
+
     /// Derive a filename from a URL.
     fn filename_from_url(&self, url: &str) -> String {
         url::Url::parse(url)
@@ -882,7 +901,6 @@ impl Core {
         append: bool,
     ) -> Result<(), String> {
         if append {
-            use std::io::Write;
             std::fs::OpenOptions::new()
                 .append(true)
                 .create(true)
@@ -893,5 +911,49 @@ impl Core {
             std::fs::write(file_path, data)
                 .map_err(|e| format!("write {file_path:?}: {e}"))
         }
+    }
+}
+
+/// Limits how many bytes may be written to an inner sink.
+struct CappedWriter<'a, W: Write> {
+    inner: &'a mut W,
+    remaining: Option<u64>,
+    written: u64,
+}
+
+impl<'a, W: Write> CappedWriter<'a, W> {
+    fn new(inner: &'a mut W, cap: Option<u64>) -> Self {
+        Self {
+            inner,
+            remaining: cap,
+            written: 0,
+        }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.written
+    }
+}
+
+impl<W: Write> Write for CappedWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let allowed = match self.remaining {
+            Some(0) => return Ok(0),
+            Some(remaining) => buf.len().min(remaining as usize),
+            None => buf.len(),
+        };
+        if allowed == 0 {
+            return Ok(0);
+        }
+        let n = self.inner.write(&buf[..allowed])?;
+        self.written += n as u64;
+        if let Some(remaining) = self.remaining.as_mut() {
+            *remaining = remaining.saturating_sub(n as u64);
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }

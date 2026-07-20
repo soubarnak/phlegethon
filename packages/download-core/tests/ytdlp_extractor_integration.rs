@@ -320,10 +320,24 @@ impl download_core::HttpBackend for StubHttp {
         &self,
         url: &str,
         _range: Option<std::ops::Range<u64>>,
-    ) -> Result<(Vec<u8>, u64), String> {
+        sink: &mut dyn std::io::Write,
+    ) -> Result<download_core::FetchResult, String> {
         let body = format!("body for {url}").into_bytes();
         let len = body.len() as u64;
-        Ok((body, len))
+        let mut written = 0usize;
+        while written < body.len() {
+            let n = sink
+                .write(&body[written..])
+                .map_err(|e| format!("sink write: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            written += n;
+        }
+        Ok(download_core::FetchResult {
+            total_length: len,
+            bytes_written: written as u64,
+        })
     }
 
     fn supports_range(&self, _url: &str) -> Result<bool, String> {
