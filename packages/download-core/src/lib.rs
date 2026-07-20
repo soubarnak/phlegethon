@@ -8,6 +8,7 @@ mod event;
 mod extractor;
 mod http;
 mod job;
+mod mirror_set;
 mod storage;
 
 pub use event::CoreEvent;
@@ -17,6 +18,7 @@ pub use extractor::{
 };
 pub use http::HttpBackend;
 pub use job::EnqueueOutcome;
+pub use mirror_set::MirrorSet;
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -258,6 +260,53 @@ impl Core {
     }
 
     // -----------------------------------------------------------------------
+    // Mirror Set management
+    // -----------------------------------------------------------------------
+
+    /// Add a mirror URL to an existing job's Mirror Set.
+    ///
+    /// The mirror is appended to the ordered list and will be tried
+    /// if the current mirror fails.
+    pub fn add_job_mirror(&mut self, job_id: &str, url: String) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        job.add_mirror(url);
+        Ok(())
+    }
+
+    /// Parse a Metalink / `.meta4` XML document and add discovered URLs
+    /// as mirrors to the specified job.
+    pub fn add_metalink_to_job(&mut self, job_id: &str, xml: &str) -> Result<usize, String> {
+        let urls = MirrorSet::from_metalink(xml);
+        let count = urls.len();
+        if count == 0 {
+            return Ok(0);
+        }
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        for url in urls {
+            job.add_mirror(url);
+        }
+        Ok(count)
+    }
+
+    /// Return all mirror URLs for a job.
+    pub fn job_mirrors(&self, job_id: &str) -> Result<Vec<String>, String> {
+        let job = self
+            .jobs
+            .iter()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        Ok(job.mirror_urls().to_vec())
+    }
+
+    // -----------------------------------------------------------------------
     // Probe-then-Confirm
     // -----------------------------------------------------------------------
 
@@ -447,17 +496,55 @@ impl Core {
             // When bytes_received == 0, check if the server supports Range.
             // If yes, use multi-connection segmented transfer.
             if bytes_received == 0 {
+                // Check primary URL for Range support; if it fails, fall through
+                // to single-connection path below.
                 let supports_range = match self.http.supports_range(&url) {
                     Ok(true) => true,
-                    // Range detection failed or not supported → fall through
-                    // to single-connection path below.
                     _ => false,
                 };
 
                 if supports_range {
-                    // Fetch all segments concurrently
-                    match self.segmented_fetch(&url, effective_cap) {
-                        Ok((total_size, full_data)) => {
+                    // Segmented fetch loop: retry with next mirror on failure
+                    let seg_result = 'seg_loop: loop {
+                        let current_url = {
+                            let job = &self.jobs[i];
+                            job.url().to_string()
+                        };
+
+                        match self.segmented_fetch(&current_url, effective_cap) {
+                            Ok(result) => break 'seg_loop Some(result),
+                            Err(err) => {
+                                // Try next mirror
+                                if self.jobs[i].advance_mirror() {
+                                    let next_url = {
+                                        let job = &self.jobs[i];
+                                        job.url().to_string()
+                                    };
+                                    self.event_tx
+                                        .send(CoreEvent::JobMirrorFailover {
+                                            job_id: job_id.clone(),
+                                            previous_url: current_url,
+                                            next_url,
+                                            error: err,
+                                        })
+                                        .map_err(|_| "event channel closed".to_string())?;
+                                    continue 'seg_loop;
+                                }
+                                // All mirrors exhausted
+                                self.jobs[i].mark_failed();
+                                self.event_tx
+                                    .send(CoreEvent::JobFailed {
+                                        job_id: job_id.clone(),
+                                        error: err,
+                                    })
+                                    .map_err(|_| "event channel closed".to_string())?;
+                                break 'seg_loop None;
+                            }
+                        }
+                    };
+
+                    match seg_result {
+                        Some((total_size, full_data)) => {
                             let bytes_this_call = full_data.len() as u64;
 
                             if let Some(ref mut remaining) = global_remaining {
@@ -514,19 +601,9 @@ impl Core {
                                 }
                             }
                         }
-                        Err(err) => {
-                            // Segmented transfer failed — mark job failed
-                            if let Some(job) =
-                                self.jobs.iter_mut().find(|j| j.id() == job_id)
-                            {
-                                job.mark_failed();
-                            }
-                            self.event_tx
-                                .send(CoreEvent::JobFailed {
-                                    job_id: job_id.clone(),
-                                    error: err,
-                                })
-                                .map_err(|_| "event channel closed".to_string())?;
+                        None => {
+                            // All mirrors exhausted — move to next job
+                            continue;
                         }
                     }
                     continue; // handled, move to next job
@@ -534,6 +611,7 @@ impl Core {
             }
 
             // --- Single-connection path (fallback + resumable) ---
+            // Try mirrors in order until one succeeds or all exhausted
             let range = if bytes_received > 0 {
                 Some(bytes_received..u64::MAX)
             } else {
@@ -549,21 +627,48 @@ impl Core {
                 })
                 .map_err(|_| "event channel closed".to_string())?;
 
-            // Fetch from HTTP backend (with Range if resuming)
-            let (mut data, total) = match self.http.fetch(&url, range) {
-                Ok(result) => result,
-                Err(err) => {
-                    if let Some(job) = self.jobs.iter_mut().find(|j| j.id() == job_id) {
-                        job.mark_failed();
+            // Fetch loop: retry with next mirror on failure
+            let job_fetch = 'fetch_loop: loop {
+                let current_url = {
+                    let job = &self.jobs[i];
+                    job.url().to_string()
+                };
+
+                match self.http.fetch(&current_url, range.clone()) {
+                    Ok(result) => break 'fetch_loop Some(result),
+                    Err(err) => {
+                        // Try next mirror
+                        if self.jobs[i].advance_mirror() {
+                            let next_url = {
+                                let job = &self.jobs[i];
+                                job.url().to_string()
+                            };
+                            self.event_tx
+                                .send(CoreEvent::JobMirrorFailover {
+                                    job_id: job_id.clone(),
+                                    previous_url: current_url,
+                                    next_url,
+                                    error: err,
+                                })
+                                .map_err(|_| "event channel closed".to_string())?;
+                            continue 'fetch_loop;
+                        }
+                        // All mirrors exhausted
+                        self.jobs[i].mark_failed();
+                        self.event_tx
+                            .send(CoreEvent::JobFailed {
+                                job_id: job_id.clone(),
+                                error: err,
+                            })
+                            .map_err(|_| "event channel closed".to_string())?;
+                        break 'fetch_loop None;
                     }
-                    self.event_tx
-                        .send(CoreEvent::JobFailed {
-                            job_id: job_id.clone(),
-                            error: err,
-                        })
-                        .map_err(|_| "event channel closed".to_string())?;
-                    continue;
                 }
+            };
+
+            let (mut data, total) = match job_fetch {
+                Some(r) => r,
+                None => continue, // all mirrors exhausted, move to next job
             };
 
             // Apply bandwidth cap: truncate data if it exceeds the effective cap

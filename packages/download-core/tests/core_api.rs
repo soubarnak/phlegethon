@@ -2193,3 +2193,727 @@ fn segmented_transfer_zero_byte_file_fails_gracefully() {
         "empty file should fail, got events: {events:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Acceptance: Mirror Sets (issue #20)
+// ---------------------------------------------------------------------------
+
+/// A fake HTTP backend that fails for specific URLs, succeeds for others.
+///
+/// Used to test mirror failover: primary URL fails, secondary succeeds.
+#[derive(Clone)]
+struct FailoverFakeHttp {
+    responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    /// URLs that should simulate failure (e.g. primary mirror is down).
+    failing_urls: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+impl FailoverFakeHttp {
+    fn new(
+        responses: std::collections::HashMap<String, Vec<u8>>,
+        failing_urls: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses)),
+            failing_urls: Arc::new(Mutex::new(failing_urls)),
+        }
+    }
+}
+
+impl HttpBackend for FailoverFakeHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+    ) -> Result<(Vec<u8>, u64), String> {
+        // Check if this URL should fail
+        {
+            let failing = self.failing_urls.lock().unwrap();
+            if failing.contains(url) {
+                return Err(format!("simulated failure for mirror {url}"));
+            }
+        }
+
+        let responses = self.responses.lock().unwrap();
+        let full_body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        let total = full_body.len() as u64;
+
+        let data = match range {
+            Some(r) => {
+                let start = r.start.min(total);
+                let end = r.end.min(total).max(start);
+                full_body[start as usize..end as usize].to_vec()
+            }
+            None => full_body.clone(),
+        };
+
+        Ok((data, total))
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false) // disable segmented for failover tests (simpler)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        // Also fail for size check
+        {
+            let failing = self.failing_urls.lock().unwrap();
+            if failing.contains(url) {
+                return Err(format!("simulated failure for mirror {url}"));
+            }
+        }
+        let responses = self.responses.lock().unwrap();
+        let full_body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        Ok(full_body.len() as u64)
+    }
+}
+
+// Register a job with an additional mirror via Core API, then verify
+// the mirror set contains both URLs.
+#[test]
+fn add_mirror_to_job_extends_mirror_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+
+    // Add a mirror via Core API
+    core.add_job_mirror(&job_id, "https://mirror.example.com/file.zip".into())
+        .unwrap();
+
+    // Verify mirror set has both URLs
+    let mirrors = core.job_mirrors(&job_id).unwrap();
+    assert_eq!(mirrors.len(), 2);
+    assert_eq!(mirrors[0], "https://primary.example.com/file.zip");
+    assert_eq!(mirrors[1], "https://mirror.example.com/file.zip");
+}
+
+// Verify Metalink XML can populate mirrors for a job.
+#[test]
+fn add_metalink_to_job_adds_mirrors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+
+    let metalink_xml = r#"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <metalink version="3.0">
+            <file name="file.zip">
+                <url>https://mirror1.example.com/file.zip</url>
+                <url>https://mirror2.example.com/file.zip</url>
+            </file>
+        </metalink>
+    "#;
+
+    let count = core.add_metalink_to_job(&job_id, metalink_xml).unwrap();
+    assert_eq!(count, 2, "should discover 2 mirrors from Metalink");
+
+    let mirrors = core.job_mirrors(&job_id).unwrap();
+    assert_eq!(mirrors.len(), 3); // primary + 2 mirrors
+    assert!(mirrors.contains(&"https://mirror1.example.com/file.zip".into()));
+    assert!(mirrors.contains(&"https://mirror2.example.com/file.zip".into()));
+}
+
+// Primary mirror fails → core tries next mirror → job completes.
+#[test]
+fn mirror_failover_proceeds_to_next_mirror() {
+    let content = b"content from secondary mirror".to_vec();
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        "https://primary.example.com/file.zip".into(),
+        b"should not be read".to_vec(),
+    );
+    responses.insert(
+        "https://secondary.example.com/file.zip".into(),
+        content.clone(),
+    );
+
+    let mut failing = std::collections::HashSet::new();
+    failing.insert("https://primary.example.com/file.zip".into());
+
+    let http = FailoverFakeHttp::new(responses, failing);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    // Enqueue with primary URL, then add secondary mirror
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+    core.add_job_mirror(&job_id, "https://secondary.example.com/file.zip".into())
+        .unwrap();
+
+    // Process — should failover and complete via secondary
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    // Should have a failover event
+    let has_failover = events.iter().any(|e| {
+        matches!(e, CoreEvent::JobMirrorFailover {
+            previous_url,
+            next_url,
+            ..
+        } if previous_url == "https://primary.example.com/file.zip"
+          && next_url == "https://secondary.example.com/file.zip")
+    });
+    assert!(
+        has_failover,
+        "should emit JobMirrorFailover when primary fails, got: {events:?}"
+    );
+
+    // Should NOT emit JobFailed
+    let has_job_failed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobFailed { .. }));
+    assert!(
+        !has_job_failed,
+        "should NOT fail if secondary mirror succeeds, got: {events:?}"
+    );
+
+    // Should complete via secondary
+    let has_completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(
+        has_completed,
+        "should complete after failover, got: {events:?}"
+    );
+
+    // File on disk should have secondary content
+    let job_dir = root.join("jobs").join(&job_id);
+    let files: Vec<_> = std::fs::read_dir(&job_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(!files.is_empty(), "job directory should have files");
+    let on_disk = std::fs::read(files[0].path()).unwrap();
+    assert_eq!(
+        on_disk, content,
+        "should contain secondary mirror content, not primary"
+    );
+}
+
+// All mirrors fail → job transitions to Failed state.
+#[test]
+fn all_mirrors_exhausted_emits_job_failed() {
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        "https://primary.example.com/file.zip".into(),
+        b"content".to_vec(),
+    );
+    responses.insert(
+        "https://secondary.example.com/file.zip".into(),
+        b"content".to_vec(),
+    );
+
+    let mut failing = std::collections::HashSet::new();
+    failing.insert("https://primary.example.com/file.zip".into());
+    failing.insert("https://secondary.example.com/file.zip".into());
+
+    let http = FailoverFakeHttp::new(responses, failing);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+    core.add_job_mirror(&job_id, "https://secondary.example.com/file.zip".into())
+        .unwrap();
+
+    // Process — both mirrors should fail in one call (retry loop)
+    // Events: JobProgress → JobMirrorFailover (primary→secondary) → JobFailed (all exhausted)
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    // Should have a failover event
+    let has_failover = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobMirrorFailover { .. }));
+    assert!(
+        has_failover,
+        "should emit failover when primary fails, got: {events:?}"
+    );
+
+    // Should have a JobFailed event (all mirrors exhausted in same call)
+    let has_failed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobFailed { .. }));
+    assert!(
+        has_failed,
+        "all mirrors exhausted should emit JobFailed, got: {events:?}"
+    );
+
+    // Should have exactly 1 failover (primary→secondary, no more to try after that)
+    let failover_count = events
+        .iter()
+        .filter(|e| matches!(e, CoreEvent::JobMirrorFailover { .. }))
+        .count();
+    assert_eq!(
+        failover_count, 1,
+        "should emit exactly 1 failover, got {failover_count}: {events:?}"
+    );
+
+    // Second call should produce nothing (job already failed)
+    core.process_pending().unwrap();
+    let events2 = collect_events(&rx);
+    assert!(
+        events2.is_empty(),
+        "second process_pending should have no events (job already failed), got: {events2:?}"
+    );
+}
+
+// Primary mirror works fine → no failover, completes directly.
+#[test]
+fn mirror_set_primary_succeeds_no_failover() {
+    let content = b"content from primary".to_vec();
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        "https://primary.example.com/file.zip".into(),
+        content.clone(),
+    );
+    responses.insert(
+        "https://secondary.example.com/file.zip".into(),
+        b"should not be needed".to_vec(),
+    );
+
+    // Nothing in failing set — all URLs work
+    let http = FailoverFakeHttp::new(responses, std::collections::HashSet::new());
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+    core.add_job_mirror(&job_id, "https://secondary.example.com/file.zip".into())
+        .unwrap();
+
+    // Process — primary works, should complete immediately
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    let has_completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(has_completed, "primary should complete, got: {events:?}");
+
+    let has_failover = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobMirrorFailover { .. }));
+    assert!(
+        !has_failover,
+        "should NOT emit failover when primary succeeds, got: {events:?}"
+    );
+
+    let on_disk = {
+        let job_dir = root.join("jobs").join(&job_id);
+        let files: Vec<_> = std::fs::read_dir(&job_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        std::fs::read(files[0].path()).unwrap()
+    };
+    assert_eq!(
+        on_disk, content,
+        "should have primary mirror content"
+    );
+}
+
+// Page-local mirror lists can extend a job's mirror set.
+#[test]
+fn page_local_mirrors_extend_mirror_set() {
+    let content = b"content from page-local mirror".to_vec();
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        "https://page-mirror.example.com/file.zip".into(),
+        content.clone(),
+    );
+
+    // Primary fails, page-local mirror works
+    let mut failing = std::collections::HashSet::new();
+    failing.insert("https://primary.example.com/file.zip".into());
+
+    let http = FailoverFakeHttp::new(responses, failing);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+
+    // Simulate page-local mirror discovery (e.g. from HTML page)
+    let page_local_mirrors = vec![
+        "https://page-mirror.example.com/file.zip".to_string(),
+        "https://another-mirror.example.com/file.zip".to_string(),
+    ];
+    for url in page_local_mirrors {
+        core.add_job_mirror(&job_id, url).unwrap();
+    }
+
+    let mirrors = core.job_mirrors(&job_id).unwrap();
+    assert_eq!(mirrors.len(), 3, "primary + 2 page-local mirrors");
+
+    // Process — should failover to page-local mirror and succeed
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    let has_completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(
+        has_completed,
+        "should complete via page-local mirror, got: {events:?}"
+    );
+}
+
+// User-added URLs extend mirror set and are tried after primary.
+#[test]
+fn user_added_urls_extend_mirror_set() {
+    let content = b"content from user mirror".to_vec();
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        "https://user-mirror.example.com/file.zip".into(),
+        content.clone(),
+    );
+
+    let mut failing = std::collections::HashSet::new();
+    failing.insert("https://primary.example.com/file.zip".into());
+
+    let http = FailoverFakeHttp::new(responses, failing);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+
+    // User adds a mirror URL (e.g. via UI "Add mirror" button)
+    core.add_job_mirror(&job_id, "https://user-mirror.example.com/file.zip".into())
+        .unwrap();
+
+    let mirrors = core.job_mirrors(&job_id).unwrap();
+    assert_eq!(mirrors.len(), 2, "primary + user mirror");
+    assert_eq!(mirrors[1], "https://user-mirror.example.com/file.zip");
+
+    // Process — should failover to user mirror
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    let has_completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(
+        has_completed,
+        "should complete via user-added mirror, got: {events:?}"
+    );
+}
+
+// After a retry, the mirror index resets and primary is tried first.
+struct UnfailFakeHttp {
+    responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    failures_remaining: Arc<Mutex<std::collections::HashMap<String, u32>>>,
+}
+
+impl UnfailFakeHttp {
+    fn new(
+        responses: std::collections::HashMap<String, Vec<u8>>,
+        fail_urls: Vec<(&str, u32)>,
+    ) -> Self {
+        let mut remaining = std::collections::HashMap::new();
+        for (url, count) in fail_urls {
+            remaining.insert(url.to_string(), count);
+        }
+        Self {
+            responses: Arc::new(Mutex::new(responses)),
+            failures_remaining: Arc::new(Mutex::new(remaining)),
+        }
+    }
+}
+
+impl HttpBackend for UnfailFakeHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+    ) -> Result<(Vec<u8>, u64), String> {
+        // Check if this URL should fail some number of times
+        {
+            let mut remaining = self.failures_remaining.lock().unwrap();
+            if let Some(count) = remaining.get_mut(url) {
+                if *count > 0 {
+                    *count -= 1;
+                    return Err(format!("simulated failure ({count} left)"));
+                }
+            }
+        }
+
+        let responses = self.responses.lock().unwrap();
+        let full_body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        let total = full_body.len() as u64;
+
+        let data = match range {
+            Some(r) => {
+                let start = r.start.min(total);
+                let end = r.end.min(total).max(start);
+                full_body[start as usize..end as usize].to_vec()
+            }
+            None => full_body.clone(),
+        };
+
+        Ok((data, total))
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        // Don't fail for file_size check (HEAD request approximation)
+        let responses = self.responses.lock().unwrap();
+        let full_body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        Ok(full_body.len() as u64)
+    }
+}
+
+#[test]
+fn retry_resets_mirror_index_after_all_exhausted() {
+    // Primary fails 1 time, secondary always works
+    let content = b"retry-mirror content".to_vec();
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        "https://primary.example.com/file.zip".into(),
+        content.clone(),
+    );
+    responses.insert(
+        "https://secondary.example.com/file.zip".into(),
+        b"secondary content that should win on first try".to_vec(),
+    );
+
+    // Primary: fails 2 times (once per attempt cycle)
+    let http = UnfailFakeHttp::new(
+        responses,
+        vec![
+            ("https://primary.example.com/file.zip", 2), // fail twice (1st and retry attempt)
+            ("https://secondary.example.com/file.zip", 0), // never fail
+        ],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+    core.add_job_mirror(&job_id, "https://secondary.example.com/file.zip".into())
+        .unwrap();
+
+    // First process call: primary fails -> failover to secondary -> succeeds
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "should complete via secondary on first attempt, got: {events:?}"
+    );
+
+    // Verify correct content (from secondary, since primary failed)
+    let job_dir = root.join("jobs").join(&job_id);
+    let files: Vec<_> = std::fs::read_dir(&job_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    let on_disk = std::fs::read(files[0].path()).unwrap();
+    assert_eq!(
+        on_disk,
+        b"secondary content that should win on first try".to_vec(),
+        "should have secondary content"
+    );
+}
+
+// A job can be created by directly constructing a MirrorSet from URLs.
+#[test]
+fn mirror_set_is_accessible_from_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+
+    // Add mirrors
+    core.add_job_mirror(&job_id, "https://m1.example.com/file.zip".into()).unwrap();
+    core.add_job_mirror(&job_id, "https://m2.example.com/file.zip".into()).unwrap();
+
+    let mirrors = core.job_mirrors(&job_id).unwrap();
+    assert_eq!(mirrors.len(), 3);
+    assert_eq!(mirrors[0], "https://primary.example.com/file.zip");
+    assert_eq!(mirrors[1], "https://m1.example.com/file.zip");
+    assert_eq!(mirrors[2], "https://m2.example.com/file.zip");
+}
+
+// Metalink with no URLs returns 0, doesn't error.
+#[test]
+fn add_empty_metalink_returns_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+
+    let count = core
+        .add_metalink_to_job(&job_id, "<metalink><file name=\"x\"></file></metalink>")
+        .unwrap();
+    assert_eq!(count, 0, "empty Metalink should add 0 mirrors");
+
+    // Mirrors should still be just the primary
+    let mirrors = core.job_mirrors(&job_id).unwrap();
+    assert_eq!(mirrors.len(), 1);
+}
+
+// Error on adding mirrors to nonexistent job.
+#[test]
+fn add_mirror_to_nonexistent_job_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let err = core.add_job_mirror("nonexistent", "https://example.com/file.zip".into());
+    assert!(err.is_err(), "should error on nonexistent job");
+
+    let err = core.job_mirrors("nonexistent");
+    assert!(err.is_err(), "should error on nonexistent job");
+}
+
+// Mirror failover for segmented transfer path.
+#[test]
+fn mirror_failover_in_segmented_transfer() {
+    // A segmented transfer that fails on primary and succeeds on secondary
+    let content = b"segmented failover content 1234567890".to_vec();
+    let mut responses = std::collections::HashMap::new();
+    responses.insert(
+        "https://primary.example.com/file.zip".into(),
+        b"should fail".to_vec(),
+    );
+    responses.insert(
+        "https://secondary.example.com/file.zip".into(),
+        content.clone(),
+    );
+
+    let mut failing = std::collections::HashSet::new();
+    failing.insert("https://primary.example.com/file.zip".into());
+
+    // We need a backend that supports range so segmented path is taken
+    // But our FailoverFakeHttp has supports_range=false.
+    // Let's make one that supports range.
+    #[derive(Clone)]
+    struct SegmentedFailoverHttp {
+        responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+        failing_urls: Arc<Mutex<std::collections::HashSet<String>>>,
+    }
+
+    impl HttpBackend for SegmentedFailoverHttp {
+        fn fetch(
+            &self,
+            url: &str,
+            range: Option<std::ops::Range<u64>>,
+        ) -> Result<(Vec<u8>, u64), String> {
+            {
+                let failing = self.failing_urls.lock().unwrap();
+                if failing.contains(url) {
+                    return Err(format!("simulated failure for mirror {url}"));
+                }
+            }
+            let responses = self.responses.lock().unwrap();
+            let full_body = responses
+                .get(url)
+                .ok_or_else(|| format!("no fake response for {url}"))?;
+            let total = full_body.len() as u64;
+            let data = match range {
+                Some(r) => {
+                    let start = r.start.min(total);
+                    let end = r.end.min(total).max(start);
+                    full_body[start as usize..end as usize].to_vec()
+                }
+                None => full_body.clone(),
+            };
+            Ok((data, total))
+        }
+
+        fn supports_range(&self, _url: &str) -> Result<bool, String> {
+            Ok(true) // enable segmented
+        }
+
+        fn file_size(&self, url: &str) -> Result<u64, String> {
+            {
+                let failing = self.failing_urls.lock().unwrap();
+                if failing.contains(url) {
+                    return Err(format!("simulated failure for mirror {url}"));
+                }
+            }
+            let responses = self.responses.lock().unwrap();
+            let full_body = responses
+                .get(url)
+                .ok_or_else(|| format!("no fake response for {url}"))?;
+            Ok(full_body.len() as u64)
+        }
+    }
+
+    let http = SegmentedFailoverHttp {
+        responses: Arc::new(Mutex::new(responses)),
+        failing_urls: Arc::new(Mutex::new(failing)),
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
+    core.add_job_mirror(&job_id, "https://secondary.example.com/file.zip".into())
+        .unwrap();
+
+    // Process — should failover and complete via secondary
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    let has_failover = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobMirrorFailover { .. }));
+    assert!(
+        has_failover,
+        "segmented transfer should failover on primary failure, got: {events:?}"
+    );
+
+    let has_completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(
+        has_completed,
+        "segmented transfer should complete after failover, got: {events:?}"
+    );
+
+    let job_dir = root.join("jobs").join(&job_id);
+    let files: Vec<_> = std::fs::read_dir(&job_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(!files.is_empty(), "job dir should contain file");
+    let on_disk = std::fs::read(files[0].path()).unwrap();
+    assert_eq!(
+        on_disk, content,
+        "segmented failover should use secondary content"
+    );
+}

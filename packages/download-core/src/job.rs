@@ -1,5 +1,6 @@
 //! Job struct — state machine per download job.
 
+use crate::mirror_set::MirrorSet;
 use std::path::PathBuf;
 
 /// Outcome returned from `Core::enqueue`.
@@ -51,11 +52,16 @@ pub enum JobState {
     Completed,
 }
 
-/// A single download job.
+/// A single download job, backed by a Mirror Set.
+///
+/// The job tries the primary URL first.  If that mirror fails, the next
+/// mirror in the set is tried (failover).  If all mirrors are exhausted
+/// the job transitions to Failed.
 #[derive(Debug)]
 pub struct Job {
     id: String,
-    url: String,
+    /// Ordered set of equivalent source URLs.
+    mirrors: MirrorSet,
     state: JobState,
     /// The directory where this job's files land.
     destination: PathBuf,
@@ -75,7 +81,7 @@ impl Job {
         let destination = library_root.join("jobs").join(&id);
         Self {
             id,
-            url,
+            mirrors: MirrorSet::new(url),
             state: JobState::Pending,
             destination,
             bytes_received: 0,
@@ -103,7 +109,7 @@ impl Job {
         };
         Self {
             id,
-            url,
+            mirrors: MirrorSet::new(url),
             state: JobState::Pending,
             destination,
             bytes_received: 0,
@@ -116,14 +122,44 @@ impl Job {
         &self.id
     }
 
+    /// Primary/current URL for this job.
     pub fn url(&self) -> &str {
-        &self.url
+        self.mirrors.current_url()
+    }
+
+    /// All mirror URLs for this job.
+    pub fn mirror_urls(&self) -> &[String] {
+        self.mirrors.all_urls()
+    }
+
+    /// Access the underlying MirrorSet (mutably).
+    #[allow(dead_code)]
+    pub fn mirrors_mut(&mut self) -> &mut MirrorSet {
+        &mut self.mirrors
+    }
+
+    /// Access the underlying MirrorSet (immutably).
+    #[allow(dead_code)]
+    pub fn mirrors(&self) -> &MirrorSet {
+        &self.mirrors
+    }
+
+    /// Add a mirror URL to this job's Mirror Set.
+    pub fn add_mirror(&mut self, url: String) {
+        self.mirrors.add_mirror(url);
+    }
+
+    /// Advance to the next mirror after the current one failed.
+    /// Returns true if there is another mirror to try.
+    pub fn advance_mirror(&mut self) -> bool {
+        self.mirrors.advance_on_failure()
     }
 
     pub fn destination(&self) -> &PathBuf {
         &self.destination
     }
 
+    #[allow(dead_code)]
     pub fn source(&self) -> Option<&str> {
         self.source.as_deref()
     }
@@ -166,6 +202,7 @@ impl Job {
         self.state = JobState::Completed;
     }
 
+    #[allow(dead_code)]
     pub fn set_source(&mut self, source: Option<String>) {
         self.source = source;
     }
@@ -205,6 +242,7 @@ impl Job {
             JobState::Failed => {
                 self.state = JobState::Pending;
                 self.bytes_received = 0;
+                self.mirrors.reset();
                 Ok(())
             }
             _ => Err(format!(

@@ -53,4 +53,11 @@ pub enum CoreEvent {
     JobDiscarded {
         job_id: String,
     },
+    /// A job's current mirror failed and the job is trying the next.
+    JobMirrorFailover {
+        job_id: String,
+        previous_url: String,
+        next_url: String,
+        error: String,
+    },
 }
