@@ -1,9 +1,20 @@
 //! Token-bucket bandwidth limiting with an injectable clock for tests.
 
+use crate::event::CoreEvent;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Live transfer progress reported from body writes (issue #36).
+#[derive(Clone)]
+pub struct TransferProgress {
+    pub job_id: String,
+    pub event_tx: crossbeam_channel::Sender<CoreEvent>,
+    pub total_bytes: Option<u64>,
+    /// Absolute bytes downloaded so far (shared across segments).
+    pub live_bytes: Arc<AtomicU64>,
+}
 
 /// Monotonic time source for bandwidth refill.
 pub trait Clock: Send + Sync {
@@ -146,6 +157,7 @@ pub struct TransferWriter<'a, W: Write> {
     pause_requested: &'a AtomicBool,
     written: u64,
     paused: bool,
+    progress: Option<TransferProgress>,
 }
 
 impl<'a, W: Write> TransferWriter<'a, W> {
@@ -162,7 +174,13 @@ impl<'a, W: Write> TransferWriter<'a, W> {
             pause_requested,
             written: 0,
             paused: false,
+            progress: None,
         }
+    }
+
+    pub fn with_progress(mut self, progress: TransferProgress) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     pub fn bytes_written(&self) -> u64 {
@@ -171,6 +189,21 @@ impl<'a, W: Write> TransferWriter<'a, W> {
 
     pub fn was_paused(&self) -> bool {
         self.paused
+    }
+
+    fn emit_progress(&self, delta: u64) {
+        let Some(progress) = &self.progress else {
+            return;
+        };
+        let downloaded = progress
+            .live_bytes
+            .fetch_add(delta, Ordering::AcqRel)
+            + delta;
+        let _ = progress.event_tx.send(CoreEvent::JobProgress {
+            job_id: progress.job_id.clone(),
+            bytes_downloaded: downloaded,
+            total_bytes: progress.total_bytes,
+        });
     }
 
     fn allowed_bytes(&mut self, requested: u64) -> u64 {
@@ -223,6 +256,9 @@ impl<W: Write> Write for TransferWriter<'_, W> {
             self.refund_unused((allowed - n) as u64);
         }
         self.written += n as u64;
+        if n > 0 {
+            self.emit_progress(n as u64);
+        }
         Ok(n)
     }
 

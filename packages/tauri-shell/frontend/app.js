@@ -437,18 +437,19 @@ function renderQueue() {
 
   let html = "";
   state.jobs.forEach((job) => {
-    const pct =
-      job.total_bytes > 0
-        ? Math.round((job.bytes_downloaded / job.total_bytes) * 100)
-        : job.bytes_downloaded > 0
-          ? 0
-          : 0;
+    const hasTotal = job.total_bytes != null && job.total_bytes > 0;
+    const pct = hasTotal
+      ? Math.round((job.bytes_downloaded / job.total_bytes) * 100)
+      : 0;
 
     const statusClass = `status-${job.status}`;
     const statusLabel =
       job.status.charAt(0).toUpperCase() + job.status.slice(1);
-    const sizeLabel = job.total_bytes ? formatBytes(job.total_bytes) : "";
+    const sizeLabel = hasTotal ? formatBytes(job.total_bytes) : "";
     const progressWidth = Math.min(pct, 100);
+    const indeterminate =
+      !hasTotal &&
+      (job.status === "pending" || job.status === "downloading");
 
     html += `
       <div class="queue-row ${state.selectedJobId === job.job_id ? "selected" : ""}" data-job-id="${job.job_id}">
@@ -458,8 +459,12 @@ function renderQueue() {
         </div>
         <div class="row-status ${statusClass}">${statusLabel}</div>
         <div class="row-progress">
-          <div class="progress-bar">
-            <div class="progress-fill" style="width:${progressWidth}%"></div>
+          <div class="progress-bar${indeterminate ? " indeterminate" : ""}" role="progressbar"${
+            hasTotal
+              ? ` aria-valuenow="${progressWidth}" aria-valuemin="0" aria-valuemax="100"`
+              : ` aria-valuetext="${formatBytes(job.bytes_downloaded)}"`
+          }>
+            <div class="progress-fill" style="${indeterminate ? "" : `width:${progressWidth}%`}"></div>
           </div>
         </div>
         <div class="row-meta">${formatBytes(job.bytes_downloaded)}${sizeLabel ? ` / ${sizeLabel}` : ""}</div>
@@ -599,7 +604,9 @@ function handleCoreEvent(evt) {
   switch (evt.type) {
     case "JobProgress":
       job.bytes_downloaded = evt.bytes_downloaded;
-      if (evt.total_bytes) job.total_bytes = evt.total_bytes;
+      if (evt.total_bytes != null && evt.total_bytes > 0) {
+        job.total_bytes = evt.total_bytes;
+      }
       job.status = "downloading";
       break;
     case "JobCompleted":

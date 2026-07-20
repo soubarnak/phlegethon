@@ -3,7 +3,7 @@
 use crate::mirror_set::MirrorSet;
 use crate::storage::{PersistedJob, PersistedJobState};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Outcome returned from `Core::enqueue`.
@@ -84,6 +84,10 @@ pub struct Job {
     /// Number of bytes successfully written to disk so far.
     /// Used for resumable transfers via Range headers.
     bytes_received: u64,
+    /// Live download counter updated mid-transfer (may lead `bytes_received`).
+    live_downloaded: Arc<AtomicU64>,
+    /// Known total object size when the server reports it.
+    total_bytes: Option<u64>,
     /// Per-job bandwidth cap in bytes per second.
     /// None = uncapped for this job.
     bandwidth_cap: Option<u64>,
@@ -113,6 +117,8 @@ impl Job {
             state: JobState::Pending,
             destination,
             bytes_received: 0,
+            live_downloaded: Arc::new(AtomicU64::new(0)),
+            total_bytes: None,
             bandwidth_cap: None,
             pause_requested: Arc::new(AtomicBool::new(false)),
             discard_requested: Arc::new(AtomicBool::new(false)),
@@ -147,6 +153,8 @@ impl Job {
             state: JobState::Pending,
             destination,
             bytes_received: 0,
+            live_downloaded: Arc::new(AtomicU64::new(0)),
+            total_bytes: None,
             bandwidth_cap: None,
             pause_requested: Arc::new(AtomicBool::new(false)),
             discard_requested: Arc::new(AtomicBool::new(false)),
@@ -166,6 +174,8 @@ impl Job {
             state: JobState::from(persisted.state),
             destination: persisted.destination,
             bytes_received: persisted.bytes_received,
+            live_downloaded: Arc::new(AtomicU64::new(persisted.bytes_received)),
+            total_bytes: None,
             bandwidth_cap: persisted.bandwidth_cap,
             pause_requested: Arc::new(AtomicBool::new(false)),
             discard_requested: Arc::new(AtomicBool::new(false)),
@@ -270,12 +280,34 @@ impl Job {
         self.bytes_received
     }
 
+    /// Bytes downloaded for UI snapshots (includes mid-transfer live count).
+    pub fn bytes_downloaded_snapshot(&self) -> u64 {
+        self.live_downloaded
+            .load(Ordering::Acquire)
+            .max(self.bytes_received)
+    }
+
+    pub fn live_downloaded(&self) -> Arc<AtomicU64> {
+        self.live_downloaded.clone()
+    }
+
     pub fn set_bytes_received(&mut self, n: u64) {
         self.bytes_received = n;
+        self.live_downloaded.store(n, Ordering::Release);
     }
 
     pub fn add_bytes_received(&mut self, n: u64) {
         self.bytes_received += n;
+        self.live_downloaded
+            .store(self.bytes_received, Ordering::Release);
+    }
+
+    pub fn total_bytes(&self) -> Option<u64> {
+        self.total_bytes
+    }
+
+    pub fn set_total_bytes(&mut self, total: Option<u64>) {
+        self.total_bytes = total.filter(|&n| n > 0);
     }
 
     pub fn filename(&self) -> &str {
@@ -373,6 +405,8 @@ impl Job {
                 self.clear_pause_requested();
                 self.state = JobState::Pending;
                 self.bytes_received = 0;
+                self.live_downloaded.store(0, Ordering::Release);
+                self.total_bytes = None;
                 self.mirrors.reset();
                 Ok(())
             }

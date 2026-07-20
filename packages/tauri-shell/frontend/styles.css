@@ -233,6 +233,21 @@ body {
   transition: width var(--transition-normal);
 }
 
+.progress-bar.indeterminate .progress-fill {
+  width: 40%;
+  transition: none;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
 .row-meta {
   font-size: var(--text-xs);
   color: var(--text-tertiary);
