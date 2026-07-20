@@ -4,7 +4,8 @@
 
 use crossbeam_channel::TryRecvError;
 use download_core::{
-    Core, CoreEvent, EnqueueOutcome, JobSignals, ProbeSelection, ProdHttpBackend,
+    Core, CoreEvent, EnqueueOutcome, JobSignals, ProbeDestinationPreview, ProbeSelection,
+    ProdHttpBackend,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -217,6 +218,18 @@ fn confirm_probe_selection(
     let dest = parse_optional_destination(destination);
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.confirm_probe_selection(&selection, dest)
+}
+
+#[tauri::command]
+fn preview_probe_destination(
+    state: State<AppState>,
+    selection: ProbeSelection,
+    destination: Option<String>,
+) -> Result<ProbeDestinationPreview, String> {
+    ensure_library_root(&state)?;
+    let dest = parse_optional_destination(destination);
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    core.preview_probe_destination(&selection, dest)
 }
 
 #[tauri::command]
@@ -448,6 +461,7 @@ pub fn run() {
             enqueue_url,
             probe_url,
             confirm_probe_selection,
+            preview_probe_destination,
             get_library_root,
             set_library_root,
             pick_folder,

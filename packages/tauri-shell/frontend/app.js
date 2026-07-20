@@ -25,6 +25,8 @@ const state = {
   saveToDestination: null,
   /** Absolute Job Destination override for Probe-then-Confirm (null = Library Root default). */
   probeSaveToDestination: null,
+  /** Monotonic id so stale preview_probe_destination responses are ignored. */
+  probePreviewRequestId: 0,
   /** Pending Library Root path chosen in settings (applied via Core on Apply). */
   pendingLibraryRoot: null,
 };
@@ -274,6 +276,7 @@ function showProbeResults(url, result) {
         });
         chip.classList.add("selected");
         checkbox.checked = true;
+        updateProbeSaveToHint();
       });
 
       qualitiesWrap.appendChild(chip);
@@ -291,10 +294,13 @@ function showProbeResults(url, result) {
           c.classList.remove("selected");
         });
       }
+      updateProbeSaveToHint();
     });
 
     probeItems.appendChild(row);
   });
+
+  updateProbeSaveToHint();
 }
 
 function selectDefaultQualityForRow(qualitiesWrap, defaultQuality) {
@@ -328,6 +334,7 @@ function setAllProbeItemsSelected(selected) {
       });
     }
   });
+  updateProbeSaveToHint();
 }
 
 probeSelectAll.addEventListener("click", () => setAllProbeItemsSelected(true));
@@ -351,16 +358,14 @@ function formatDuration(seconds) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-// Confirm probe selection
-probeConfirm.addEventListener("click", async () => {
-  if (!state.pendingProbe) return;
-
+/** Collect currently checked probe items + qualities for Core APIs. */
+function collectProbeSelectionItems() {
   const selectedItems = [];
-  const rows = probeItems.querySelectorAll(".probe-item");
+  if (!state.pendingProbe) return selectedItems;
 
-  rows.forEach((row) => {
+  probeItems.querySelectorAll(".probe-item").forEach((row) => {
     const checkbox = row.querySelector(".probe-item-checkbox");
-    if (!checkbox.checked) return;
+    if (!checkbox?.checked) return;
 
     const itemIndex = parseInt(checkbox.dataset.itemIndex, 10);
     const item = state.pendingProbe.items[itemIndex];
@@ -382,6 +387,15 @@ probeConfirm.addEventListener("click", async () => {
       });
     }
   });
+
+  return selectedItems;
+}
+
+// Confirm probe selection
+probeConfirm.addEventListener("click", async () => {
+  if (!state.pendingProbe) return;
+
+  const selectedItems = collectProbeSelectionItems();
 
   if (selectedItems.length === 0) {
     showError("Select at least one item.");
@@ -717,9 +731,45 @@ function updateSaveToHint() {
 
 function updateProbeSaveToHint() {
   if (!probeSaveToPath) return;
-  probeSaveToPath.textContent = state.probeSaveToDestination
-    ? state.probeSaveToDestination
-    : "Library Root default";
+
+  const fallbackHint = () =>
+    state.probeSaveToDestination
+      ? state.probeSaveToDestination
+      : "Library Root default";
+
+  // Sync hint when probe sheet closed or still loading.
+  if (!state.pendingProbe) {
+    probeSaveToPath.textContent = fallbackHint();
+    return;
+  }
+
+  const selectedItems = collectProbeSelectionItems();
+  if (selectedItems.length === 0) {
+    probeSaveToPath.textContent = fallbackHint();
+    return;
+  }
+
+  const selection = {
+    url: state.pendingProbe.url,
+    items: selectedItems,
+  };
+  const args = { selection };
+  if (state.probeSaveToDestination) {
+    args.destination = state.probeSaveToDestination;
+  }
+
+  const requestId = ++state.probePreviewRequestId;
+  getInvoke()("preview_probe_destination", args)
+    .then((preview) => {
+      if (requestId !== state.probePreviewRequestId) return;
+      if (preview?.path_display) {
+        probeSaveToPath.textContent = preview.path_display;
+      }
+    })
+    .catch(() => {
+      if (requestId !== state.probePreviewRequestId) return;
+      probeSaveToPath.textContent = fallbackHint();
+    });
 }
 
 async function pickAbsoluteFolder(title) {

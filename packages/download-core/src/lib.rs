@@ -58,6 +58,18 @@ pub struct JobSnapshot {
     pub title: String,
 }
 
+/// Resolved Job Destination preview for Probe-then-Confirm before jobs exist.
+///
+/// Unique id suffixes are not known until confirm; those slots use an ellipsis
+/// placeholder (`…`, U+2026) so the shell can show where files will land.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProbeDestinationPreview {
+    pub path_display: String,
+}
+
+/// Placeholder for the unique job-id suffix in destination previews.
+const DEST_ID_PLACEHOLDER: &str = "\u{2026}";
+
 /// Debounce interval for progress-only queue flushes.
 const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// Debounce byte threshold for progress-only queue flushes.
@@ -653,6 +665,96 @@ impl Core {
         }
     }
 
+    /// Preview where [`Self::confirm_probe_selection`] will place Job
+    /// Destinations, without creating jobs.
+    ///
+    /// Single-item absolute overrides resolve to that exact folder.  Batch /
+    /// channel defaults (and multi-item overrides) include a sanitized source
+    /// subfolder under the Library Root `jobs/` segment (or under the override
+    /// parent), with an ellipsis standing in for the unique id suffix.
+    pub fn preview_probe_destination(
+        &self,
+        selection: &ProbeSelection,
+        destination: Option<PathBuf>,
+    ) -> Result<ProbeDestinationPreview, String> {
+        let root = self
+            .library_root
+            .as_ref()
+            .ok_or_else(|| "Library Root not set".to_string())?;
+
+        if let Some(ref dest) = destination {
+            Self::require_absolute_destination(dest)?;
+        }
+
+        if selection.items.is_empty() {
+            return Err("selection has no items".to_string());
+        }
+
+        let probe = self.pending_probes.get(&selection.url).ok_or_else(|| {
+            format!(
+                "no pending probe for {}. Call probe() first.",
+                selection.url
+            )
+        })?;
+
+        let items_map: HashMap<&str, &MediaItem> =
+            probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
+
+        let first = &selection.items[0];
+        let item = items_map.get(first.item_id.as_str()).ok_or_else(|| {
+            format!(
+                "item '{}' not found in probe result for {}",
+                first.item_id, selection.url
+            )
+        })?;
+
+        let job_source = Self::probe_job_source(probe, item);
+        let path = Self::preview_destination_path(
+            root,
+            destination.as_deref(),
+            selection.items.len(),
+            job_source.as_deref(),
+        );
+
+        Ok(ProbeDestinationPreview {
+            path_display: path.display().to_string(),
+        })
+    }
+
+    fn probe_job_source(probe: &ProbeResult, item: &MediaItem) -> Option<String> {
+        probe.source_name.clone().or_else(|| {
+            if probe.items.len() == 1 {
+                Some(item.title.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn preview_destination_path(
+        library_root: &Path,
+        destination: Option<&Path>,
+        selection_len: usize,
+        job_source: Option<&str>,
+    ) -> PathBuf {
+        if destination.is_some() && selection_len == 1 {
+            return destination.expect("checked is_some").to_path_buf();
+        }
+
+        let parent = match destination {
+            Some(dest) => dest.to_path_buf(),
+            None => library_root.join("jobs"),
+        };
+
+        match job_source {
+            Some(name) => {
+                let safe = job::sanitize_folder_name(name);
+                parent.join(format!("{safe}-{DEST_ID_PLACEHOLDER}"))
+            }
+            None => parent.join(DEST_ID_PLACEHOLDER),
+        }
+    }
+
     /// Confirm a probe selection and create jobs for the selected items.
     ///
     /// Takes a [`ProbeSelection`] that references a previously probed URL
@@ -697,7 +799,6 @@ impl Core {
         let items_map: HashMap<&str, &MediaItem> =
             probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
 
-        let source_name = probe.source_name.clone();
         let single_override = destination.is_some() && selection.items.len() == 1;
         let mut job_ids = Vec::new();
 
@@ -723,15 +824,7 @@ impl Core {
                     )
                 })?;
 
-            // For single-video probes without a source name, use the
-            // item title for the subfolder if available.
-            let job_source = source_name.clone().or_else(|| {
-                if probe.items.len() == 1 {
-                    Some(item.title.clone())
-                } else {
-                    None
-                }
-            });
+            let job_source = Self::probe_job_source(probe, item);
 
             let mut job = if single_override {
                 job::Job::new_at_destination(

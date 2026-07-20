@@ -4276,3 +4276,203 @@ fn confirm_off_root_destination_persists_across_queue_reload() {
         .expect("reloaded confirm job");
     assert_eq!(snap.destination, off_root.display().to_string());
 }
+
+// ---------------------------------------------------------------------------
+// Acceptance: resolved Job Destination preview before confirm (issue #34 US#27)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn preview_probe_destination_shows_batch_subfolder_under_library_root() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://youtube.com/playlist?list=PREV",
+        "My Awesome Playlist",
+        vec![
+            (
+                "vid-1",
+                "Video One",
+                "https://youtube.com/watch?v=prev1",
+                vec![("1080p", "1080p")],
+            ),
+            (
+                "vid-2",
+                "Video Two",
+                "https://youtube.com/watch?v=prev2",
+                vec![("1080p", "1080p")],
+            ),
+        ],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    core.probe("https://youtube.com/playlist?list=PREV")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://youtube.com/playlist?list=PREV".to_string(),
+        items: vec![
+            ItemSelection {
+                item_id: "vid-1".to_string(),
+                quality_id: "1080p".to_string(),
+            },
+            ItemSelection {
+                item_id: "vid-2".to_string(),
+                quality_id: "1080p".to_string(),
+            },
+        ],
+    };
+
+    let preview = core
+        .preview_probe_destination(&selection, None)
+        .expect("preview should resolve");
+    let expected = root
+        .join("jobs")
+        .join("My_Awesome_Playlist-\u{2026}");
+    assert_eq!(
+        preview.path_display,
+        expected.display().to_string(),
+        "batch preview must show Library Root jobs subfolder pattern"
+    );
+
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(job_ids.len(), 2);
+    for id in &job_ids {
+        let dest = core
+            .list_job_snapshots()
+            .into_iter()
+            .find(|s| &s.job_id == id)
+            .expect("job")
+            .destination;
+        let name = PathBuf::from(&dest)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("My_Awesome_Playlist-"),
+            "confirmed dest should match preview prefix, got {name}"
+        );
+    }
+}
+
+#[test]
+fn preview_probe_destination_shows_exact_path_for_single_save_to_override() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=prev-exact",
+        "Exact Preview Video",
+        "https://cdn.example.com/prev-exact.mp4",
+        vec![("720p", "720p")],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let off_root = tmp.path().join("exact-save-to");
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(root).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=prev-exact")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=prev-exact".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+
+    let preview = core
+        .preview_probe_destination(&selection, Some(off_root.clone()))
+        .expect("preview");
+    assert_eq!(
+        preview.path_display,
+        off_root.display().to_string(),
+        "single Save to… override must preview the exact Job Destination"
+    );
+}
+
+#[test]
+fn preview_probe_destination_shows_multi_item_pattern_under_save_to_override() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://youtube.com/playlist?list=PREV-MULTI",
+        "Channel Batch",
+        vec![
+            (
+                "vid-a",
+                "A",
+                "https://youtube.com/watch?v=preva",
+                vec![("1080p", "1080p")],
+            ),
+            (
+                "vid-b",
+                "B",
+                "https://youtube.com/watch?v=prevb",
+                vec![("1080p", "1080p")],
+            ),
+        ],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let off_root = tmp.path().join("batch-save-to");
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(root).unwrap();
+
+    core.probe("https://youtube.com/playlist?list=PREV-MULTI")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://youtube.com/playlist?list=PREV-MULTI".to_string(),
+        items: vec![
+            ItemSelection {
+                item_id: "vid-a".to_string(),
+                quality_id: "1080p".to_string(),
+            },
+            ItemSelection {
+                item_id: "vid-b".to_string(),
+                quality_id: "1080p".to_string(),
+            },
+        ],
+    };
+
+    let preview = core
+        .preview_probe_destination(&selection, Some(off_root.clone()))
+        .expect("preview");
+    let expected = off_root.join("Channel_Batch-\u{2026}");
+    assert_eq!(
+        preview.path_display,
+        expected.display().to_string(),
+        "multi-item Save to… must preview subfolders under the override parent"
+    );
+
+    let job_ids = core
+        .confirm_probe_selection(&selection, Some(off_root.clone()))
+        .unwrap();
+    assert_eq!(job_ids.len(), 2);
+    for id in &job_ids {
+        let dest = PathBuf::from(
+            core.list_job_snapshots()
+                .into_iter()
+                .find(|s| &s.job_id == id)
+                .expect("job")
+                .destination,
+        );
+        assert!(
+            dest.starts_with(&off_root),
+            "confirmed dest must stay under override parent"
+        );
+        let name = dest.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.starts_with("Channel_Batch-"),
+            "confirmed dest should match preview prefix, got {name}"
+        );
+    }
+}
