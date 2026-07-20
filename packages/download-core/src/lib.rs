@@ -5,14 +5,20 @@
 
 mod classification;
 mod event;
+mod extractor;
 mod http;
 mod job;
 mod storage;
 
 pub use event::CoreEvent;
+pub use extractor::{
+    ExtractorToolchain, FakeExtractorToolchain, ItemSelection, MediaItem, ProbeResult,
+    ProbeSelection, Quality,
+};
 pub use http::HttpBackend;
 pub use job::EnqueueOutcome;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// The Download Core instance.
@@ -20,27 +26,36 @@ use std::path::PathBuf;
 /// Create one per app session.  Drop to tear down.
 pub struct Core {
     http: Box<dyn HttpBackend>,
+    extractor: Box<dyn ExtractorToolchain>,
     library_root: Option<PathBuf>,
     jobs: Vec<job::Job>,
     event_tx: crossbeam_channel::Sender<CoreEvent>,
     /// Global bandwidth cap in bytes per process_pending call.
     /// None = globally uncapped.
     bandwidth_cap: Option<u64>,
+    /// Pending probe results, keyed by URL.
+    /// Stored until confirm or replaced by a new probe for the same URL.
+    pending_probes: HashMap<String, ProbeResult>,
 }
 
 impl Core {
-    /// Create a new Core with the given HTTP backend.
+    /// Create a new Core with the given HTTP backend and extractor toolchain.
     ///
     /// Returns a `(Core, Receiver<CoreEvent>)` pair.  The caller reads events
     /// from the receiver (typically in a shell event loop).
-    pub fn new(http: Box<dyn HttpBackend>) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
+    pub fn new(
+        http: Box<dyn HttpBackend>,
+        extractor: Box<dyn ExtractorToolchain>,
+    ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let core = Self {
             http,
+            extractor,
             library_root: None,
             jobs: Vec::new(),
             event_tx: tx,
             bandwidth_cap: None,
+            pending_probes: HashMap::new(),
         };
         (core, rx)
     }
@@ -235,6 +250,131 @@ impl Core {
             .find(|j| j.id() == job_id)
             .ok_or_else(|| format!("job {job_id} not found"))?;
         Ok(job.bandwidth_cap())
+    }
+
+    // -----------------------------------------------------------------------
+    // Probe-then-Confirm
+    // -----------------------------------------------------------------------
+
+    /// Probe a URL using the Extractor Toolchain.
+    ///
+    /// Returns discovered items + qualities and emits a `CoreEvent::ProbeResult`
+    /// event.  The probe result is stored internally so that
+    /// [`confirm_probe_selection`] can validate and create jobs from the
+    /// selection.
+    ///
+    /// Errors (unknown URL, toolchain failure) produce a `ProbeFailed` event
+    /// instead and return the error.
+    pub fn probe(&mut self, url: &str) -> Result<ProbeResult, String> {
+        match self.extractor.probe(url) {
+            Ok(result) => {
+                // Store for subsequent confirm
+                self.pending_probes
+                    .insert(url.to_string(), result.clone());
+
+                // Emit event
+                self.event_tx
+                    .send(CoreEvent::ProbeResult {
+                        url: url.to_string(),
+                        items: result.items.clone(),
+                        source_name: result.source_name.clone(),
+                    })
+                    .map_err(|_| "event channel closed".to_string())?;
+
+                Ok(result)
+            }
+            Err(err) => {
+                self.event_tx
+                    .send(CoreEvent::ProbeFailed {
+                        url: url.to_string(),
+                        error: err.clone(),
+                    })
+                    .map_err(|_| "event channel closed".to_string())?;
+                Err(err)
+            }
+        }
+    }
+
+    /// Confirm a probe selection and create jobs for the selected items.
+    ///
+    /// Takes a [`ProbeSelection`] that references a previously probed URL
+    /// and lists which items at which qualities to download.  Returns the
+    /// job IDs of the created jobs.
+    ///
+    /// Each selected item creates one job.  Batch/channel jobs use a
+    /// dedicated Job Destination subfolder derived from the source name.
+    ///
+    /// Errors if no pending probe exists for the URL, or if the selection
+    /// references unknown items or qualities.
+    pub fn confirm_probe_selection(
+        &mut self,
+        selection: &ProbeSelection,
+    ) -> Result<Vec<String>, String> {
+        let root = self
+            .library_root
+            .as_ref()
+            .ok_or_else(|| "Library Root not set".to_string())?;
+
+        let probe = self
+            .pending_probes
+            .get(&selection.url)
+            .ok_or_else(|| {
+                format!(
+                    "no pending probe for {}. Call probe() first.",
+                    selection.url
+                )
+            })?;
+
+        // Build lookup maps
+        let items_map: HashMap<&str, &MediaItem> =
+            probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
+
+        let source_name = probe.source_name.clone();
+        let mut job_ids = Vec::new();
+
+        for sel in &selection.items {
+            let item = items_map.get(sel.item_id.as_str()).ok_or_else(|| {
+                format!(
+                    "item '{}' not found in probe result for {}",
+                    sel.item_id, selection.url
+                )
+            })?;
+
+            // Validate quality exists
+            let _quality = item
+                .qualities
+                .iter()
+                .find(|q| q.id == sel.quality_id)
+                .ok_or_else(|| {
+                    format!(
+                        "quality '{}' not found for item '{}' (available: {:?})",
+                        sel.quality_id,
+                        sel.item_id,
+                        item.qualities.iter().map(|q| &q.id).collect::<Vec<_>>()
+                    )
+                })?;
+
+            // For single-video probes without a source name, use the
+            // item title for the subfolder if available.
+            let job_source = source_name.clone().or_else(|| {
+                if probe.items.len() == 1 {
+                    Some(item.title.clone())
+                } else {
+                    None
+                }
+            });
+
+            let job = job::Job::new_with_source(
+                item.url.clone(),
+                root.clone(),
+                job_source,
+            );
+
+            job_ids.push(job.id().to_string());
+            self.jobs.push(job);
+        }
+
+        Ok(job_ids)
     }
 
     // -----------------------------------------------------------------------

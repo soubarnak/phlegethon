@@ -99,10 +99,11 @@ impl HttpBackend for FailingHttp {
     }
 }
 
-fn enqueue_direct_job_id(
-    core: &mut Core,
-    url: &str,
-) -> String {
+fn fake_toolchain() -> FakeExtractorToolchain {
+    FakeExtractorToolchain::new()
+}
+
+fn enqueue_direct_job_id(core: &mut Core, url: &str) -> String {
     let result = core.enqueue(url).unwrap();
     match result {
         EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
@@ -118,6 +119,10 @@ fn collect_events(rx: &crossbeam_channel::Receiver<CoreEvent>) -> Vec<CoreEvent>
     out
 }
 
+fn make_core(http: Box<dyn HttpBackend>) -> (Core, crossbeam_channel::Receiver<CoreEvent>) {
+    Core::new(http, Box::new(fake_toolchain()))
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance: create/destroy and Library Root
 // ---------------------------------------------------------------------------
@@ -126,7 +131,7 @@ fn collect_events(rx: &crossbeam_channel::Receiver<CoreEvent>) -> Vec<CoreEvent>
 fn can_create_destroy_and_set_library_root() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("library");
-    let (mut core, _rx) = Core::new(Box::new(fake_http()));
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
     core.set_library_root(root.clone()).unwrap();
     assert!(root.exists());
     drop(core); // destroy — no panic
@@ -139,11 +144,13 @@ fn can_create_destroy_and_set_library_root() {
 #[test]
 fn enqueue_clear_http_returns_enqueue_direct() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, _rx) = Core::new(Box::new(fake_http()));
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let result = core.enqueue("https://example.com/file.zip");
-    assert!(matches!(result, Ok(EnqueueOutcome::EnqueueDirect { job_id: _, destination: _ })));
+    assert!(
+        matches!(result, Ok(EnqueueOutcome::EnqueueDirect { job_id: _, destination: _ }))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +160,7 @@ fn enqueue_clear_http_returns_enqueue_direct() {
 #[test]
 fn enqueue_direct_job_writes_bytes_to_disk() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(fake_http()));
+    let (mut core, rx) = make_core(Box::new(fake_http()));
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
@@ -178,11 +185,15 @@ fn enqueue_direct_job_writes_bytes_to_disk() {
 
     // Check a completed event was emitted
     let events = collect_events(&rx);
-    let has_completed = events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    let has_completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
     assert!(has_completed, "should emit JobCompleted event");
 
     // Check progress events were emitted
-    let has_progress = events.iter().any(|e| matches!(e, CoreEvent::JobProgress { .. }));
+    let has_progress = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobProgress { .. }));
     assert!(has_progress, "should emit JobProgress event");
 }
 
@@ -193,7 +204,7 @@ fn enqueue_direct_job_writes_bytes_to_disk() {
 #[test]
 fn enqueue_launch_site_url_returns_probe_then_confirm() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, _rx) = Core::new(Box::new(fake_http()));
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     // A YouTube URL is not a clear single-file HTTP URL
@@ -212,7 +223,7 @@ fn enqueue_launch_site_url_returns_probe_then_confirm() {
 #[test]
 fn pause_pending_job_emits_paused_event() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(fake_http()));
+    let (mut core, rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
@@ -229,7 +240,7 @@ fn pause_pending_job_emits_paused_event() {
 #[test]
 fn paused_job_is_skipped_by_process_pending() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(fake_http()));
+    let (mut core, rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
@@ -240,16 +251,26 @@ fn paused_job_is_skipped_by_process_pending() {
     core.process_pending().unwrap();
 
     let events = collect_events(&rx);
-    let has_progress = events.iter().any(|e| matches!(e, CoreEvent::JobProgress { .. }));
-    assert!(!has_progress, "paused job should not produce progress events");
-    let has_completed = events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
-    assert!(!has_completed, "paused job should not produce completed events");
+    let has_progress = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobProgress { .. }));
+    assert!(
+        !has_progress,
+        "paused job should not produce progress events"
+    );
+    let has_completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(
+        !has_completed,
+        "paused job should not produce completed events"
+    );
 }
 
 #[test]
 fn resume_paused_job_emits_resumed_event_and_allows_processing() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(fake_http()));
+    let (mut core, rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
@@ -260,7 +281,9 @@ fn resume_paused_job_emits_resumed_event_and_allows_processing() {
 
     let events = collect_events(&rx);
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobResumed { job_id: id } if id == &job_id)),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobResumed { job_id: id } if id == &job_id)),
         "should emit JobResumed event, got {:?}",
         events
     );
@@ -269,7 +292,9 @@ fn resume_paused_job_emits_resumed_event_and_allows_processing() {
     core.process_pending().unwrap();
     let events2 = collect_events(&rx);
     assert!(
-        events2.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        events2
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "resumed job should complete after process_pending"
     );
 }
@@ -277,18 +302,23 @@ fn resume_paused_job_emits_resumed_event_and_allows_processing() {
 #[test]
 fn failed_job_emits_failed_event_and_remains_visible() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(FailingHttp));
+    let (mut core, rx) = make_core(Box::new(FailingHttp));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/fail.zip");
 
     // Process — should fail
     let result = core.process_pending();
-    assert!(result.is_ok(), "process_pending should not propagate HTTP errors");
+    assert!(
+        result.is_ok(),
+        "process_pending should not propagate HTTP errors"
+    );
 
     let events = collect_events(&rx);
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobFailed { job_id: id, .. } if id == &job_id)),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { job_id: id, .. } if id == &job_id)),
         "should emit JobFailed event, got {:?}",
         events
     );
@@ -297,7 +327,9 @@ fn failed_job_emits_failed_event_and_remains_visible() {
     core.retry_job(&job_id).unwrap();
     let events2 = collect_events(&rx);
     assert!(
-        events2.iter().any(|e| matches!(e, CoreEvent::JobRetried { job_id: id } if id == &job_id)),
+        events2
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobRetried { job_id: id } if id == &job_id)),
         "should emit JobRetried event, got {:?}",
         events2
     );
@@ -306,7 +338,7 @@ fn failed_job_emits_failed_event_and_remains_visible() {
 #[test]
 fn discard_removes_job_from_queue_and_emits_discarded_event() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(fake_http()));
+    let (mut core, rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
@@ -315,7 +347,9 @@ fn discard_removes_job_from_queue_and_emits_discarded_event() {
 
     let events = collect_events(&rx);
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)),
         "should emit JobDiscarded event, got {:?}",
         events
     );
@@ -328,7 +362,7 @@ fn discard_removes_job_from_queue_and_emits_discarded_event() {
 #[test]
 fn pause_on_completed_job_errors() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, _rx) = Core::new(Box::new(fake_http()));
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
@@ -341,7 +375,7 @@ fn pause_on_completed_job_errors() {
 #[test]
 fn retry_failed_job_goes_back_to_pending() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(FailingHttp));
+    let (mut core, rx) = make_core(Box::new(FailingHttp));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/fail.zip");
@@ -356,7 +390,9 @@ fn retry_failed_job_goes_back_to_pending() {
     core.process_pending().unwrap();
     let events = collect_events(&rx);
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
         "retried job should be re-processed and fail again"
     );
 }
@@ -364,7 +400,7 @@ fn retry_failed_job_goes_back_to_pending() {
 #[test]
 fn resume_non_paused_job_errors() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, _rx) = Core::new(Box::new(fake_http()));
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
@@ -377,7 +413,7 @@ fn resume_non_paused_job_errors() {
 #[test]
 fn retry_non_failed_job_errors() {
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, _rx) = Core::new(Box::new(fake_http()));
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
@@ -449,13 +485,17 @@ impl HttpBackend for StagedFakeHttp {
 #[test]
 fn interrupt_then_resume_continues_from_last_byte() {
     // Given a staged (interruptible) HTTP backend
-    let content = b"hello world this is a resumable test file with enough data to split".to_vec();
+    let content =
+        b"hello world this is a resumable test file with enough data to split".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert("https://example.com/resumable.zip".into(), content.clone());
+    map.insert(
+        "https://example.com/resumable.zip".into(),
+        content.clone(),
+    );
     let http = StagedFakeHttp::new(map);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
@@ -516,13 +556,20 @@ fn interrupt_then_resume_continues_from_last_byte() {
         } => Some((*bytes_downloaded, *t)),
         _ => None,
     });
-    assert!(final_progress.is_some(), "resumed job should have final progress");
+    assert!(
+        final_progress.is_some(),
+        "resumed job should have final progress"
+    );
     let (final_bytes, final_total) = final_progress.unwrap();
     assert_eq!(
         final_bytes, final_total,
         "resumed job should have complete bytes ({final_bytes} == {final_total})"
     );
-    assert_eq!(final_bytes, content.len() as u64, "should match original content length");
+    assert_eq!(
+        final_bytes,
+        content.len() as u64,
+        "should match original content length"
+    );
 
     // Verify file on disk has the full content
     let entries: Vec<_> = std::fs::read_dir(root.join("jobs").join(&job_id))
@@ -531,26 +578,25 @@ fn interrupt_then_resume_continues_from_last_byte() {
         .collect();
     assert!(!entries.is_empty(), "job directory should contain files");
     let file_content = std::fs::read(entries[0].path()).unwrap();
-    assert_eq!(file_content, content, "file on disk should have full content after resume");
+    assert_eq!(
+        file_content, content,
+        "file on disk should have full content after resume"
+    );
 }
 
 #[test]
 fn resume_starts_from_last_byte_not_zero() {
     // This test verifies that restart-from-zero is NOT the default path
     // when Range is available.
-    //
-    // We do this by checking that the Range header is passed to the backend
-    // on the second call (after partial data was written).
-    //
-    // Strategy: Use a RangeFakeHttp where only the Range-fulfilled call
-    // returns the correct remaining bytes. If process_pending started from
-    // zero, the second fetch would get the full content (duplicating data).
     let full_content = b"exact content for resume test".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert("https://example.com/exact.zip".into(), full_content.clone());
+    map.insert(
+        "https://example.com/exact.zip".into(),
+        full_content.clone(),
+    );
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(StagedFakeHttp::new(map)));
+    let (mut core, rx) = make_core(Box::new(StagedFakeHttp::new(map)));
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
@@ -565,12 +611,14 @@ fn resume_starts_from_last_byte_not_zero() {
     let events = collect_events(&rx);
 
     // Verify completed with expected total
-    let completed = events.iter().find_map(|e| match e {
-        CoreEvent::JobCompleted {
-            bytes_written, ..
-        } => Some(*bytes_written),
-        _ => None,
-    });
+    let completed = events
+        .iter()
+        .find_map(|e| match e {
+            CoreEvent::JobCompleted {
+                bytes_written, ..
+            } => Some(*bytes_written),
+            _ => None,
+        });
     assert_eq!(
         completed,
         Some(full_content.len() as u64),
@@ -586,8 +634,7 @@ fn resume_starts_from_last_byte_not_zero() {
     assert_eq!(files.len(), 1, "should have one file");
     let on_disk = std::fs::read(files[0].path()).unwrap();
     assert_eq!(
-        on_disk,
-        full_content,
+        on_disk, full_content,
         "file should be exact content, not duplicated"
     );
     assert_eq!(
@@ -599,18 +646,21 @@ fn resume_starts_from_last_byte_not_zero() {
 
 #[test]
 fn progress_events_show_cumulative_bytes_on_resume() {
-    // Verify that progress events show cumulative bytes across resume.
-    // A resumed job should report bytes_downloaded = previously_downloaded + new_bytes.
-    let content = b"cumulative progress tracking for resumable transfer test".to_vec();
+    let content =
+        b"cumulative progress tracking for resumable transfer test".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert("https://example.com/progress.zip".into(), content.clone());
+    map.insert(
+        "https://example.com/progress.zip".into(),
+        content.clone(),
+    );
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(StagedFakeHttp::new(map)));
+    let (mut core, rx) = make_core(Box::new(StagedFakeHttp::new(map)));
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/progress.zip");
+    let _job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/progress.zip");
 
     // First pass — partial
     core.process_pending().unwrap();
@@ -641,7 +691,6 @@ fn progress_events_show_cumulative_bytes_on_resume() {
     let events2 = collect_events(&rx);
 
     // The first progress event in the second pass should report cumulative bytes
-    // that are >= the partial_downloaded from the first pass
     let resumed_progress = events2.iter().find_map(|e| match e {
         CoreEvent::JobProgress {
             bytes_downloaded, ..
@@ -662,20 +711,22 @@ fn progress_events_show_cumulative_bytes_on_resume() {
 
 #[test]
 fn paused_then_resumed_job_uses_range_not_full_redownload() {
-    // When a job is paused and later resumed, the resume should continue
-    // from the last byte via Range — not restart from zero.
     let content = b"pause then resume with range transfer test content".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert("https://example.com/pause-resume.zip".into(), content.clone());
+    map.insert(
+        "https://example.com/pause-resume.zip".into(),
+        content.clone(),
+    );
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(StagedFakeHttp::new(map)));
+    let (mut core, rx) = make_core(Box::new(StagedFakeHttp::new(map)));
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/pause-resume.zip");
+    let job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/pause-resume.zip");
 
-    // First pass — partial (simulates downloading before pause)
+    // First pass — partial
     core.process_pending().unwrap();
     collect_events(&rx);
 
@@ -683,7 +734,7 @@ fn paused_then_resumed_job_uses_range_not_full_redownload() {
     core.pause_job(&job_id).unwrap();
     collect_events(&rx);
 
-    // Resume — this should keep bytes_received and use Range on next process
+    // Resume
     core.resume_job(&job_id).unwrap();
     collect_events(&rx);
 
@@ -692,7 +743,9 @@ fn paused_then_resumed_job_uses_range_not_full_redownload() {
     let events = collect_events(&rx);
 
     // Verify completed
-    let completed = events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    let completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
     assert!(completed, "paused-then-resumed job should complete");
 
     // Verify file has full content (not duplicated)
@@ -703,19 +756,25 @@ fn paused_then_resumed_job_uses_range_not_full_redownload() {
         .collect();
     assert_eq!(files.len(), 1, "should have one file");
     let on_disk = std::fs::read(files[0].path()).unwrap();
-    assert_eq!(on_disk, content, "file should have exact content, not duplicated");
-    assert_eq!(on_disk.len(), content.len(), "file length should match original");
+    assert_eq!(
+        on_disk, content,
+        "file should have exact content, not duplicated"
+    );
+    assert_eq!(
+        on_disk.len(),
+        content.len(),
+        "file length should match original"
+    );
 }
 
 #[test]
 fn retry_resets_bytes_received_and_starts_from_zero() {
-    // After a failed job is retried, bytes_received should reset to 0
-    // so the file is written fresh (not appended to potentially corrupt data).
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(FailingHttp));
+    let (mut core, rx) = make_core(Box::new(FailingHttp));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/fail-retry.zip");
+    let job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/fail-retry.zip");
 
     // First attempt fails
     core.process_pending().unwrap();
@@ -724,12 +783,11 @@ fn retry_resets_bytes_received_and_starts_from_zero() {
     // Retry — this resets bytes_received to 0
     core.retry_job(&job_id).unwrap();
 
-    // Now swap to a RangeFakeHttp that would only return correct data
-    // (We can't swap backend in current Core API, but we can verify retry
-    // resets state by checking that the failed job transitions correctly.)
     let events = collect_events(&rx);
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobRetried { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobRetried { .. })),
         "retry should emit JobRetried event"
     );
 
@@ -737,7 +795,9 @@ fn retry_resets_bytes_received_and_starts_from_zero() {
     core.process_pending().unwrap();
     let events2 = collect_events(&rx);
     assert!(
-        events2.iter().any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        events2
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
         "retried job should attempt processing again"
     );
 }
@@ -746,13 +806,19 @@ fn retry_resets_bytes_received_and_starts_from_zero() {
 // Acceptance: Bandwidth Cap (issue #17)
 // ---------------------------------------------------------------------------
 
-fn count_process_calls_until_done(core: &mut Core, rx: &crossbeam_channel::Receiver<CoreEvent>) -> usize {
+fn count_process_calls_until_done(
+    core: &mut Core,
+    rx: &crossbeam_channel::Receiver<CoreEvent>,
+) -> usize {
     let mut count = 0;
     loop {
         core.process_pending().unwrap();
         count += 1;
         let events = collect_events(rx);
-        if events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })) {
+        if events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. }))
+        {
             return count;
         }
     }
@@ -760,7 +826,6 @@ fn count_process_calls_until_done(core: &mut Core, rx: &crossbeam_channel::Recei
 
 #[test]
 fn default_transfer_is_uncapped() {
-    // With no bandwidth cap set, a file of any size transfers fully in one call.
     let content = b"this file is long enough to be split by a cap if one were set"
         .repeat(1)
         .to_vec();
@@ -774,10 +839,11 @@ fn default_transfer_is_uncapped() {
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/uncapped.zip");
+    let _job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/uncapped.zip");
 
     // One call should complete the job
     let calls = count_process_calls_until_done(&mut core, &rx);
@@ -789,25 +855,17 @@ fn default_transfer_is_uncapped() {
 
 #[test]
 fn global_bandwidth_cap_limits_aggregate_throughput() {
-    // With a global cap, the total bytes transferred across ALL jobs in one
-    // process_pending call is limited.
     let content_a = b"AAAA this is 30 bytes of data!"; // 30 bytes
     let content_b = b"BBBB this is also 30 bytes woo"; // 30 bytes
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/a.zip".into(),
-        content_a.to_vec(),
-    );
-    map.insert(
-        "https://example.com/b.zip".into(),
-        content_b.to_vec(),
-    );
+    map.insert("https://example.com/a.zip".into(), content_a.to_vec());
+    map.insert("https://example.com/b.zip".into(), content_b.to_vec());
     let http = FakeHttp {
         responses: Arc::new(Mutex::new(map)),
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_a = enqueue_direct_job_id(&mut core, "https://example.com/a.zip");
@@ -816,7 +874,7 @@ fn global_bandwidth_cap_limits_aggregate_throughput() {
     // Global cap: 20 bytes per call (aggregate across both jobs)
     core.set_global_bandwidth_cap(20);
 
-    // First call — neither job should complete yet (each is 30 bytes, cap is 20 total)
+    // First call — neither job should complete yet
     let mut done = std::collections::HashSet::new();
     process_and_accumulate_completions(&mut core, &rx, &mut done);
     assert!(
@@ -824,7 +882,7 @@ fn global_bandwidth_cap_limits_aggregate_throughput() {
         "neither job should complete in one call with 20-byte global cap"
     );
 
-    // Drain remaining bytes — track completions across calls
+    // Drain remaining bytes
     while !done.contains(&job_a) || !done.contains(&job_b) {
         process_and_accumulate_completions(&mut core, &rx, &mut done);
     }
@@ -841,34 +899,24 @@ fn global_bandwidth_cap_limits_aggregate_throughput() {
             .collect();
         assert!(!files.is_empty(), "job {job_id} should have files");
         let on_disk = std::fs::read(files[0].path()).unwrap();
-        assert_eq!(
-            on_disk, *expected,
-            "job {job_id} content should match"
-        );
+        assert_eq!(on_disk, *expected, "job {job_id} content should match");
     }
 }
 
 #[test]
 fn per_job_bandwidth_cap_limits_that_job_without_global() {
-    // Per-job cap applies to one job only; other jobs without a cap are
-    // unaffected (no global cap needed).
     let content_a = b"small file that fits in one call"; // ~32 bytes
-    let content_b = b"this is a longer file content that spans multiple iterations when capped";
+    let content_b =
+        b"this is a longer file content that spans multiple iterations when capped";
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/a.zip".into(),
-        content_a.to_vec(),
-    );
-    map.insert(
-        "https://example.com/b.zip".into(),
-        content_b.to_vec(),
-    );
+    map.insert("https://example.com/a.zip".into(), content_a.to_vec());
+    map.insert("https://example.com/b.zip".into(), content_b.to_vec());
     let http = FakeHttp {
         responses: Arc::new(Mutex::new(map)),
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_a = enqueue_direct_job_id(&mut core, "https://example.com/a.zip");
@@ -877,8 +925,7 @@ fn per_job_bandwidth_cap_limits_that_job_without_global() {
     // Set per-job cap on job_b only (no global cap)
     core.set_job_bandwidth_cap(&job_b, 10).unwrap();
 
-    // First call — job_a should complete (it's small, uncapped)
-    // job_b should transfer ≤ 10 bytes and stay pending
+    // First call — job_a should complete; job_b should stay pending
     let mut done = std::collections::HashSet::new();
     process_and_accumulate_completions(&mut core, &rx, &mut done);
     assert!(
@@ -906,20 +953,15 @@ fn per_job_bandwidth_cap_limits_that_job_without_global() {
 
 #[test]
 fn per_job_cap_more_restrictive_than_global_is_effective() {
-    // When both global and per-job caps are set, the more restrictive one
-    // (smaller value) is the effective cap.
     let content = vec![b'X'; 200]; // 200 bytes
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/big.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/big.zip".into(), content.clone());
     let http = FakeHttp {
         responses: Arc::new(Mutex::new(map)),
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/big.zip");
@@ -932,7 +974,6 @@ fn per_job_cap_more_restrictive_than_global_is_effective() {
     core.process_pending().unwrap();
     let events = collect_events(&rx);
 
-    // The last progress event should show bytes_downloaded = 10
     let last_progress = events
         .iter()
         .filter_map(|e| match e {
@@ -948,10 +989,8 @@ fn per_job_cap_more_restrictive_than_global_is_effective() {
         "should transfer exactly 10 bytes (per-job cap is more restrictive)"
     );
 
-    // Process remaining bytes using stateful accumulator
     process_until_job_done(&mut core, &rx, &job_id);
 
-    // Verify full content
     let dir = tmp.path().join("library").join("jobs").join(&job_id);
     let files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -969,19 +1008,15 @@ fn per_job_cap_more_restrictive_than_global_is_effective() {
 
 #[test]
 fn global_cap_more_restrictive_than_per_job_is_effective() {
-    // When global cap is tighter than per-job cap, global cap wins.
     let content = vec![b'Y'; 200]; // 200 bytes
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/big.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/big.zip".into(), content.clone());
     let http = FakeHttp {
         responses: Arc::new(Mutex::new(map)),
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/big.zip");
@@ -1008,7 +1043,6 @@ fn global_cap_more_restrictive_than_per_job_is_effective() {
         "should transfer exactly 5 bytes (global cap is more restrictive)"
     );
 
-    // Finish using stateful accumulator
     process_until_job_done(&mut core, &rx, &job_id);
 
     let dir = tmp.path().join("library").join("jobs").join(&job_id);
@@ -1023,7 +1057,6 @@ fn global_cap_more_restrictive_than_per_job_is_effective() {
 
 #[test]
 fn bandwidth_cap_does_not_affect_small_transfers() {
-    // A file smaller than the cap should complete in one call.
     let content = b"small".to_vec(); // 5 bytes
     let mut map = std::collections::HashMap::new();
     map.insert(
@@ -1035,10 +1068,11 @@ fn bandwidth_cap_does_not_affect_small_transfers() {
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/small.zip");
+    let _job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/small.zip");
 
     // Set cap larger than content
     core.set_global_bandwidth_cap(100);
@@ -1052,8 +1086,8 @@ fn bandwidth_cap_does_not_affect_small_transfers() {
 
 #[test]
 fn set_and_remove_global_bandwidth_cap_restores_uncapped() {
-    let content = b"this file should transfer uncapped after removing the global cap"
-        .to_vec();
+    let content =
+        b"this file should transfer uncapped after removing the global cap".to_vec();
     let mut map = std::collections::HashMap::new();
     map.insert(
         "https://example.com/global-switch.zip".into(),
@@ -1064,10 +1098,11 @@ fn set_and_remove_global_bandwidth_cap_restores_uncapped() {
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/global-switch.zip");
+    let _job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/global-switch.zip");
 
     // Set cap, verify it's active
     core.set_global_bandwidth_cap(5);
@@ -1101,8 +1136,8 @@ fn set_and_remove_global_bandwidth_cap_restores_uncapped() {
 
 #[test]
 fn set_and_remove_job_bandwidth_cap_restores_uncapped() {
-    let content = b"this file should transfer uncapped after removing the per-job cap"
-        .to_vec();
+    let content =
+        b"this file should transfer uncapped after removing the per-job cap".to_vec();
     let mut map = std::collections::HashMap::new();
     map.insert(
         "https://example.com/job-switch.zip".into(),
@@ -1113,10 +1148,11 @@ fn set_and_remove_job_bandwidth_cap_restores_uncapped() {
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/job-switch.zip");
+    let job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/job-switch.zip");
 
     // Set per-job cap, verify
     core.set_job_bandwidth_cap(&job_id, 5).unwrap();
@@ -1144,12 +1180,6 @@ fn set_and_remove_job_bandwidth_cap_restores_uncapped() {
 
 #[test]
 fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
-    // With a tight global cap and multiple jobs, the total bytes transferred
-    // in a single call across ALL jobs should not exceed the cap.
-    //
-    // Strategy: enqueue three jobs, each with 20 bytes of content.
-    // Global cap = 30. In one call, at most 30 bytes total should be
-    // transferred (one full 20-byte job plus 10 bytes of another).
     let content = vec![b'Z'; 20]; // 20 bytes each
     let mut map = std::collections::HashMap::new();
     map.insert("https://example.com/1.zip".into(), content.clone());
@@ -1160,7 +1190,7 @@ fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
     };
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http));
+    let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_1 = enqueue_direct_job_id(&mut core, "https://example.com/1.zip");
@@ -1170,12 +1200,11 @@ fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
     // Global cap 30 — should allow one full job (20) + 10 of the next
     core.set_global_bandwidth_cap(30);
 
-    // First call: one job should complete (20b), another gets ≤10b (cap exhausted)
+    // First call: one job should complete (20b), another gets ≤10b
     let mut done = std::collections::HashSet::new();
     core.process_pending().unwrap();
     let events = collect_events(&rx);
 
-    // Count completed jobs and total bytes transferred in this call
     let completed_in_first: Vec<&String> = events
         .iter()
         .filter_map(|e| match e {
@@ -1183,14 +1212,12 @@ fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
             _ => None,
         })
         .collect();
-    // At most 1 job should complete
     assert!(
         completed_in_first.len() <= 1,
         "at most 1 job should complete in first call, got {}",
         completed_in_first.len()
     );
 
-    // Verify job_1 was the one to complete (it was first in order)
     assert!(
         completed_in_first.contains(&&job_1),
         "first job should complete first"
@@ -1209,7 +1236,6 @@ fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
     assert!(done.contains(&job_2), "job_2 should complete");
     assert!(done.contains(&job_3), "job_3 should complete");
 
-    // Verify all 3 jobs have content on disk
     let job_dir = tmp.path().join("library").join("jobs");
     let job_count = std::fs::read_dir(&job_dir)
         .unwrap()
@@ -1220,18 +1246,562 @@ fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
 
 #[test]
 fn job_bandwidth_cap_error_for_nonexistent_job() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (mut core, _rx) = Core::new(Box::new(FakeHttp {
+    let (mut core, _rx) = make_core(Box::new(FakeHttp {
         responses: Arc::new(Mutex::new(std::collections::HashMap::new())),
     }));
+    let tmp = tempfile::tempdir().unwrap();
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let result = core.set_job_bandwidth_cap("nonexistent-job-uuid", 100);
-    assert!(result.is_err(), "setting cap on nonexistent job should error");
+    assert!(
+        result.is_err(),
+        "setting cap on nonexistent job should error"
+    );
 
     let result = core.remove_job_bandwidth_cap("nonexistent-job-uuid");
-    assert!(result.is_err(), "removing cap on nonexistent job should error");
+    assert!(
+        result.is_err(),
+        "removing cap on nonexistent job should error"
+    );
 
     let result = core.job_bandwidth_cap("nonexistent-job-uuid");
-    assert!(result.is_err(), "getting cap on nonexistent job should error");
+    assert!(
+        result.is_err(),
+        "getting cap on nonexistent job should error"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: Probe-then-Confirm (issue #18)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn probe_returns_items_and_qualities() {
+    // Given a Core with a fake extractor that knows one URL
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=abc123",
+        "Test Video",
+        "https://cdn.youtube.com/video.mp4",
+        vec![("1080p", "1080p (1920×1080)"), ("720p", "720p (1280×720)")],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    // Probe
+    let result = core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].title, "Test Video");
+    assert_eq!(result.items[0].qualities.len(), 2);
+
+    // Should emit a ProbeResult event
+    let events = collect_events(&rx);
+    let has_probe_event = events.iter().any(|e| matches!(e, CoreEvent::ProbeResult { .. }));
+    assert!(has_probe_event, "should emit ProbeResult event, got: {events:?}");
+}
+
+/// Helper: create a FakeHttp that knows the probe item URLs.
+fn fake_http_with_responses(
+    pairs: Vec<(&str, &[u8])>,
+) -> FakeHttp {
+    let mut map = std::collections::HashMap::new();
+    for (url, data) in pairs {
+        map.insert(url.to_string(), data.to_vec());
+    }
+    FakeHttp {
+        responses: Arc::new(Mutex::new(map)),
+    }
+}
+
+#[test]
+fn probe_failure_emits_probe_failed_event() {
+    // Given a Core with an empty fake extractor (all URLs fail)
+    let toolchain = FakeExtractorToolchain::new();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    // Probe unknown URL — should fail
+    let err = core.probe("https://www.youtube.com/watch?v=unknown").unwrap_err();
+    assert!(err.contains("no response configured"), "error should mention missing config, got: {err}");
+
+    // Should emit a ProbeFailed event
+    let events = collect_events(&rx);
+    let has_fail_event = events.iter().any(|e| matches!(e, CoreEvent::ProbeFailed { .. }));
+    assert!(has_fail_event, "should emit ProbeFailed event, got: {events:?}");
+}
+
+#[test]
+fn confirm_probe_selection_creates_jobs_for_selected_items() {
+    // Given a Core with a fake extractor that returns probe results
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=abc123",
+        "Test Video",
+        "https://cdn.youtube.com/video.mp4",
+        vec![("1080p", "1080p"), ("720p", "720p")],
+    );
+
+    // Register the probe item URL in the HTTP backend
+    let video_data = b"fake mp4 video content".to_vec();
+    let http = fake_http_with_responses(vec![
+        ("https://cdn.youtube.com/video.mp4", &video_data),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    // First probe
+    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    collect_events(&rx); // drain
+
+    // Confirm selection — pick 720p
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=abc123".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    assert_eq!(job_ids.len(), 1, "should create exactly one job");
+
+    // The job should be pending and processable
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+    let has_completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(
+        has_completed,
+        "confirmed job should complete, got: {events:?}"
+    );
+}
+
+#[test]
+fn confirm_probe_selection_creates_multiple_jobs_for_batch() {
+    // Given a batch probe result (e.g. YouTube playlist)
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://youtube.com/playlist?list=ABC",
+        "My Playlist",
+        vec![
+            (
+                "vid-1",
+                "Video One",
+                "https://youtube.com/watch?v=1",
+                vec![("1080p", "1080p")],
+            ),
+            (
+                "vid-2",
+                "Video Two",
+                "https://youtube.com/watch?v=2",
+                vec![("720p", "720p")],
+            ),
+        ],
+    );
+
+    // Register both probe item URLs in the HTTP backend
+    let http = fake_http_with_responses(vec![
+        ("https://youtube.com/watch?v=1", b"video one content"),
+        ("https://youtube.com/watch?v=2", b"video two content"),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    // Probe
+    core.probe("https://youtube.com/playlist?list=ABC").unwrap();
+    collect_events(&rx); // drain
+
+    // Confirm — select both items at different qualities
+    let selection = ProbeSelection {
+        url: "https://youtube.com/playlist?list=ABC".to_string(),
+        items: vec![
+            ItemSelection {
+                item_id: "vid-1".to_string(),
+                quality_id: "1080p".to_string(),
+            },
+            ItemSelection {
+                item_id: "vid-2".to_string(),
+                quality_id: "720p".to_string(),
+            },
+        ],
+    };
+    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    assert_eq!(job_ids.len(), 2, "should create two jobs");
+
+    // Both jobs should process and complete
+    let mut all_done = std::collections::HashSet::new();
+    while all_done.len() < 2 {
+        process_and_accumulate_completions(&mut core, &rx, &mut all_done);
+    }
+    assert_eq!(all_done.len(), 2, "both jobs should complete");
+}
+
+#[test]
+fn confirm_without_previous_probe_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    // Confirm without calling probe first
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=abc123".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+    };
+    let err = core.confirm_probe_selection(&selection).unwrap_err();
+    assert!(
+        err.contains("no pending probe"),
+        "should mention no pending probe, got: {err}"
+    );
+}
+
+#[test]
+fn confirm_with_invalid_item_id_errors() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=abc123",
+        "Test Video",
+        "https://cdn.youtube.com/video.mp4",
+        vec![("1080p", "1080p")],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    collect_events(&rx); // drain
+
+    // Try to confirm a non-existent item
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=abc123".to_string(),
+        items: vec![ItemSelection {
+            item_id: "nonexistent-item".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+    };
+    let err = core.confirm_probe_selection(&selection).unwrap_err();
+    assert!(
+        err.contains("not found"),
+        "should mention item not found, got: {err}"
+    );
+}
+
+#[test]
+fn confirm_with_invalid_quality_id_errors() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=abc123",
+        "Test Video",
+        "https://cdn.youtube.com/video.mp4",
+        vec![("1080p", "1080p")],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    collect_events(&rx); // drain
+
+    // Try to confirm with a non-existent quality
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=abc123".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "8k".to_string(),
+        }],
+    };
+    let err = core.confirm_probe_selection(&selection).unwrap_err();
+    assert!(
+        err.contains("quality"),
+        "should mention quality not found, got: {err}"
+    );
+}
+
+#[test]
+fn confirm_without_library_root_errors() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=abc123",
+        "Test Video",
+        "https://cdn.youtube.com/video.mp4",
+        vec![("1080p", "1080p")],
+    );
+
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    // No library root set
+
+    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    collect_events(&rx); // drain
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=abc123".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+    };
+    let err = core.confirm_probe_selection(&selection).unwrap_err();
+    assert!(
+        err.contains("Library Root"),
+        "should mention Library Root not set, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: Batch/channel jobs use source-derived subfolder (issue #18)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch_job_destination_derives_from_source_name() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://youtube.com/playlist?list=ABC",
+        "My Awesome Playlist",
+        vec![
+            (
+                "vid-1",
+                "Video One",
+                "https://youtube.com/watch?v=1",
+                vec![("1080p", "1080p")],
+            ),
+        ],
+    );
+
+    let http = fake_http_with_responses(vec![
+        ("https://youtube.com/watch?v=1", b"video one content"),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    core.probe("https://youtube.com/playlist?list=ABC").unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://youtube.com/playlist?list=ABC".to_string(),
+        items: vec![ItemSelection {
+            item_id: "vid-1".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    assert_eq!(job_ids.len(), 1);
+
+    // Process to create directories on disk
+    core.process_pending().unwrap();
+
+    // The job directory should contain the source name prefix
+    let job_dir = root.join("jobs");
+    let entries: Vec<_> = std::fs::read_dir(&job_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "should have one job dir");
+
+    let dir_name = entries[0].file_name().into_string().unwrap();
+    assert!(
+        dir_name.starts_with("My_Awesome_Playlist"),
+        "job dir should start with source name, got: {dir_name}"
+    );
+}
+
+#[test]
+fn single_video_probe_without_source_name_uses_title_for_subfolder() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=abc123",
+        "My Cool Video Title",
+        "https://cdn.youtube.com/video.mp4",
+        vec![("1080p", "1080p")],
+    );
+
+    let http = fake_http_with_responses(vec![
+        ("https://cdn.youtube.com/video.mp4", b"fake mp4 content"),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=abc123".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    assert_eq!(job_ids.len(), 1);
+
+    // Process to create directories on disk
+    core.process_pending().unwrap();
+
+    let job_dir = root.join("jobs");
+    let entries: Vec<_> = std::fs::read_dir(&job_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1);
+    let dir_name = entries[0].file_name().into_string().unwrap();
+    assert!(
+        dir_name.starts_with("My_Cool_Video_Title"),
+        "single-video job dir should start with video title, got: {dir_name}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: Video and HTTP jobs share queue parity (issue #18)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn probe_created_jobs_share_same_lifecycle_as_direct_jobs() {
+    // A job created via probe-then-confirm should support the same
+    // lifecycle commands (pause, resume) as an enqueue_direct job.
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=abc123",
+        "Video Title",
+        "https://cdn.youtube.com/video.mp4",
+        vec![("1080p", "1080p")],
+    );
+
+    let http = fake_http_with_responses(vec![
+        ("https://cdn.youtube.com/video.mp4", b"fake video content"),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    // Create a probe-confirmed job
+    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=abc123".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection).unwrap();
+    assert_eq!(job_ids.len(), 1);
+
+    let video_job_id = &job_ids[0];
+
+    // Pause the video job
+    core.pause_job(video_job_id).unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobPaused { job_id } if job_id == video_job_id)),
+        "probe-created job should support pause"
+    );
+
+    // Resume the video job
+    core.resume_job(video_job_id).unwrap();
+    let events2 = collect_events(&rx);
+    assert!(
+        events2
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobResumed { job_id } if job_id == video_job_id)),
+        "probe-created job should support resume"
+    );
+
+    // Process — should complete
+    core.process_pending().unwrap();
+    let events3 = collect_events(&rx);
+    assert!(
+        events3
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "probe-created job should complete after resume"
+    );
+}
+
+#[test]
+fn probe_created_jobs_use_same_storage_rules() {
+    // Jobs created via probe and via direct enqueue should both write
+    // to the Library Root / Job Destination.
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=probe",
+        "Probed Video",
+        "https://cdn.youtube.com/probed.mp4",
+        vec![("1080p", "1080p")],
+    );
+
+    // Register both URLs in the HTTP backend
+    let http = fake_http_with_responses(vec![
+        ("https://example.com/file.zip", b"hello this is a test file"),
+        ("https://cdn.youtube.com/probed.mp4", b"probed video content"),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    let root = tmp.path().join("library");
+    core.set_library_root(root.clone()).unwrap();
+
+    // Create a direct job
+    let direct_job_id =
+        enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+
+    // Create a probe-confirmed job
+    core.probe("https://www.youtube.com/watch?v=probe").unwrap();
+    collect_events(&rx);
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=probe".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+    };
+    let probe_job_ids = core.confirm_probe_selection(&selection).unwrap();
+    assert_eq!(probe_job_ids.len(), 1);
+
+    // Process to create directories and complete both jobs
+    let mut done = std::collections::HashSet::new();
+    while done.len() < 2 {
+        process_and_accumulate_completions(&mut core, &rx, &mut done);
+    }
+
+    // Both should be in the same jobs directory
+    let job_dir = root.join("jobs");
+    let entries: Vec<_> = std::fs::read_dir(&job_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "should have 2 job dirs (direct + probe), got {}",
+        entries.len()
+    );
+    assert_eq!(done.len(), 2, "both jobs should complete");
+    assert!(done.contains(&direct_job_id), "direct job should complete");
+    assert!(
+        done.contains(&probe_job_ids[0]),
+        "probe job should complete"
+    );
 }

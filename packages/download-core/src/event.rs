@@ -1,10 +1,25 @@
 //! Core event types — the observable surface for platform shells.
 
+use crate::extractor::MediaItem;
+use std::path::PathBuf;
+
 /// Events emitted by the Download Core.
 ///
 /// Shells consume these in their event loop to update UI state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CoreEvent {
+    /// A probe completed with discovered items and qualities.
+    /// Emitted after `Core::probe()` successfully returns.
+    ProbeResult {
+        url: String,
+        items: Vec<MediaItem>,
+        source_name: Option<String>,
+    },
+    /// A probe failed with an error.
+    ProbeFailed {
+        url: String,
+        error: String,
+    },
     /// A job made progress.
     JobProgress {
         job_id: String,
@@ -15,7 +30,7 @@ pub enum CoreEvent {
     JobCompleted {
         job_id: String,
         bytes_written: u64,
-        path: std::path::PathBuf,
+        path: PathBuf,
     },
     /// A job was paused by the user.
     JobPaused {

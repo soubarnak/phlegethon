@@ -17,6 +17,31 @@ pub enum EnqueueOutcome {
     },
 }
 
+/// Sanitize a source name for use as a folder name.
+///
+/// Replaces non-alphanumeric characters (except `-`, `_`, `.`) with `_`
+/// and trims to a reasonable length.
+pub fn sanitize_folder_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Trim to 64 chars max
+    let truncated: String = sanitized.chars().take(64).collect();
+    let trimmed = truncated.trim_end_matches('_').to_string();
+    if trimmed.is_empty() {
+        "untitled".to_string()
+    } else {
+        trimmed
+    }
+}
+
 /// Internal state of a download job.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JobState {
@@ -40,6 +65,8 @@ pub struct Job {
     /// Per-job bandwidth cap in bytes per process_pending call.
     /// None = uncapped for this job.
     bandwidth_cap: Option<u64>,
+    /// Optional source name for batch/channel subfolder naming.
+    source: Option<String>,
 }
 
 impl Job {
@@ -53,6 +80,35 @@ impl Job {
             destination,
             bytes_received: 0,
             bandwidth_cap: None,
+            source: None,
+        }
+    }
+
+    /// Create a new job for a probe-then-confirm item.
+    ///
+    /// `source_name` is optional; when present (batch/channel), the Job
+    /// Destination is a dedicated subfolder derived from the source.
+    pub fn new_with_source(
+        url: String,
+        library_root: PathBuf,
+        source: Option<String>,
+    ) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        let destination = match &source {
+            Some(name) => {
+                let safe_name = sanitize_folder_name(name);
+                library_root.join("jobs").join(format!("{}-{}", safe_name, &id[..8]))
+            }
+            None => library_root.join("jobs").join(&id),
+        };
+        Self {
+            id,
+            url,
+            state: JobState::Pending,
+            destination,
+            bytes_received: 0,
+            bandwidth_cap: None,
+            source,
         }
     }
 
@@ -66,6 +122,10 @@ impl Job {
 
     pub fn destination(&self) -> &PathBuf {
         &self.destination
+    }
+
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
     }
 
     #[allow(dead_code)]
@@ -104,6 +164,10 @@ impl Job {
 
     pub fn mark_completed(&mut self) {
         self.state = JobState::Completed;
+    }
+
+    pub fn set_source(&mut self, source: Option<String>) {
+        self.source = source;
     }
 
     pub fn pause(&mut self) -> Result<(), String> {
