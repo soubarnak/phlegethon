@@ -223,7 +223,7 @@ public sealed partial class ProbeSheetControl : UserControl
 
     /// <summary>
     /// Fired when the user confirms a selection with their chosen qualities.
-    /// The string is a JSON array of {item_id, quality_id, url}.
+    /// The string is a JSON object: { url, items: [{ item_id, quality_id }] }.
     /// </summary>
     public event EventHandler<string>? Confirmed;
 
@@ -238,28 +238,31 @@ public sealed partial class ProbeSheetControl : UserControl
 
     private async void OnConfirmClick(object sender, RoutedEventArgs e)
     {
-        // Build JSON selection
-        var selections = new List<object>();
+        // Build JSON selection expected by ProbeSelection in download-core.
+        var items = new List<object>();
         foreach (var g in _groups)
         {
             if (g.IsSelected)
             {
-                selections.Add(new
+                items.Add(new
                 {
                     item_id = g.Id,
                     quality_id = g.SelectedQuality?.Id ?? "",
-                    url = g.Url,
                 });
             }
         }
 
-        var selectionsJson = System.Text.Json.JsonSerializer.Serialize(selections);
-        Confirmed?.Invoke(this, selectionsJson);
+        var selectionJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            url = _probeUrl,
+            items,
+        });
+        Confirmed?.Invoke(this, selectionJson);
 
         var dialog = new ContentDialog
         {
             Title = "Downloading",
-            Content = $"{selections.Count} item(s) added to queue.",
+            Content = $"{items.Count} item(s) added to queue.",
             CloseButtonText = "OK",
             XamlRoot = this.XamlRoot,
         };

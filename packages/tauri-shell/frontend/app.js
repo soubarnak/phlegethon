@@ -36,6 +36,8 @@ const probeItems = $("probeItems");
 const probeConfirm = $("probeConfirm");
 const probeCancel = $("probeCancel");
 const probeClose = $("probeClose");
+const probeSelectAll = $("probeSelectAll");
+const probeDeselectAll = $("probeDeselectAll");
 const themeToggle = $("themeToggle");
 const dragOverlay = $("dragOverlay");
 
@@ -158,8 +160,10 @@ async function startProbe(url) {
     probeTitle.textContent = "Probing…";
     probeUrlEl.textContent = url;
     probeItems.innerHTML =
-      '<div class="queue-empty" style="padding:2rem"><span>Analyzing URL…</span></div>';
+      '<div class="queue-empty" style="padding:2rem"><span>Analyzing URL and loading qualities…</span></div>';
     probeConfirm.disabled = true;
+    probeSelectAll.disabled = true;
+    probeDeselectAll.disabled = true;
 
     const result = await getInvoke()("probe_url", { url });
     showProbeResults(url, result);
@@ -177,6 +181,8 @@ function showProbeResults(url, result) {
   if (!result.items || result.items.length === 0) {
     probeItems.innerHTML =
       '<div class="queue-empty" style="padding:2rem"><span>No items found.</span></div>';
+    probeSelectAll.disabled = true;
+    probeDeselectAll.disabled = true;
     return;
   }
 
@@ -186,6 +192,8 @@ function showProbeResults(url, result) {
     sourceName: result.source_name,
   };
   probeConfirm.disabled = false;
+  probeSelectAll.disabled = false;
+  probeDeselectAll.disabled = false;
 
   result.items.forEach((item, idx) => {
     // Format duration
@@ -249,8 +257,9 @@ function showProbeResults(url, result) {
     row.appendChild(qualitiesWrap);
 
     checkbox.addEventListener("change", () => {
-      // When unchecked, deselect all qualities visually
-      if (!checkbox.checked) {
+      if (checkbox.checked) {
+        selectDefaultQualityForRow(qualitiesWrap, defaultQuality);
+      } else {
         qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
           c.classList.remove("selected");
         });
@@ -260,6 +269,44 @@ function showProbeResults(url, result) {
     probeItems.appendChild(row);
   });
 }
+
+function selectDefaultQualityForRow(qualitiesWrap, defaultQuality) {
+  const chips = qualitiesWrap.querySelectorAll(".quality-chip");
+  if (chips.length === 0) return;
+
+  chips.forEach((c) => c.classList.remove("selected"));
+  const target =
+    qualitiesWrap.querySelector(`[data-quality-id="${defaultQuality}"]`) ||
+    chips[0];
+  target.classList.add("selected");
+}
+
+function setAllProbeItemsSelected(selected) {
+  probeItems.querySelectorAll(".probe-item").forEach((row) => {
+    const checkbox = row.querySelector(".probe-item-checkbox");
+    const qualitiesWrap = row.querySelector(".probe-item-qualities");
+    const itemIndex = parseInt(checkbox.dataset.itemIndex, 10);
+    const item = state.pendingProbe?.items[itemIndex];
+    if (!checkbox || !qualitiesWrap || !item) return;
+
+    checkbox.checked = selected;
+    if (selected) {
+      selectDefaultQualityForRow(
+        qualitiesWrap,
+        findDefaultQuality(item.qualities),
+      );
+    } else {
+      qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
+        c.classList.remove("selected");
+      });
+    }
+  });
+}
+
+probeSelectAll.addEventListener("click", () => setAllProbeItemsSelected(true));
+probeDeselectAll.addEventListener("click", () =>
+  setAllProbeItemsSelected(false),
+);
 
 function findDefaultQuality(qualities) {
   if (!qualities || qualities.length === 0) return null;
@@ -288,9 +335,18 @@ probeConfirm.addEventListener("click", async () => {
     const checkbox = row.querySelector(".probe-item-checkbox");
     if (!checkbox.checked) return;
 
-    const itemIndex = parseInt(checkbox.dataset.itemIndex);
+    const itemIndex = parseInt(checkbox.dataset.itemIndex, 10);
     const item = state.pendingProbe.items[itemIndex];
-    const selectedChip = row.querySelector(".quality-chip.selected");
+    let selectedChip = row.querySelector(".quality-chip.selected");
+
+    if (item && !selectedChip && item.qualities?.length) {
+      const qualitiesWrap = row.querySelector(".probe-item-qualities");
+      selectDefaultQualityForRow(
+        qualitiesWrap,
+        findDefaultQuality(item.qualities),
+      );
+      selectedChip = row.querySelector(".quality-chip.selected");
+    }
 
     if (item && selectedChip) {
       selectedItems.push({
@@ -316,14 +372,13 @@ probeConfirm.addEventListener("click", async () => {
     probeOverlay.classList.remove("open");
     state.pendingProbe = null;
 
-    // Add jobs to queue
+    await refreshJobs();
     jobIds.forEach((id) => {
-      addJobToState(id, selection.url, "");
+      const job = state.jobs.find((j) => j.job_id === id);
+      if (job) job.status = "downloading";
     });
     renderQueue();
-
-    // Start processing
-    invoke("process_pending").catch(() => {});
+    await runProcessPendingOnce();
   } catch (err) {
     showError(`Confirmation failed: ${err}`);
   }
@@ -475,6 +530,9 @@ async function handleJobAction(action, jobId) {
     }
     // Refresh state
     await refreshJobs();
+    if (action === "resume" || action === "retry") {
+      runProcessPendingOnce();
+    }
   } catch (err) {
     showError(`${action} failed: ${err}`);
   }
@@ -483,17 +541,41 @@ async function handleJobAction(action, jobId) {
 async function refreshJobs() {
   try {
     const jobs = await getInvoke()("list_jobs");
-    // Merge server state into our local state
-    jobs.forEach((serverJob) => {
-      const local = state.jobs.find((j) => j.job_id === serverJob.job_id);
-      if (local) {
-        Object.assign(local, serverJob);
-      }
-    });
+    state.jobs = jobs;
     renderQueue();
+    runProcessPendingOnce();
+  } catch (err) {
+    showError(`Failed to load queue: ${err}`);
+  }
+}
+
+// ---- Process pending loop (matches WinUI ~5 Hz) ----
+let processPendingTimer = null;
+let processPendingInFlight = false;
+
+function hasPendingJobs() {
+  return state.jobs.some((job) => job.status === "pending");
+}
+
+async function runProcessPendingOnce() {
+  if (processPendingInFlight || !hasPendingJobs()) return;
+
+  processPendingInFlight = true;
+  try {
+    await getInvoke()("process_pending");
   } catch {
     /* silent */
+  } finally {
+    processPendingInFlight = false;
   }
+}
+
+function startProcessPendingLoop() {
+  if (processPendingTimer) return;
+
+  processPendingTimer = setInterval(() => {
+    runProcessPendingOnce();
+  }, 500);
 }
 
 // ---- Event polling (pull-based) ----
@@ -575,17 +657,19 @@ function showError(msg) {
 }
 
 // ---- Init ----
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   urlInput.focus();
 
   try {
     getInvoke();
   } catch (err) {
     showError(String(err.message || err));
+    return;
   }
 
   pollEvents();
-  refreshJobs();
+  startProcessPendingLoop();
+  await refreshJobs();
 });
 
 window.addEventListener("error", (e) => {

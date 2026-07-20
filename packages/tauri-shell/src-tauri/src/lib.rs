@@ -8,6 +8,7 @@ use download_core::{
 };
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
@@ -19,6 +20,7 @@ struct AppState {
     core: Mutex<Core>,
     event_rx: Mutex<crossbeam_channel::Receiver<CoreEvent>>,
     library_root: Mutex<Option<PathBuf>>,
+    process_pending_busy: AtomicBool,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             core: Mutex::new(core),
             event_rx: Mutex::new(rx),
             library_root: Mutex::new(None),
+            process_pending_busy: AtomicBool::new(false),
         }
     }
 }
@@ -186,8 +189,23 @@ fn confirm_probe_selection(
 #[tauri::command]
 fn process_pending(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
     // yt-dlp downloads can take minutes — don't block the UI invoke thread.
-    let _ = state; // ensure AppState is managed before spawn
+    if state
+        .process_pending_busy
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return Ok(());
+    }
+
     std::thread::spawn(move || {
+        let clear_busy = || {
+            if let Some(state) = app.try_state::<AppState>() {
+                state
+                    .process_pending_busy
+                    .store(false, Ordering::Release);
+            }
+        };
+
         if let Some(state) = app.try_state::<AppState>() {
             if let Ok(mut core) = state.core.lock() {
                 if let Err(e) = core.process_pending() {
@@ -195,8 +213,16 @@ fn process_pending(app: tauri::AppHandle, state: State<AppState>) -> Result<(), 
                 }
             }
         }
+
+        clear_busy();
     });
     Ok(())
+}
+
+#[tauri::command]
+fn list_jobs(state: State<AppState>) -> Result<Vec<download_core::JobSnapshot>, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.list_job_snapshots())
 }
 
 #[tauri::command]
@@ -287,6 +313,7 @@ pub fn run() {
             probe_url,
             confirm_probe_selection,
             process_pending,
+            list_jobs,
             pause_job,
             resume_job,
             retry_job,

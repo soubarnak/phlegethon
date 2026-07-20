@@ -29,7 +29,7 @@ pub use extractor::{
     ProbeSelection, Quality,
 };
 pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
-pub use job::EnqueueOutcome;
+pub use job::{EnqueueOutcome, JobState};
 pub use mirror_set::MirrorSet;
 
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
@@ -43,6 +43,18 @@ use transfer::{
     execute_segment_fetch, execute_single_fetch, make_job_bucket, SegmentFetchParams,
     SingleFetchParams,
 };
+
+/// Serializable job row for platform shells.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct JobSnapshot {
+    pub job_id: String,
+    pub url: String,
+    pub destination: String,
+    pub status: String,
+    pub bytes_downloaded: u64,
+    pub total_bytes: Option<u64>,
+    pub title: String,
+}
 
 /// Debounce interval for progress-only queue flushes.
 const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -369,6 +381,34 @@ impl Core {
         Ok(())
     }
 
+    /// List current jobs for shell queue UIs.
+    pub fn list_job_snapshots(&self) -> Vec<JobSnapshot> {
+        self.jobs
+            .iter()
+            .map(|job| {
+                let title = job
+                    .source()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| job.filename().to_string());
+                JobSnapshot {
+                    job_id: job.id().to_string(),
+                    url: job.url().to_string(),
+                    destination: job.destination().display().to_string(),
+                    status: match job.state() {
+                        JobState::Pending => "pending",
+                        JobState::Paused => "paused",
+                        JobState::Failed => "failed",
+                        JobState::Completed => "completed",
+                    }
+                    .to_string(),
+                    bytes_downloaded: job.bytes_received(),
+                    total_bytes: None,
+                    title,
+                }
+            })
+            .collect()
+    }
+
     // -----------------------------------------------------------------------
     // Bandwidth cap
     // -----------------------------------------------------------------------
@@ -670,6 +710,14 @@ impl Core {
             };
 
             if let Some(format) = extractor_format {
+                self.event_tx
+                    .send(CoreEvent::JobProgress {
+                        job_id: job_id.clone(),
+                        bytes_downloaded: 0,
+                        total_bytes: None,
+                    })
+                    .map_err(|_| "event channel closed".to_string())?;
+
                 match self.extractor.download(&url, &format, &dest) {
                     Ok(path) => {
                         let bytes = std::fs::metadata(&path)

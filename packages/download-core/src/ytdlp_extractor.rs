@@ -206,15 +206,20 @@ impl YtDlpExtractorToolchain {
     /// Build the argv for a yt-dlp probe invocation (test seam).
     ///
     /// `--flat-playlist` lists playlist/channel/user entries without fully
-    /// extracting each video (Probe-then-Confirm lists items first; qualities
-    /// per entry default to "best" until a dedicated per-item probe exists).
+    /// extracting each video. Per-item qualities are resolved afterward via
+    /// `enrich_playlist_item_qualities`.
     /// `--plugin-dirs` is included when configured (Launch Site Extractor Plugins).
     pub(crate) fn probe_args(&self, url: &str) -> Vec<String> {
-        let mut args = vec![
-            "-J".to_string(),
-            "--no-warnings".to_string(),
-            "--flat-playlist".to_string(),
-        ];
+        self.probe_args_for(url, true)
+    }
+
+    fn probe_args_for(&self, url: &str, flat_playlist: bool) -> Vec<String> {
+        let mut args = vec!["-J".to_string(), "--no-warnings".to_string()];
+        if flat_playlist {
+            args.push("--flat-playlist".to_string());
+        } else {
+            args.push("--no-playlist".to_string());
+        }
         for dir in &self.config.plugin_dirs {
             args.push("--plugin-dirs".to_string());
             args.push(dir.display().to_string());
@@ -225,8 +230,12 @@ impl YtDlpExtractorToolchain {
 
     /// Run yt-dlp with `-J` and return the raw JSON stdout.
     fn run_probe(&self, url: &str) -> Result<String, String> {
+        self.run_probe_json(url, true)
+    }
+
+    fn run_probe_json(&self, url: &str, flat_playlist: bool) -> Result<String, String> {
         let mut cmd = Command::new(&self.config.binary_path);
-        for arg in self.probe_args(url) {
+        for arg in self.probe_args_for(url, flat_playlist) {
             cmd.arg(arg);
         }
 
@@ -248,7 +257,10 @@ impl YtDlpExtractorToolchain {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("yt-dlp probe failed (exit {:?}): {stderr}", output.status.code()));
+            return Err(format!(
+                "yt-dlp probe failed (exit {:?}): {stderr}",
+                output.status.code()
+            ));
         }
 
         let stdout = String::from_utf8(output.stdout)
@@ -259,6 +271,62 @@ impl YtDlpExtractorToolchain {
         }
 
         Ok(stdout)
+    }
+
+    /// Probe a single video URL and return selectable qualities.
+    fn probe_item_qualities(&self, item_url: &str) -> Vec<Quality> {
+        match self.run_probe_json(item_url, false) {
+            Ok(json) => match serde_json::from_str::<YtDlpVideoInfo>(&json) {
+                Ok(info) => {
+                    let qualities = self.formats_to_qualities(&info.formats.unwrap_or_default());
+                    if qualities.is_empty() {
+                        launch_site_standard_qualities()
+                    } else {
+                        qualities
+                    }
+                }
+                Err(_) => launch_site_standard_qualities(),
+            },
+            Err(_) => launch_site_standard_qualities(),
+        }
+    }
+
+    /// Resolve real per-video qualities for flat playlist entries (parallel).
+    fn enrich_playlist_item_qualities(&self, items: &mut [MediaItem]) {
+        use std::sync::Mutex;
+
+        if items.is_empty() {
+            return;
+        }
+
+        let results = Mutex::new(Vec::new());
+        let workers = 4.min(items.len());
+        let chunk = items.len().div_ceil(workers);
+
+        std::thread::scope(|scope| {
+            for worker in 0..workers {
+                let start = worker * chunk;
+                if start >= items.len() {
+                    break;
+                }
+                let end = (start + chunk).min(items.len());
+                let batch: Vec<(usize, String)> = (start..end)
+                    .map(|idx| (idx, items[idx].url.clone()))
+                    .collect();
+
+                scope.spawn(|| {
+                    let mut local = Vec::with_capacity(batch.len());
+                    for (idx, item_url) in batch {
+                        local.push((idx, self.probe_item_qualities(&item_url)));
+                    }
+                    results.lock().unwrap().extend(local);
+                });
+            }
+        });
+
+        for (idx, qualities) in results.into_inner().unwrap() {
+            items[idx].qualities = qualities;
+        }
     }
 
     /// Test-only alias for `parse_probe_result` — used by integration tests.
@@ -318,6 +386,8 @@ impl YtDlpExtractorToolchain {
             let from_title = info.title.trim();
             if !from_title.is_empty() {
                 Some(from_title.to_string())
+            } else if !info.id.is_empty() {
+                Some(info.id.clone())
             } else {
                 info.playlist_title.clone()
             }
@@ -327,15 +397,6 @@ impl YtDlpExtractorToolchain {
         let mut items = Vec::new();
 
         for entry in info.entries.iter().flatten().flatten() {
-            let Some(id) = entry.id.as_deref().filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            let title = entry
-                .title
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(id)
-                .to_string();
             let Some(item_url) = entry
                 .url
                 .clone()
@@ -346,9 +407,14 @@ impl YtDlpExtractorToolchain {
                 continue;
             };
 
+            let Some(id) = playlist_entry_id(entry, &item_url) else {
+                continue;
+            };
+            let title = playlist_entry_title(entry, &id);
+
             let qualities = match &entry.formats {
                 Some(formats) if !formats.is_empty() => self.formats_to_qualities(formats),
-                _ => default_flat_qualities(),
+                _ => launch_site_standard_qualities(),
             };
 
             items.push(MediaItem {
@@ -481,7 +547,10 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         let json = self.run_probe(url)?;
 
         // Parse into ProbeResult
-        let result = self.parse_probe_result(&json, url)?;
+        let mut result = self.parse_probe_result(&json, url)?;
+        if result.items.len() > 1 {
+            self.enrich_playlist_item_qualities(&mut result.items);
+        }
 
         Ok(result)
     }
@@ -671,12 +740,63 @@ fn item_id_prefix(extractor_key: &str) -> &'static str {
     }
 }
 
-/// Default quality list for flat playlist entries (no formats yet).
+/// Default quality list for flat playlist entries before per-item enrichment.
 fn default_flat_qualities() -> Vec<Quality> {
-    vec![Quality {
-        id: "best".to_string(),
-        label: "Best available".to_string(),
-    }]
+    launch_site_standard_qualities()
+}
+
+/// Common resolution presets for Launch Sites when formats are not yet known.
+fn launch_site_standard_qualities() -> Vec<Quality> {
+    ["2160p", "1080p", "720p", "480p", "360p", "240p", "best"]
+        .iter()
+        .map(|id| Quality {
+            id: (*id).to_string(),
+            label: if *id == "best" {
+                "Best available".to_string()
+            } else {
+                format!("{id}")
+            },
+        })
+        .collect()
+}
+
+/// Derive a stable entry id when yt-dlp flat-playlist output omits `id`.
+fn playlist_entry_id(entry: &YtDlpEntry, item_url: &str) -> Option<String> {
+    if let Some(id) = entry.id.as_deref().filter(|s| !s.is_empty()) {
+        return Some(id.to_string());
+    }
+
+    if let Ok(parsed) = url::Url::parse(item_url) {
+        if let Some(video_id) = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "v")
+            .map(|(_, value)| value.into_owned())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(video_id);
+        }
+
+        if let Some(slug) = parsed
+            .path_segments()
+            .and_then(|segments| segments.filter(|segment| !segment.is_empty()).last())
+            .map(|segment| segment.to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(slug);
+        }
+    }
+
+    None
+}
+
+/// Title for a flat playlist entry, falling back to a humanized id/slug.
+fn playlist_entry_title(entry: &YtDlpEntry, id: &str) -> String {
+    entry
+        .title
+        .as_deref()
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| id.replace('-', " "))
 }
 
 /// A single format entry from yt-dlp's format list.
@@ -1168,6 +1288,33 @@ pub(crate) fn canned_xhamster_user_json() -> &'static str {
 }"#
 }
 
+/// Canned yt-dlp flat playlist for xHamster creator pages where entries
+/// only include URLs (no `id` / `title`), matching live `--flat-playlist` output.
+#[cfg(test)]
+pub(crate) fn canned_xhamster_user_flat_urls_only_json() -> &'static str {
+    r#"{
+  "_type": "playlist",
+  "id": "your-eshita",
+  "title": "",
+  "extractor": "xhamster:user",
+  "extractor_key": "XHamsterUser",
+  "webpage_url": "https://xhamster.com/creators/your-eshita",
+  "original_url": "https://xhamster.com/creators/your-eshita",
+  "entries": [
+    {
+      "_type": "url",
+      "url": "https://xhamster.com/videos/creator-video-a-abc123",
+      "ie_key": "XHamster"
+    },
+    {
+      "_type": "url",
+      "url": "https://xhamster.com/videos/creator-video-b-def456",
+      "ie_key": "XHamster"
+    }
+  ]
+}"#
+}
+
 // ---------------------------------------------------------------------------
 // Fake YtDlpProcess (for tests that don't want to go through FakeExtractorToolchain)
 // ---------------------------------------------------------------------------
@@ -1610,6 +1757,34 @@ mod tests {
                 .iter()
                 .any(|q| q.id == "best"),
             "flat user entries need default quality"
+        );
+    }
+
+    #[test]
+    fn parse_xhamster_user_flat_urls_without_ids_returns_multi_item_probe() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_xhamster_user_flat_urls_only_json(),
+                "https://xhamster.com/creators/your-eshita",
+            )
+            .unwrap();
+
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.source_name, Some("your-eshita".to_string()));
+        assert_eq!(
+            result.items[0].id,
+            "xh-creator-video-a-abc123",
+            "id should be derived from URL slug"
+        );
+        assert_eq!(
+            result.items[0].title,
+            "creator video a abc123",
+            "title should be humanized from slug when missing"
+        );
+        assert_eq!(
+            result.items[1].url,
+            "https://xhamster.com/videos/creator-video-b-def456"
         );
     }
 
