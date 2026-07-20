@@ -89,6 +89,8 @@ pub struct Job {
     bandwidth_cap: Option<u64>,
     /// Set by `pause_job` to stop an in-flight transfer without holding Core lock.
     pause_requested: Arc<AtomicBool>,
+    /// Set by `discard_job` so an in-flight stop finalizes as Discard, not Pause.
+    discard_requested: Arc<AtomicBool>,
     /// True while a transfer is actively writing body bytes for this job.
     transfer_active: Arc<AtomicBool>,
     /// Optional source name for batch/channel subfolder naming.
@@ -113,6 +115,7 @@ impl Job {
             bytes_received: 0,
             bandwidth_cap: None,
             pause_requested: Arc::new(AtomicBool::new(false)),
+            discard_requested: Arc::new(AtomicBool::new(false)),
             transfer_active: Arc::new(AtomicBool::new(false)),
             source: None,
             extractor_format: None,
@@ -146,6 +149,7 @@ impl Job {
             bytes_received: 0,
             bandwidth_cap: None,
             pause_requested: Arc::new(AtomicBool::new(false)),
+            discard_requested: Arc::new(AtomicBool::new(false)),
             transfer_active: Arc::new(AtomicBool::new(false)),
             source,
             extractor_format: None,
@@ -164,6 +168,7 @@ impl Job {
             bytes_received: persisted.bytes_received,
             bandwidth_cap: persisted.bandwidth_cap,
             pause_requested: Arc::new(AtomicBool::new(false)),
+            discard_requested: Arc::new(AtomicBool::new(false)),
             transfer_active: Arc::new(AtomicBool::new(false)),
             source: persisted.source,
             extractor_format: persisted.extractor_format,
@@ -302,12 +307,24 @@ impl Job {
         &self.pause_requested
     }
 
+    pub fn discard_requested(&self) -> &Arc<AtomicBool> {
+        &self.discard_requested
+    }
+
+    pub fn is_discard_requested(&self) -> bool {
+        self.discard_requested.load(Ordering::Acquire)
+    }
+
     pub fn transfer_active(&self) -> &Arc<AtomicBool> {
         &self.transfer_active
     }
 
     pub fn clear_pause_requested(&self) {
         self.pause_requested.store(false, Ordering::Release);
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.state == JobState::Completed
     }
 
     pub fn mark_completed(&mut self) {

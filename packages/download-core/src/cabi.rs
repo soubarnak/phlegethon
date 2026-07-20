@@ -402,7 +402,34 @@ pub unsafe extern "C" fn core_pause_job(
 
 lifecycle_cmd!(core_resume_job, resume_job);
 lifecycle_cmd!(core_retry_job, retry_job);
-lifecycle_cmd!(core_discard_job, discard_job);
+
+#[no_mangle]
+pub unsafe extern "C" fn core_discard_job(
+    handle: *mut Core,
+    job_id: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let jid = cstr_to_str(job_id);
+
+        // Signal stop without waiting on the Core mutex held by process_pending.
+        if ctx.job_signals.signal_discard_stop(jid) {
+            return 0;
+        }
+
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_mut().unwrap();
+        match core.discard_job(jid) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Processing

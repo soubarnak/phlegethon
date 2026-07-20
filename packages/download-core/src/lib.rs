@@ -30,6 +30,7 @@ pub use extractor::{
 };
 pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
 pub use job::{EnqueueOutcome, JobState};
+pub use job_signals::JobSignals;
 pub use mirror_set::MirrorSet;
 
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
@@ -148,6 +149,7 @@ impl Core {
         self.job_signals.register(
             job.id(),
             job.pause_requested().clone(),
+            job.discard_requested().clone(),
             job.transfer_active().clone(),
         );
     }
@@ -359,9 +361,36 @@ impl Core {
 
     /// Discard a job from the queue.  Emits `CoreEvent::JobDiscarded`.
     ///
-    /// Once discarded the job is removed and cannot be paused/resumed/retried.
+    /// Unfinished jobs (Pending / Paused / Failed, including in-flight) are
+    /// stopped, removed from the queue, and have their Job Destination files
+    /// deleted.  Completed jobs lose only the queue row — files stay on disk.
+    ///
+    /// Once discarded the job cannot be paused/resumed/retried.
     /// Discarding an already-discarded (or non-existent) job returns an error.
     pub fn discard_job(&mut self, job_id: &str) -> Result<(), String> {
+        let pos = self
+            .jobs
+            .iter()
+            .position(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+
+        let completed = self.jobs[pos].is_completed();
+        let destination = self.jobs[pos].destination().to_path_buf();
+
+        if self.job_signals.signal_discard_stop(job_id) {
+            // Transfer thread will finalize discard when the body read stops.
+            return Ok(());
+        }
+
+        self.finalize_discard(job_id, completed, &destination)
+    }
+
+    fn finalize_discard(
+        &mut self,
+        job_id: &str,
+        completed: bool,
+        destination: &Path,
+    ) -> Result<(), String> {
         let pos = self
             .jobs
             .iter()
@@ -371,6 +400,12 @@ impl Core {
         self.jobs.remove(pos);
         self.job_signals.unregister(job_id);
 
+        if !completed && destination.exists() {
+            std::fs::remove_dir_all(destination).map_err(|e| {
+                format!("delete Job Destination {destination:?}: {e}")
+            })?;
+        }
+
         self.event_tx
             .send(CoreEvent::JobDiscarded {
                 job_id: job_id.to_string(),
@@ -379,6 +414,27 @@ impl Core {
 
         self.persist_queue_now()?;
         Ok(())
+    }
+
+    /// After an in-flight body read stops, either Discard or Pause.
+    fn finalize_stop_after_transfer(&mut self, job_id: &str) -> Result<(), String> {
+        let (discard, completed, destination) = {
+            let job = self
+                .jobs
+                .iter()
+                .find(|j| j.id() == job_id)
+                .ok_or_else(|| format!("job {job_id} not found"))?;
+            (
+                job.is_discard_requested(),
+                job.is_completed(),
+                job.destination().to_path_buf(),
+            )
+        };
+        if discard {
+            self.finalize_discard(job_id, completed, &destination)
+        } else {
+            self.finalize_pause(job_id)
+        }
     }
 
     /// List current jobs for shell queue UIs.
@@ -802,7 +858,7 @@ impl Core {
                         Some((total_size, _bytes_written, paused)) => {
                             if paused {
                                 self.sync_job_progress(&job_id, bytes_received)?;
-                                self.finalize_pause(&job_id)?;
+                                self.finalize_stop_after_transfer(&job_id)?;
                                 continue;
                             }
 
@@ -910,7 +966,7 @@ impl Core {
 
             if outcome.paused {
                 self.sync_job_progress(&job_id, bytes_received)?;
-                self.finalize_pause(&job_id)?;
+                self.finalize_stop_after_transfer(&job_id)?;
                 continue;
             }
 

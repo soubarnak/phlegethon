@@ -487,6 +487,248 @@ fn discard_removes_job_from_queue_and_emits_discarded_event() {
 }
 
 #[test]
+fn discard_unfinished_job_deletes_job_destination_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/partial.zip");
+    let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
+    std::fs::create_dir_all(&job_dir).unwrap();
+    let partial = job_dir.join("partial.zip.part");
+    std::fs::write(&partial, b"orphan-bytes").unwrap();
+    assert!(partial.exists());
+
+    core.pause_job(&job_id).unwrap();
+    core.discard_job(&job_id).unwrap();
+
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)),
+        "should emit JobDiscarded, got {events:?}"
+    );
+    assert!(
+        core.list_job_snapshots().iter().all(|j| j.job_id != job_id),
+        "discarded job must leave the queue"
+    );
+    assert!(
+        !job_dir.exists(),
+        "unfinished Discard must delete Job Destination including partials"
+    );
+}
+
+#[test]
+fn discard_failed_job_deletes_job_destination_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(FailingHttp));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/fail.zip");
+    core.process_pending().unwrap();
+
+    let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
+    std::fs::create_dir_all(&job_dir).unwrap();
+    std::fs::write(job_dir.join("fail.zip.part"), b"partial").unwrap();
+
+    collect_events(&rx);
+    core.discard_job(&job_id).unwrap();
+
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)),
+        "should emit JobDiscarded, got {events:?}"
+    );
+    assert!(
+        !job_dir.exists(),
+        "Failed Discard must delete Job Destination including partials"
+    );
+}
+
+#[test]
+fn discard_completed_job_keeps_files_on_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.process_pending().unwrap();
+
+    let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
+    let final_path = job_dir.join("file.zip");
+    assert!(final_path.exists(), "completed job should have written the file");
+    let bytes_before = std::fs::read(&final_path).unwrap();
+
+    collect_events(&rx); // drain completion events
+    core.discard_job(&job_id).unwrap();
+
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)),
+        "should emit JobDiscarded, got {events:?}"
+    );
+    assert!(
+        core.list_job_snapshots().iter().all(|j| j.job_id != job_id),
+        "completed Discard must still remove the queue row"
+    );
+    assert!(
+        final_path.exists(),
+        "Completed Discard must keep files on disk"
+    );
+    assert_eq!(
+        std::fs::read(&final_path).unwrap(),
+        bytes_before,
+        "Completed Discard must not alter finished file contents"
+    );
+}
+
+#[test]
+fn discard_during_in_flight_transfer_stops_and_deletes_partials() {
+    #[derive(Clone)]
+    struct SlowNoRangeFakeHttp {
+        responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+        bytes_written: Arc<Mutex<u64>>,
+    }
+
+    impl HttpBackend for SlowNoRangeFakeHttp {
+        fn fetch(
+            &self,
+            url: &str,
+            range: Option<std::ops::Range<u64>>,
+            sink: &mut dyn Write,
+        ) -> Result<FetchResult, String> {
+            let responses = self.responses.lock().unwrap();
+            let full_body = responses
+                .get(url)
+                .ok_or_else(|| format!("no fake response for {url}"))?;
+            let total = full_body.len() as u64;
+            let data = match range {
+                Some(r) => {
+                    let start = r.start.min(total);
+                    let end = r.end.min(total).max(start);
+                    &full_body[start as usize..end as usize]
+                }
+                None => full_body.as_slice(),
+            };
+
+            let mut written = 0u64;
+            for byte in data {
+                let n = sink
+                    .write(std::slice::from_ref(byte))
+                    .map_err(|e| format!("sink write: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                written += n as u64;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            *self.bytes_written.lock().unwrap() = written;
+            Ok(FetchResult {
+                total_length: total,
+                bytes_written: written,
+            })
+        }
+
+        fn supports_range(&self, _url: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+
+        fn file_size(&self, url: &str) -> Result<u64, String> {
+            let responses = self.responses.lock().unwrap();
+            Ok(responses
+                .get(url)
+                .map(|b| b.len() as u64)
+                .ok_or_else(|| format!("no fake response for {url}"))?)
+        }
+    }
+
+    let content = vec![b'D'; 256];
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "https://example.com/discard-mid.zip".into(),
+        content.clone(),
+    );
+    let bytes_written = Arc::new(Mutex::new(0u64));
+    let http = SlowNoRangeFakeHttp {
+        responses: Arc::new(Mutex::new(map)),
+        bytes_written: bytes_written.clone(),
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx, _clock) = make_capped_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/discard-mid.zip");
+    let signals = core.job_signals();
+    let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
+
+    let core = Arc::new(Mutex::new(core));
+    let rx = Arc::new(rx);
+    let job_for_discard = job_id.clone();
+
+    let worker = {
+        let core = core.clone();
+        let rx = rx.clone();
+        std::thread::spawn(move || {
+            let mut guard = core.lock().unwrap();
+            guard.process_pending().unwrap();
+            collect_events(&rx)
+        })
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Mimic shell Discard: signal stop without waiting for the Core mutex.
+    assert!(
+        signals.signal_discard_stop(&job_for_discard),
+        "in-flight Discard should see an active transfer"
+    );
+
+    let events = worker.join().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)),
+        "discard during transfer should emit JobDiscarded, got: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "discarded transfer must not claim success"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobPaused { .. })),
+        "discarded transfer must not emit JobPaused"
+    );
+
+    let snapshots = core.lock().unwrap().list_job_snapshots();
+    assert!(
+        snapshots.iter().all(|j| j.job_id != job_id),
+        "discarded in-flight job must leave the queue"
+    );
+    assert!(
+        !job_dir.exists(),
+        "in-flight Discard must delete Job Destination including partials"
+    );
+    let written = *bytes_written.lock().unwrap();
+    assert!(
+        written > 0,
+        "some bytes should have been written before Discard stopped the transfer"
+    );
+    assert!(
+        written < content.len() as u64,
+        "Discard must stop promptly before the full body finishes, got {written}"
+    );
+}
+
+#[test]
 fn pause_on_completed_job_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, _rx) = make_core(Box::new(fake_http()));

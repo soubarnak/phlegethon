@@ -4,12 +4,12 @@
 
 use crossbeam_channel::TryRecvError;
 use download_core::{
-    Core, CoreEvent, EnqueueOutcome, ProbeSelection, ProdHttpBackend,
+    Core, CoreEvent, EnqueueOutcome, JobSignals, ProbeSelection, ProdHttpBackend,
 };
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 
 // ---------------------------------------------------------------------------
@@ -18,6 +18,7 @@ use tauri::{Manager, State};
 
 struct AppState {
     core: Mutex<Core>,
+    job_signals: Arc<JobSignals>,
     event_rx: Mutex<crossbeam_channel::Receiver<CoreEvent>>,
     library_root: Mutex<Option<PathBuf>>,
     process_pending_busy: AtomicBool,
@@ -35,10 +36,17 @@ impl AppState {
         }
         .with_sidecar_plugins(dirs_data_dir());
         let extractor = Box::new(download_core::YtDlpExtractorToolchain::new(config));
-        let (core, rx) = Core::new(http, extractor);
+        let job_signals = Arc::new(JobSignals::default());
+        let (core, rx) = Core::new_with_clock_and_signals(
+            http,
+            extractor,
+            Arc::new(download_core::SystemClock::new()),
+            job_signals.clone(),
+        );
 
         Self {
             core: Mutex::new(core),
+            job_signals,
             event_rx: Mutex::new(rx),
             library_root: Mutex::new(None),
             process_pending_busy: AtomicBool::new(false),
@@ -245,6 +253,11 @@ fn retry_job(state: State<AppState>, job_id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn discard_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+    // Signal stop without blocking on process_pending's Core mutex.
+    if state.job_signals.signal_discard_stop(&job_id) {
+        return Ok(());
+    }
+
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.discard_job(&job_id)
 }
