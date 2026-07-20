@@ -249,15 +249,27 @@ fn set_library_root(state: State<AppState>, path: String) -> Result<String, Stri
 }
 
 #[tauri::command]
-fn pick_folder(app: tauri::AppHandle, title: Option<String>) -> Result<Option<String>, String> {
+async fn pick_folder(
+    app: tauri::AppHandle,
+    title: Option<String>,
+) -> Result<Option<String>, String> {
     let label = title.unwrap_or_else(|| "Choose folder".to_string());
-    // Command runs off the UI event loop — blocking picker is correct here.
-    let folder = app
-        .dialog()
+    // Non-blocking picker + channel: avoids blocking_pick_* wedging the
+    // WebKitGTK event loop when rfd used gtk3.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    app.dialog()
         .file()
         .set_title(label)
-        .blocking_pick_folder();
-    Ok(folder.and_then(|path| path.into_path().ok()).map(|p| p.display().to_string()))
+        .pick_folder(move |folder| {
+            let _ = tx.send(folder);
+        });
+    let folder = tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(folder
+        .and_then(|path| path.into_path().ok())
+        .map(|p| p.display().to_string()))
 }
 
 #[tauri::command]

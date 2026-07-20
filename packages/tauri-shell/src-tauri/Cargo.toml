@@ -24,4 +24,6 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2", features = [] }
 tauri-plugin-log = "2"
-tauri-plugin-dialog = "2"
+# Default feature is rfd/gtk3 — deadlocks with WebKitGTK (Tauri Linux) because both
+# own the GTK main loop. xdg-portal uses ashpd/D-Bus instead.
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
