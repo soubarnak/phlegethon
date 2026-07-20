@@ -810,8 +810,8 @@ impl Core {
                 )
             })?;
 
-            // Validate quality exists
-            let _quality = item
+            // Validate quality exists; carry toolchain size onto the job when known.
+            let quality = item
                 .qualities
                 .iter()
                 .find(|q| q.id == sel.quality_id)
@@ -838,6 +838,9 @@ impl Core {
             };
             // Launch Site media is fetched by yt-dlp, not plain HTTP of the page URL.
             job.set_extractor_format(&sel.quality_id);
+            if let Some(size) = quality.size_bytes {
+                job.set_total_bytes(Some(size));
+            }
 
             job_ids.push(job.id().to_string());
             self.register_job_signals(&job);

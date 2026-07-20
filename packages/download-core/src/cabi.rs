@@ -732,9 +732,10 @@ impl Serialize for crate::extractor::MediaItem {
 impl Serialize for crate::extractor::Quality {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("Quality", 2)?;
+        let mut st = s.serialize_struct("Quality", 3)?;
         st.serialize_field("id", &self.id)?;
         st.serialize_field("label", &self.label)?;
+        st.serialize_field("size_bytes", &self.size_bytes)?;
         st.end()
     }
 }

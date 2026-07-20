@@ -465,8 +465,11 @@ impl YtDlpExtractorToolchain {
         for format in formats {
             let label = self.format_label(format);
 
-            // Skip if we already have this quality label
-            if seen_labels.contains(&label) {
+            // Same label already kept: upgrade missing size if this format has one.
+            if let Some(idx) = seen_labels.iter().position(|l| l == &label) {
+                if result[idx].size_bytes.is_none() {
+                    result[idx].size_bytes = usable_format_size(format);
+                }
                 continue;
             }
 
@@ -503,6 +506,7 @@ impl YtDlpExtractorToolchain {
             result.push(Quality {
                 id: quality_id,
                 label,
+                size_bytes: usable_format_size(format),
             });
         }
 
@@ -846,8 +850,17 @@ fn launch_site_standard_qualities() -> Vec<Quality> {
             } else {
                 format!("{id}")
             },
+            size_bytes: None,
         })
         .collect()
+}
+
+/// Prefer exact `filesize`, else positive `filesize_approx`; drop zero/absent.
+fn usable_format_size(format: &YtDlpFormat) -> Option<u64> {
+    format
+        .filesize
+        .filter(|&n| n > 0)
+        .or_else(|| format.filesize_approx.filter(|&n| n > 0))
 }
 
 /// Derive a stable entry id when yt-dlp flat-playlist output omits `id`.
@@ -2195,6 +2208,82 @@ mod tests {
     }
 
     #[test]
+    fn formats_to_qualities_carries_filesize_as_size_bytes() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let formats = vec![YtDlpFormat {
+            format_id: "18".into(),
+            format_note: Some("360p".into()),
+            ext: Some("mp4".into()),
+            height: Some(360),
+            width: Some(640),
+            tbr: Some(250000.0),
+            vcodec: Some("avc1".into()),
+            acodec: Some("mp4a".into()),
+            resolution: Some("640x360".into()),
+            url: Some("https://example.com/v.mp4".into()),
+            filesize: Some(7_510_000),
+            filesize_approx: None,
+            asr: None,
+            fps: Some(30.0),
+            audio_channels: Some(2),
+        }];
+        let qualities = extractor.formats_to_qualities(&formats);
+        assert_eq!(qualities.len(), 1);
+        assert_eq!(qualities[0].id, "360p");
+        assert_eq!(qualities[0].size_bytes, Some(7_510_000));
+    }
+
+    #[test]
+    fn formats_to_qualities_falls_back_to_filesize_approx() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let formats = vec![YtDlpFormat {
+            format_id: "22".into(),
+            format_note: Some("720p".into()),
+            ext: Some("mp4".into()),
+            height: Some(720),
+            width: Some(1280),
+            tbr: Some(1000000.0),
+            vcodec: Some("avc1".into()),
+            acodec: Some("mp4a".into()),
+            resolution: Some("1280x720".into()),
+            url: Some("https://example.com/v.mp4".into()),
+            filesize: None,
+            filesize_approx: Some(42_000_000),
+            asr: None,
+            fps: Some(30.0),
+            audio_channels: Some(2),
+        }];
+        let qualities = extractor.formats_to_qualities(&formats);
+        assert_eq!(qualities.len(), 1);
+        assert_eq!(qualities[0].size_bytes, Some(42_000_000));
+    }
+
+    #[test]
+    fn formats_to_qualities_ignores_zero_size() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let formats = vec![YtDlpFormat {
+            format_id: "18".into(),
+            format_note: Some("360p".into()),
+            ext: Some("mp4".into()),
+            height: Some(360),
+            width: Some(640),
+            tbr: Some(250000.0),
+            vcodec: Some("avc1".into()),
+            acodec: Some("mp4a".into()),
+            resolution: Some("640x360".into()),
+            url: Some("https://example.com/v.mp4".into()),
+            filesize: Some(0),
+            filesize_approx: Some(0),
+            asr: None,
+            fps: Some(30.0),
+            audio_channels: Some(2),
+        }];
+        let qualities = extractor.formats_to_qualities(&formats);
+        assert_eq!(qualities.len(), 1);
+        assert_eq!(qualities[0].size_bytes, None);
+    }
+
+    #[test]
     fn formats_to_qualities_deduplicates_duplicate_labels() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let formats = vec![
@@ -2243,6 +2332,50 @@ mod tests {
         );
         assert_eq!(qualities[0].id, "720p");
         assert_eq!(qualities[0].label, "720p (1280×720)");
+    }
+
+    #[test]
+    fn formats_to_qualities_upgrades_size_on_duplicate_label() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let formats = vec![
+            YtDlpFormat {
+                format_id: "a".into(),
+                format_note: None,
+                ext: Some("mp4".into()),
+                height: Some(720),
+                width: Some(1280),
+                tbr: Some(1000000.0),
+                vcodec: Some("avc1".into()),
+                acodec: Some("mp4a".into()),
+                resolution: Some("1280x720".into()),
+                url: Some("https://example.com/a.mp4".into()),
+                filesize: None,
+                filesize_approx: None,
+                asr: None,
+                fps: Some(30.0),
+                audio_channels: Some(2),
+            },
+            YtDlpFormat {
+                format_id: "b".into(),
+                format_note: None,
+                ext: Some("webm".into()),
+                height: Some(720),
+                width: Some(1280),
+                tbr: Some(2000000.0),
+                vcodec: Some("vp9".into()),
+                acodec: Some("opus".into()),
+                resolution: Some("1280x720".into()),
+                url: Some("https://example.com/b.webm".into()),
+                filesize: None,
+                filesize_approx: Some(55_000_000),
+                asr: None,
+                fps: Some(60.0),
+                audio_channels: Some(2),
+            },
+        ];
+        let qualities = extractor.formats_to_qualities(&formats);
+        assert_eq!(qualities.len(), 1);
+        assert_eq!(qualities[0].size_bytes, Some(55_000_000));
     }
 
     #[test]

@@ -4067,6 +4067,198 @@ fn silent_extractor_download_emits_mid_transfer_job_progress_from_disk_growth() 
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance: Extractor known size → determinate JobProgress (issue #43)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extractor_quality_with_known_size_emits_job_progress_total_bytes() {
+    const KNOWN_TOTAL: u64 = 12_345_678;
+
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_with_sizes(
+        "https://www.youtube.com/watch?v=sized-ext",
+        "Sized Extractor Video",
+        "https://cdn.youtube.com/sized-ext.mp4",
+        vec![("720p", "720p", Some(KNOWN_TOTAL))],
+    );
+    let _chunks = toolchain.enable_slow_download(48, std::time::Duration::from_millis(15));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let probe = core
+        .probe("https://www.youtube.com/watch?v=sized-ext")
+        .unwrap();
+    assert_eq!(
+        probe.items[0].qualities[0].size_bytes,
+        Some(KNOWN_TOTAL),
+        "probe Quality must carry toolchain size"
+    );
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=sized-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    let job_id = job_ids[0].clone();
+
+    let snap_before = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .expect("job snapshot");
+    assert_eq!(
+        snap_before.total_bytes,
+        Some(KNOWN_TOTAL),
+        "confirm must set job total from selected quality size"
+    );
+
+    let core = Arc::new(Mutex::new(core));
+    let worker = {
+        let core = core.clone();
+        std::thread::spawn(move || {
+            core.lock().unwrap().process_pending().unwrap();
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut saw_mid = false;
+    let mut mid_total = None;
+    let mut progress_events = 0u32;
+    let mut last_bytes = 0u64;
+    let mut saw_growth = false;
+
+    while std::time::Instant::now() < deadline {
+        for e in collect_events(&rx) {
+            if let CoreEvent::JobProgress {
+                job_id: id,
+                bytes_downloaded,
+                total_bytes,
+            } = e
+            {
+                assert_eq!(id, job_id);
+                progress_events += 1;
+                if bytes_downloaded > last_bytes {
+                    saw_growth = true;
+                    last_bytes = bytes_downloaded;
+                }
+                if bytes_downloaded > 0 {
+                    saw_mid = true;
+                    mid_total = total_bytes;
+                }
+            }
+        }
+        if saw_mid && saw_growth && progress_events >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    worker.join().unwrap();
+
+    assert!(
+        saw_mid,
+        "expected mid-transfer JobProgress with bytes > 0 from on-disk growth"
+    );
+    assert_eq!(
+        mid_total,
+        Some(KNOWN_TOTAL),
+        "known quality size must expose total_bytes: Some on JobProgress"
+    );
+
+    let snap = core
+        .lock()
+        .unwrap()
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .expect("job snapshot");
+    assert_eq!(
+        snap.total_bytes,
+        Some(KNOWN_TOTAL),
+        "job total must remain set through transfer"
+    );
+    assert!(
+        snap.bytes_downloaded > 0,
+        "completed/partial extractor job must report bytes"
+    );
+}
+
+#[test]
+fn extractor_quality_without_size_keeps_job_progress_total_none() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_with_sizes(
+        "https://www.youtube.com/watch?v=unsized-ext",
+        "Unsized Extractor Video",
+        "https://cdn.youtube.com/unsized-ext.mp4",
+        vec![("720p", "720p", None)],
+    );
+    let _chunks = toolchain.enable_slow_download(24, std::time::Duration::from_millis(15));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=unsized-ext")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=unsized-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    let job_id = job_ids[0].clone();
+
+    let core = Arc::new(Mutex::new(core));
+    let worker = {
+        let core = core.clone();
+        std::thread::spawn(move || {
+            core.lock().unwrap().process_pending().unwrap();
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut saw_mid = false;
+    let mut mid_total = Some(999u64);
+
+    while std::time::Instant::now() < deadline {
+        for e in collect_events(&rx) {
+            if let CoreEvent::JobProgress {
+                job_id: id,
+                bytes_downloaded,
+                total_bytes,
+            } = e
+            {
+                assert_eq!(id, job_id);
+                if bytes_downloaded > 0 {
+                    saw_mid = true;
+                    mid_total = total_bytes;
+                }
+            }
+        }
+        if saw_mid {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    worker.join().unwrap();
+
+    assert!(saw_mid, "expected mid-transfer JobProgress");
+    assert_eq!(
+        mid_total, None,
+        "quality without size must keep total_bytes: None"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Acceptance: Library Root + absolute Job Destination override (issue #37)
 // ---------------------------------------------------------------------------
 

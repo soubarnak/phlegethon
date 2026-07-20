@@ -14,6 +14,9 @@ pub struct Quality {
     pub id: String,
     /// Human-readable label displayed in the probe sheet.
     pub label: String,
+    /// Exact or approximate size in bytes from the Extractor Toolchain
+    /// (`filesize` / positive `filesize_approx`). `None` when unknown.
+    pub size_bytes: Option<u64>,
 }
 
 /// A single media item discovered during probing.
@@ -161,6 +164,40 @@ impl FakeExtractorToolchain {
                 .map(|(id, label)| Quality {
                     id: id.to_string(),
                     label: label.to_string(),
+                    size_bytes: None,
+                })
+                .collect(),
+        };
+        self.responses.insert(
+            url.to_string(),
+            FakeProbeResponse {
+                source_name: None,
+                items: vec![item],
+            },
+        );
+    }
+
+    /// Insert a single-item probe response with optional per-quality sizes.
+    ///
+    /// Each quality is `(id, label, size_bytes)`. Used to regression-test
+    /// determinate Extractor progress when the toolchain knows a size (#43).
+    pub fn insert_with_sizes(
+        &mut self,
+        url: &str,
+        title: &str,
+        item_url: &str,
+        qualities: Vec<(&str, &str, Option<u64>)>,
+    ) {
+        let item = MediaItem {
+            id: "item-1".to_string(),
+            title: title.to_string(),
+            url: item_url.to_string(),
+            qualities: qualities
+                .into_iter()
+                .map(|(id, label, size_bytes)| Quality {
+                    id: id.to_string(),
+                    label: label.to_string(),
+                    size_bytes: size_bytes.filter(|&n| n > 0),
                 })
                 .collect(),
         };
@@ -193,6 +230,7 @@ impl FakeExtractorToolchain {
                     .map(|(qid, label)| Quality {
                         id: qid.to_string(),
                         label: label.to_string(),
+                        size_bytes: None,
                     })
                     .collect(),
             })

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -8,17 +10,77 @@ namespace Phlegethon.Controls;
 /// <summary>
 /// View model for a single row in the download queue.
 /// </summary>
-public class DownloadItemViewModel
+public class DownloadItemViewModel : INotifyPropertyChanged
 {
-    public string JobId { get; set; } = "";
-    public string Title { get; set; } = "Untitled";
-    public string Subtitle { get; set; } = "Queued";
+    private string _jobId = "";
+    private string _title = "Untitled";
+    private string _subtitle = "Queued";
+    private string _destination = "";
+    private string _statusIcon = "⋯";
+    private string _actionLabel = "Pause";
+    private double _progressPercent;
+    private DownloadStatus _status = DownloadStatus.Queued;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public string JobId
+    {
+        get => _jobId;
+        set => SetField(ref _jobId, value);
+    }
+
+    public string Title
+    {
+        get => _title;
+        set => SetField(ref _title, value);
+    }
+
+    public string Subtitle
+    {
+        get => _subtitle;
+        set => SetField(ref _subtitle, value);
+    }
+
     /// <summary>Job Destination folder when known (Save to… / Core destination).</summary>
-    public string Destination { get; set; } = "";
-    public string StatusIcon { get; set; } = "⋯";
-    public string ActionLabel { get; set; } = "Pause";
-    public double ProgressPercent { get; set; } = 0;
-    public DownloadStatus Status { get; set; } = DownloadStatus.Queued;
+    public string Destination
+    {
+        get => _destination;
+        set => SetField(ref _destination, value);
+    }
+
+    public string StatusIcon
+    {
+        get => _statusIcon;
+        set => SetField(ref _statusIcon, value);
+    }
+
+    public string ActionLabel
+    {
+        get => _actionLabel;
+        set => SetField(ref _actionLabel, value);
+    }
+
+    public double ProgressPercent
+    {
+        get => _progressPercent;
+        set => SetField(ref _progressPercent, value);
+    }
+
+    public DownloadStatus Status
+    {
+        get => _status;
+        set => SetField(ref _status, value);
+    }
+
+    private void SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
+    {
+        if (Equals(field, value))
+        {
+            return;
+        }
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
 }
 
 public enum DownloadStatus
