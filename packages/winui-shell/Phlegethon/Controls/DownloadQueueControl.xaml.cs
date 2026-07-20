@@ -13,6 +13,8 @@ public class DownloadItemViewModel
     public string JobId { get; set; } = "";
     public string Title { get; set; } = "Untitled";
     public string Subtitle { get; set; } = "Queued";
+    /// <summary>Job Destination folder when known (Save to… / Core destination).</summary>
+    public string Destination { get; set; } = "";
     public string StatusIcon { get; set; } = "⋯";
     public string ActionLabel { get; set; } = "Pause";
     public double ProgressPercent { get; set; } = 0;
@@ -44,7 +46,7 @@ public sealed partial class DownloadQueueControl : UserControl
     /// <summary>
     /// Add or update a job row.
     /// </summary>
-    public void AddOrUpdateJob(string jobId, string title, string subtitle, DownloadStatus status, double progress)
+    public void AddOrUpdateJob(string jobId, string title, string subtitle, DownloadStatus status, double progress, string? destination = null)
     {
         // Find existing item
         foreach (var item in _items)
@@ -55,6 +57,10 @@ public sealed partial class DownloadQueueControl : UserControl
                 item.Subtitle = subtitle;
                 item.Status = status;
                 item.ProgressPercent = progress;
+                if (destination != null)
+                {
+                    item.Destination = destination;
+                }
                 UpdateVisualStatus(item);
                 return;
             }
@@ -66,6 +72,7 @@ public sealed partial class DownloadQueueControl : UserControl
             JobId = jobId,
             Title = title,
             Subtitle = subtitle,
+            Destination = destination ?? "",
             Status = status,
             ProgressPercent = progress,
         };
@@ -85,7 +92,10 @@ public sealed partial class DownloadQueueControl : UserControl
             if (item.JobId == jobId)
             {
                 item.Status = DownloadStatus.Downloading;
-                item.Subtitle = FormatProgress(bytesDownloaded, totalBytes);
+                var progressText = FormatProgress(bytesDownloaded, totalBytes);
+                item.Subtitle = string.IsNullOrEmpty(item.Destination)
+                    ? progressText
+                    : $"{progressText} · {item.Destination}";
                 if (totalBytes.HasValue && totalBytes.Value > 0)
                 {
                     item.ProgressPercent = Math.Min(100.0, (double)bytesDownloaded / totalBytes.Value * 100.0);
@@ -110,12 +120,29 @@ public sealed partial class DownloadQueueControl : UserControl
             if (item.JobId == jobId)
             {
                 item.Status = DownloadStatus.Completed;
-                item.Subtitle = $"Downloaded to {path}";
+                var dest = string.IsNullOrEmpty(item.Destination)
+                    ? (System.IO.Path.GetDirectoryName(path) ?? "")
+                    : item.Destination;
+                item.Subtitle = string.IsNullOrEmpty(dest)
+                    ? $"Downloaded to {path}"
+                    : $"Downloaded to {path} · Save to {dest}";
                 item.ProgressPercent = 100;
                 UpdateVisualStatus(item);
                 return;
             }
         }
+
+        // Completed event arrived before enqueue/confirm inserted a row.
+        var folder = System.IO.Path.GetDirectoryName(path) ?? "";
+        AddOrUpdateJob(
+            jobId,
+            System.IO.Path.GetFileName(path) ?? "Download",
+            string.IsNullOrEmpty(folder)
+                ? $"Downloaded to {path}"
+                : $"Downloaded to {path} · Save to {folder}",
+            DownloadStatus.Completed,
+            100,
+            folder);
     }
 
     /// <summary>

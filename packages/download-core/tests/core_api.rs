@@ -4476,3 +4476,85 @@ fn preview_probe_destination_shows_multi_item_pattern_under_save_to_override() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Acceptance: Extractor Completed cleans orphan partials (issue #42)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extractor_completed_removes_orphan_temp_siblings_under_job_destination() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=orphan-temps",
+        "Orphan Temps Video",
+        "https://cdn.youtube.com/orphan-temps.mp4",
+        vec![("720p", "720p")],
+    );
+    toolchain.leave_orphan_temps(&[
+        "Orphan Temps Video [orphan-temps].mp4.part",
+        "Orphan Temps Video [orphan-temps].mp4.ytdl",
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let save_to = tmp.path().join("home").join("xavier");
+    std::fs::create_dir_all(&save_to).unwrap();
+
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=orphan-temps")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=orphan-temps".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core
+        .confirm_probe_selection(&selection, Some(save_to.clone()))
+        .unwrap();
+    let job_id = job_ids[0].clone();
+    let job_dir = PathBuf::from(
+        core.list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .expect("job")
+            .destination,
+    );
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    let completed_path = events.iter().find_map(|e| match e {
+        CoreEvent::JobCompleted {
+            job_id: id, path, ..
+        } if id == &job_id => Some(path.clone()),
+        _ => None,
+    });
+    let final_path = completed_path.expect("JobCompleted with path");
+    assert!(
+        final_path.exists(),
+        "final Extractor output must remain at {:?}",
+        final_path
+    );
+    assert_eq!(
+        final_path.parent(),
+        Some(job_dir.as_path()),
+        "Completed path must stay under Job Destination"
+    );
+    assert!(
+        !job_dir
+            .join("Orphan Temps Video [orphan-temps].mp4.part")
+            .exists(),
+        ".part orphan must be removed after Extractor Completed"
+    );
+    assert!(
+        !job_dir
+            .join("Orphan Temps Video [orphan-temps].mp4.ytdl")
+            .exists(),
+        ".ytdl orphan must be removed after Extractor Completed"
+    );
+}

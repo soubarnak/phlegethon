@@ -100,6 +100,7 @@ enum EventSummary {
     JobCompleted {
         job_id: String,
         bytes_written: u64,
+        path: String,
     },
     JobFailed {
         job_id: String,
@@ -133,10 +134,11 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
         CoreEvent::JobCompleted {
             job_id,
             bytes_written,
-            path: _,
+            path,
         } => Some(EventSummary::JobCompleted {
             job_id: job_id.clone(),
             bytes_written: *bytes_written,
+            path: path.to_string_lossy().into_owned(),
         }),
         CoreEvent::JobFailed { job_id, error } => Some(EventSummary::JobFailed {
             job_id: job_id.clone(),

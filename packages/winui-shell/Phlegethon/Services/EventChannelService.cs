@@ -37,6 +37,14 @@ public class JobFailedEventArgs : EventArgs
     public string Error { get; init; } = "";
 }
 
+public class JobQueuedEventArgs : EventArgs
+{
+    public string JobId { get; init; } = "";
+    public string Url { get; init; } = "";
+    public string Destination { get; init; } = "";
+    public string Title { get; init; } = "";
+}
+
 // ---------------------------------------------------------------------------
 // Data models matching Rust structs
 // ---------------------------------------------------------------------------
@@ -107,6 +115,7 @@ public class EventChannelService : IDisposable
     public event EventHandler<JobProgressEventArgs>? OnJobProgress;
     public event EventHandler<JobCompletedEventArgs>? OnJobCompleted;
     public event EventHandler<JobFailedEventArgs>? OnJobFailed;
+    public event EventHandler<JobQueuedEventArgs>? OnJobQueued;
 
     // -----------------------------------------------------------------------
     // URL enqueue
@@ -124,7 +133,17 @@ public class EventChannelService : IDisposable
 
         if (type == "enqueue_direct")
         {
-            // Job created directly — process_pending will handle it
+            var jobId = doc.RootElement.GetProperty("job_id").GetString() ?? "";
+            var destination = doc.RootElement.TryGetProperty("destination", out var destEl)
+                ? destEl.GetString() ?? ""
+                : "";
+            OnJobQueued?.Invoke(this, new JobQueuedEventArgs
+            {
+                JobId = jobId,
+                Url = url,
+                Destination = destination,
+                Title = TitleFromUrl(url),
+            });
         }
         else if (type == "probe_then_confirm")
         {
@@ -143,6 +162,65 @@ public class EventChannelService : IDisposable
                     System.Diagnostics.Debug.WriteLine($"Probe error: {ex.Message}");
                 }
             });
+        }
+    }
+
+    /// <summary>
+    /// Confirm a probe selection and notify listeners about created jobs.
+    /// </summary>
+    public string ConfirmProbeSelection(string selectionJson)
+    {
+        var resultJson = _core.ConfirmProbeSelection(selectionJson);
+        try
+        {
+            using var selectionDoc = JsonDocument.Parse(selectionJson);
+            var url = selectionDoc.RootElement.TryGetProperty("url", out var urlEl)
+                ? urlEl.GetString() ?? ""
+                : "";
+                    var destination = selectionDoc.RootElement.TryGetProperty("destination", out var destEl)
+                        ? destEl.GetString() ?? ""
+                        : "";
+
+                    using var resultDoc = JsonDocument.Parse(resultJson);
+                    if (resultDoc.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var idEl in resultDoc.RootElement.EnumerateArray())
+                        {
+                            var jobId = idEl.GetString() ?? "";
+                            if (string.IsNullOrEmpty(jobId)) continue;
+                            OnJobQueued?.Invoke(this, new JobQueuedEventArgs
+                            {
+                                JobId = jobId,
+                                Url = url,
+                                Destination = destination,
+                                Title = TitleFromUrl(url),
+                            });
+                        }
+                    }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Confirm queue notify error: {ex.Message}");
+        }
+
+        return resultJson;
+    }
+
+    private static string TitleFromUrl(string url)
+    {
+        try
+        {
+            var uri = new Uri(url);
+            var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length > 0)
+            {
+                return Uri.UnescapeDataString(segments[^1]);
+            }
+            return uri.Host;
+        }
+        catch
+        {
+            return "Download";
         }
     }
 

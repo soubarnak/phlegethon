@@ -59,7 +59,7 @@
             <StackPanel x:Name="ItemsPanel" Spacing="0" />
         </ScrollViewer>
 
-        <!-- Footer: Confirm button -->
+        <!-- Footer: Save to… + Confirm -->
         <Border
             Grid.Row="2"
             BorderBrush="{ThemeResource GeistBorderBrush}"
@@ -70,19 +70,38 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <TextBlock
-                    Grid.Column="0"
-                    x:Name="SelectionSummary"
-                    Text="No selection"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                    VerticalAlignment="Center" />
+                <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                    <TextBlock
+                        x:Name="SelectionSummary"
+                        Text="No selection"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Foreground="{ThemeResource GeistTextSecondaryBrush}" />
+                    <TextBlock
+                        x:Name="SaveToPathLabel"
+                        Text="Library Root default"
+                        FontFamily="{ThemeResource GeistMonoFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                        TextTrimming="CharacterEllipsis"
+                        MaxLines="2" />
+                </StackPanel>
 
                 <Button
                     Grid.Column="1"
+                    x:Name="SaveToButton"
+                    Content="Save to…"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize13}"
+                    Height="{ThemeResource GeistButtonHeight}"
+                    Margin="8,0,8,0"
+                    Click="OnSaveToClick" />
+
+                <Button
+                    Grid.Column="2"
                     x:Name="ConfirmButton"
                     Content="Download Selected"
                     FontFamily="{ThemeResource GeistSansFont}"

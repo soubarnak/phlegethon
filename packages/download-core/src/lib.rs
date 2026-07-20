@@ -971,6 +971,7 @@ impl Core {
 
                 match download_result {
                     Ok(ExtractorDownloadOutcome::Completed(path)) => {
+                        Self::cleanup_extractor_temp_artifacts(&dest, &path);
                         let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                         let bytes = Self::destination_byte_total(&dest).max(file_bytes);
                         live_bytes.store(bytes, Ordering::Release);
@@ -1300,6 +1301,38 @@ impl Core {
             total
         }
         walk(dest)
+    }
+
+    /// Remove Extractor Toolchain temp/partial siblings under a Job Destination.
+    ///
+    /// Keeps the finalized media path reported by the toolchain. Targets known
+    /// yt-dlp leftover suffixes (`.part`, `.ytdl`) so Completed jobs do not
+    /// leave orphan partials beside the durable output (issue #42).
+    fn cleanup_extractor_temp_artifacts(dest: &Path, keep: &Path) {
+        let Ok(entries) = std::fs::read_dir(dest) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == keep {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let is_temp = name.ends_with(".part")
+                || name.ends_with(".ytdl")
+                || name.ends_with(".temp")
+                || name.ends_with(".tmp");
+            if is_temp {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     fn complete_job_file(

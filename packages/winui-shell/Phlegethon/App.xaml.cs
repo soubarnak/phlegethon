@@ -7,6 +7,11 @@ public partial class App : Application
     private MainWindow? _window;
 
     /// <summary>
+    /// The active main window (set on launch).
+    /// </summary>
+    public MainWindow? MainWindow => _window;
+
+    /// <summary>
     /// Initializes the singleton application object.
     /// </summary>
     public App()

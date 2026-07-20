@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Phlegethon.Controls;
 using Phlegethon.Services;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
@@ -21,6 +22,7 @@ public sealed partial class MainWindow : Window
         _eventService.OnJobProgress += OnJobProgress;
         _eventService.OnJobCompleted += OnJobCompleted;
         _eventService.OnJobFailed += OnJobFailed;
+        _eventService.OnJobQueued += OnJobQueued;
 
         // Start the event loop background task
         _ = _eventService.StartEventLoopAsync();
@@ -34,12 +36,11 @@ public sealed partial class MainWindow : Window
         ProbeSheetView.Canceled += (_, _) => OnProbeConfirmed();
         ProbeSheetView.Confirmed += (_, json) =>
         {
-            // Pass selection to Core
             _ = Task.Run(() =>
             {
                 try
                 {
-                    var resultJson = _eventService.Core.ConfirmProbeSelection(json);
+                    _eventService.ConfirmProbeSelection(json);
                 }
                 catch (Exception ex)
                 {
@@ -59,8 +60,6 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async void OnPaste(object sender, RoutedEventArgs e)
     {
-        // Use keyboard accelerators for Ctrl+V or handle via clipboard polling.
-        // The simpler approach is a keyboard accelerator on the window.
         var dataPackage = Clipboard.GetContent();
         if (dataPackage.Contains(StandardDataFormats.Text))
         {
@@ -145,12 +144,28 @@ public sealed partial class MainWindow : Window
 
     private void OnProbeResult(object? sender, ProbeResultEventArgs args)
     {
-        // Switch to the Probe-then-Confirm sheet
         _ = DispatcherQueue.TryEnqueue(() =>
         {
             ProbeSheetView.ShowProbeResult(args.Url, args.Items, args.SourceName);
             DownloadQueueView.Visibility = Visibility.Collapsed;
             ProbeSheetView.Visibility = Visibility.Visible;
+        });
+    }
+
+    private void OnJobQueued(object? sender, JobQueuedEventArgs args)
+    {
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            var subtitle = string.IsNullOrEmpty(args.Destination)
+                ? "Queued · Library Root default"
+                : $"Save to {args.Destination}";
+            DownloadQueueView.AddOrUpdateJob(
+                args.JobId,
+                args.Title,
+                subtitle,
+                DownloadStatus.Queued,
+                0,
+                string.IsNullOrEmpty(args.Destination) ? null : args.Destination);
         });
     }
 

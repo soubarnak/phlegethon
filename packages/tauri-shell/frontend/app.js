@@ -505,12 +505,29 @@ function renderQueue() {
     const indeterminate =
       !hasTotal &&
       (job.status === "pending" || job.status === "downloading");
+    const locationPath =
+      job.status === "completed" && job.path
+        ? job.path
+        : job.destination || "";
+    let locationLabel = "";
+    if (job.status === "completed" && job.path) {
+      locationLabel = job.destination
+        ? `${job.path} · Save to ${job.destination}`
+        : job.path;
+    } else if (job.destination) {
+      locationLabel = `Save to ${job.destination}`;
+    }
 
     html += `
       <div class="queue-row ${state.selectedJobId === job.job_id ? "selected" : ""}" data-job-id="${job.job_id}">
         <div class="row-info">
           <div class="row-title" title="${escapeHtml(job.title)}">${escapeHtml(job.title)}</div>
           <div class="row-url" title="${escapeHtml(job.url)}">${escapeHtml(job.url)}</div>
+          ${
+            locationLabel
+              ? `<div class="row-location" title="${escapeHtml(locationPath)}">${escapeHtml(locationLabel)}</div>`
+              : ""
+          }
         </div>
         <div class="row-status ${statusClass}">${statusLabel}</div>
         <div class="row-progress">
@@ -601,7 +618,14 @@ async function handleJobAction(action, jobId) {
 async function refreshJobs() {
   try {
     const jobs = await getInvoke()("list_jobs");
-    state.jobs = jobs;
+    // Preserve Completed final paths across snapshot refresh.
+    const pathById = new Map(
+      state.jobs.filter((j) => j.path).map((j) => [j.job_id, j.path]),
+    );
+    state.jobs = jobs.map((job) => {
+      const path = pathById.get(job.job_id);
+      return path ? { ...job, path } : job;
+    });
     renderQueue();
     runProcessPendingOnce();
   } catch (err) {
@@ -667,6 +691,9 @@ function handleCoreEvent(evt) {
     case "JobCompleted":
       job.status = "completed";
       job.bytes_downloaded = evt.bytes_written || job.bytes_downloaded;
+      if (evt.path) {
+        job.path = evt.path;
+      }
       break;
     case "JobFailed":
       job.status = "failed";
@@ -763,7 +790,11 @@ function updateProbeSaveToHint() {
     .then((preview) => {
       if (requestId !== state.probePreviewRequestId) return;
       if (preview?.path_display) {
-        probeSaveToPath.textContent = preview.path_display;
+        const multiNote =
+          selectedItems.length > 1
+            ? " (each item under its own subfolder)"
+            : "";
+        probeSaveToPath.textContent = `${preview.path_display}${multiNote}`;
       }
     })
     .catch(() => {

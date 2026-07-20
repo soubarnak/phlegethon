@@ -93,6 +93,9 @@ pub struct FakeExtractorToolchain {
     responses: HashMap<String, FakeProbeResponse>,
     /// When set, `download` sleeps between writes and checks `stop` each chunk.
     slow_download: Option<SlowDownloadConfig>,
+    /// Extra sibling filenames written beside the final file before Completed
+    /// (simulates yt-dlp leftover `.part` / `.ytdl` artifacts).
+    orphan_temp_names: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -130,6 +133,13 @@ impl FakeExtractorToolchain {
             chunks_written: chunks_written.clone(),
         });
         chunks_written
+    }
+
+    /// Leave named temp siblings under `dest_dir` when download Completes.
+    ///
+    /// Used to regression-test Core cleanup of Extractor orphans (issue #42).
+    pub fn leave_orphan_temps(&mut self, names: &[&str]) {
+        self.orphan_temp_names = names.iter().map(|s| (*s).to_string()).collect();
     }
 
     /// Insert a single-item probe response.
@@ -264,6 +274,11 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         let body = format!("fake extractor download:{url}:{format}");
         std::fs::write(&path, body.as_bytes())
             .map_err(|e| format!("write extractor output {path:?}: {e}"))?;
+        for name in &self.orphan_temp_names {
+            let orphan = dest_dir.join(name);
+            std::fs::write(&orphan, b"orphan partial")
+                .map_err(|e| format!("write orphan temp {orphan:?}: {e}"))?;
+        }
         Ok(ExtractorDownloadOutcome::Completed(path))
     }
 }

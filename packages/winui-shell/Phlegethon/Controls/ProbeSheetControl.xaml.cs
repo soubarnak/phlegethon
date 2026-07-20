@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Phlegethon.Services;
+using Windows.Storage.Pickers;
+using WinRT.Interop;
 
 namespace Phlegethon.Controls;
 
@@ -38,6 +41,7 @@ public sealed partial class ProbeSheetControl : UserControl
 {
     private string _probeUrl = "";
     private readonly List<MediaGroupViewModel> _groups = new();
+    private string? _saveToDestination;
 
     public ProbeSheetControl()
     {
@@ -45,13 +49,20 @@ public sealed partial class ProbeSheetControl : UserControl
     }
 
     /// <summary>
+    /// Absolute Job Destination override, or null for Library Root default.
+    /// </summary>
+    public string? SaveToDestination => _saveToDestination;
+
+    /// <summary>
     /// Show probe result from the Download Core.
     /// </summary>
     public void ShowProbeResult(string url, List<MediaItem> items, string? sourceName)
     {
         _probeUrl = url;
+        _saveToDestination = null;
         _groups.Clear();
         ItemsPanel.Children.Clear();
+        UpdateSaveToLabel();
 
         SourceLabel.Text = sourceName != null
             ? $"{sourceName} — {url}"
@@ -104,7 +115,6 @@ public sealed partial class ProbeSheetControl : UserControl
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        // Checkbox
         var checkBox = new CheckBox
         {
             VerticalAlignment = VerticalAlignment.Center,
@@ -115,7 +125,6 @@ public sealed partial class ProbeSheetControl : UserControl
         Grid.SetColumn(checkBox, 0);
         grid.Children.Add(checkBox);
 
-        // Title
         var titleBlock = new TextBlock
         {
             Text = group.Title,
@@ -125,13 +134,12 @@ public sealed partial class ProbeSheetControl : UserControl
             Foreground = (Brush)Application.Current.Resources["GeistTextPrimaryBrush"],
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            TextWrapping = TextTrimming.TextWrapping.NoWrap,
+            TextWrapping = TextWrapping.NoWrap,
             MaxLines = 1,
         };
         Grid.SetColumn(titleBlock, 1);
         grid.Children.Add(titleBlock);
 
-        // Quality selector (if multiple qualities)
         if (group.Qualities.Count > 1)
         {
             var qualityCombo = new ComboBox
@@ -147,7 +155,10 @@ public sealed partial class ProbeSheetControl : UserControl
             };
             qualityCombo.SelectionChanged += (_, args) =>
             {
-                group.SelectedQuality = (QualityViewModel)args.AddedItems[0];
+                if (args.AddedItems.Count > 0)
+                {
+                    group.SelectedQuality = (QualityViewModel)args.AddedItems[0];
+                }
             };
             Grid.SetColumn(qualityCombo, 2);
             grid.Children.Add(qualityCombo);
@@ -166,7 +177,6 @@ public sealed partial class ProbeSheetControl : UserControl
             grid.Children.Add(labelBlock);
         }
 
-        // Url button
         var urlButton = new Button
         {
             Content = "URL",
@@ -179,7 +189,6 @@ public sealed partial class ProbeSheetControl : UserControl
         };
         urlButton.Click += (_, _) =>
         {
-            // Open URL in default browser
             var uri = new Uri(group.Url);
             _ = Windows.System.Launcher.LaunchUriAsync(uri);
         };
@@ -191,7 +200,7 @@ public sealed partial class ProbeSheetControl : UserControl
     }
 
     // -----------------------------------------------------------------------
-    // Selection summary
+    // Selection / Save to…
     // -----------------------------------------------------------------------
 
     private void UpdateSelectionSummary()
@@ -210,6 +219,26 @@ public sealed partial class ProbeSheetControl : UserControl
         };
 
         ConfirmButton.IsEnabled = count > 0;
+        UpdateSaveToLabel();
+    }
+
+    private void UpdateSaveToLabel()
+    {
+        var selected = 0;
+        foreach (var g in _groups)
+        {
+            if (g.IsSelected) selected++;
+        }
+
+        var basePath = _saveToDestination ?? "Library Root default";
+        if (selected > 1)
+        {
+            SaveToPathLabel.Text = $"{basePath} (each item under its own subfolder)";
+        }
+        else
+        {
+            SaveToPathLabel.Text = basePath;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -223,7 +252,7 @@ public sealed partial class ProbeSheetControl : UserControl
 
     /// <summary>
     /// Fired when the user confirms a selection with their chosen qualities.
-    /// The string is a JSON object: { url, items: [{ item_id, quality_id }] }.
+    /// JSON: { url, items: [{ item_id, quality_id }], destination? }.
     /// </summary>
     public event EventHandler<string>? Confirmed;
 
@@ -236,9 +265,38 @@ public sealed partial class ProbeSheetControl : UserControl
         Canceled?.Invoke(this, EventArgs.Empty);
     }
 
+    private async void OnSaveToClick(object sender, RoutedEventArgs e)
+    {
+        var picker = new FolderPicker
+        {
+            SuggestedStartLocation = PickerLocationId.Downloads,
+            ViewMode = PickerViewMode.List,
+        };
+        picker.FileTypeFilter.Add("*");
+
+        var hwnd = WindowNative.GetWindowHandle(GetParentWindow());
+        InitializeWithWindow.Initialize(picker, hwnd);
+
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder != null)
+        {
+            _saveToDestination = folder.Path;
+            UpdateSaveToLabel();
+        }
+    }
+
+    private Window GetParentWindow()
+    {
+        if (Application.Current is App app && app.MainWindow is Window main)
+        {
+            return main;
+        }
+
+        throw new InvalidOperationException("No parent window for folder picker");
+    }
+
     private async void OnConfirmClick(object sender, RoutedEventArgs e)
     {
-        // Build JSON selection expected by ProbeSelection in download-core.
         var items = new List<object>();
         foreach (var g in _groups)
         {
@@ -252,17 +310,22 @@ public sealed partial class ProbeSheetControl : UserControl
             }
         }
 
-        var selectionJson = System.Text.Json.JsonSerializer.Serialize(new
-        {
-            url = _probeUrl,
-            items,
-        });
+        object payload = _saveToDestination != null
+            ? new { url = _probeUrl, items, destination = _saveToDestination }
+            : new { url = _probeUrl, items };
+
+        var selectionJson = System.Text.Json.JsonSerializer.Serialize(payload);
         Confirmed?.Invoke(this, selectionJson);
+
+        var locationNote = _saveToDestination != null
+            ? $"\nSave to: {_saveToDestination}"
+              + (items.Count > 1 ? "\n(each item under its own subfolder)" : "")
+            : "";
 
         var dialog = new ContentDialog
         {
             Title = "Downloading",
-            Content = $"{items.Count} item(s) added to queue.",
+            Content = $"{items.Count} item(s) added to queue.{locationNote}",
             CloseButtonText = "OK",
             XamlRoot = this.XamlRoot,
         };
