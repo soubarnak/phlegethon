@@ -26,7 +26,6 @@ public sealed class DesktopNotificationService
             return;
         }
 
-        DesktopNotificationManagerCompat.SetAppUserModelId("Phlegethon.Phlegethon");
         ToastNotificationManagerCompat.OnActivated += OnToastActivated;
         _activatedHandlerRegistered = true;
     }

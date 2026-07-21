@@ -110,7 +110,7 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     public Visibility CompletedActionsVisible
     {
         get => _completedActionsVisible;
-        private set => SetField(ref _completedActionsVisible, value);
+        set => SetField(ref _completedActionsVisible, value);
     }
 
     public double ProgressPercent

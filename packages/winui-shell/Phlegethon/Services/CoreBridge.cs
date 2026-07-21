@@ -460,19 +460,34 @@ public class CoreHandle : IDisposable
 
     private const int BufSize = 65536;
 
-    private static unsafe string CallWithJsonResult(Func<IntPtr, IntPtr, int, IntPtr, int, int> fn, IntPtr handle, string? arg1 = null)
+    private static unsafe string CallWithJsonResult(Func<IntPtr, IntPtr, int, IntPtr, int, int> fn, IntPtr handle)
     {
         byte* outBuf = stackalloc byte[BufSize];
         byte* errBuf = stackalloc byte[1024];
         var outPtr = new IntPtr(outBuf);
         var errPtr = new IntPtr(errBuf);
 
-        int result;
-        if (arg1 != null)
-            result = fn(handle, arg1, outPtr, BufSize, errPtr, 1024);
-        else
-            result = fn(handle, outPtr, BufSize, errPtr, 1024);
+        int result = fn(handle, outPtr, BufSize, errPtr, 1024);
+        if (result != 0)
+        {
+            var errMsg = Marshal.PtrToStringAnsi(errPtr) ?? "unknown error";
+            throw new InvalidOperationException($"Core call failed: {errMsg}");
+        }
 
+        return Marshal.PtrToStringAnsi(outPtr) ?? "{}";
+    }
+
+    private static unsafe string CallWithJsonResult(
+        Func<IntPtr, string, IntPtr, int, IntPtr, int, int> fn,
+        IntPtr handle,
+        string arg1)
+    {
+        byte* outBuf = stackalloc byte[BufSize];
+        byte* errBuf = stackalloc byte[1024];
+        var outPtr = new IntPtr(outBuf);
+        var errPtr = new IntPtr(errBuf);
+
+        int result = fn(handle, arg1, outPtr, BufSize, errPtr, 1024);
         if (result != 0)
         {
             var errMsg = Marshal.PtrToStringAnsi(errPtr) ?? "unknown error";
@@ -493,21 +508,21 @@ public class CoreHandle : IDisposable
     {
         return CallWithJsonResult(
             (h, o, ol, e, el) => CoreBridge.core_probe(h, url, o, ol, e, el),
-            _handle, url);
+            _handle);
     }
 
     public string ConfirmProbeSelection(string selectionJson)
     {
         return CallWithJsonResult(
             (h, o, ol, e, el) => CoreBridge.core_confirm_probe_selection(h, selectionJson, o, ol, e, el),
-            _handle, selectionJson);
+            _handle);
     }
 
     public string PreviewProbeDestination(string selectionJson)
     {
         return CallWithJsonResult(
             (h, o, ol, e, el) => CoreBridge.core_preview_probe_destination(h, selectionJson, o, ol, e, el),
-            _handle, selectionJson);
+            _handle);
     }
 
     public void PauseJob(string jobId)

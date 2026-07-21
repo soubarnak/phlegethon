@@ -1,8 +1,10 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Phlegethon.Controls;
 using Phlegethon.Services;
 using Windows.ApplicationModel.DataTransfer;
@@ -32,6 +34,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         this.InitializeComponent();
+        AppWindow.Resize(new Windows.Graphics.SizeInt32(960, 720));
         _eventService = new EventChannelService();
         _companionReceiver = new CompanionReceiverService(_eventService);
         _notificationService = new DesktopNotificationService(
@@ -289,7 +292,7 @@ public sealed partial class MainWindow : Window
             {
                 Text = $"This URL is already {match.Status}:\n{match.Url}",
                 TextWrapping = TextWrapping.Wrap,
-                FontFamily = (Windows.UI.Xaml.Media.FontFamily)Application.Current.Resources["GeistSansFont"],
+                FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
             },
             PrimaryButtonText = "Enqueue anyway",
             SecondaryButtonText = "Focus existing",
@@ -448,7 +451,6 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        e.Handled = true;
         UrlInput.Text = text;
         await ProcessUrlInputAsync(text);
         UrlInput.Text = string.Empty;
@@ -459,7 +461,7 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async void OnDrop(object sender, DragEventArgs e)
     {
-        e.AcceptOperation = DataPackageOperation.Link;
+        e.AcceptedOperation = DataPackageOperation.Link;
 
         if (e.DataView.Contains(StandardDataFormats.Text))
         {
@@ -498,7 +500,7 @@ public sealed partial class MainWindow : Window
                 AcceptsReturn = true,
                 TextWrapping = TextWrapping.Wrap,
                 MinHeight = 96,
-                FontFamily = (Windows.UI.Xaml.Media.FontFamily)Application.Current.Resources["GeistMonoFont"],
+                FontFamily = (FontFamily)Application.Current.Resources["GeistMonoFont"],
             },
             PrimaryButtonText = "Add",
             CloseButtonText = "Cancel",
@@ -805,7 +807,7 @@ public sealed partial class MainWindow : Window
             {
                 Text = copy.Body,
                 TextWrapping = TextWrapping.Wrap,
-                FontFamily = (Windows.UI.Xaml.Media.FontFamily)Application.Current.Resources["GeistSansFont"],
+                FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
             },
             PrimaryButtonText = copy.ConfirmLabel,
             CloseButtonText = copy.CancelLabel,

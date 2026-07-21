@@ -261,7 +261,7 @@ public sealed partial class ProbeSheetControl : UserControl
             BorderBrush = (Brush)Application.Current.Resources["GeistBorderBrush"],
             BorderThickness = new Thickness(0, 0, 0, 1),
             Height = 56,
-            Padding = new Thickness(12, 0),
+            Padding = new Thickness(12, 0, 12, 0),
         };
 
         var grid = new Grid { ColumnSpacing = 8 };
@@ -312,7 +312,7 @@ public sealed partial class ProbeSheetControl : UserControl
                 BorderBrush = (Brush)Application.Current.Resources["GeistBorderBrush"],
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(6, 2),
+                Padding = new Thickness(6, 2, 6, 2),
                 Child = new TextBlock
                 {
                     Text = ShellStrings.Get("probe.downloaded"),
@@ -372,7 +372,7 @@ public sealed partial class ProbeSheetControl : UserControl
             FontSize = 12,
             Height = 28,
             MinWidth = 40,
-            Padding = new Thickness(6, 0),
+            Padding = new Thickness(6, 0, 6, 0),
             VerticalAlignment = VerticalAlignment.Center,
         };
         AutomationProperties.SetName(
