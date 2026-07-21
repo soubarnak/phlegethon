@@ -97,3 +97,41 @@ Cosmetic. Clamp the percentage, or treat the format size as a floor rather than 
 ## Recommendation
 
 Fix the destination-ownership issue (High) before this ships — accidental deletion of a user's folder is the worst possible outcome for a download manager, and it's reachable in two clicks. The Low/Minor items can follow.
+
+---
+
+# Suggested Feature Roadmap
+
+Beyond this diff, the following features would move the product forward. They are filtered against what already exists — segmented/parallel HTTP fetch, mirrors, metalink, global + per-job bandwidth caps, pause/resume/retry/discard, queue persistence, probe-then-confirm, Save-to overrides, and Library Root are all already implemented — and aligned with the vocabulary and roadmap in `CONTEXT.md`.
+
+## Tier 1 — Reliability & safety (closest to shippable gaps)
+
+1. **Discard confirmation + scoped deletion** — given the data-loss bug above, add a confirm dialog for Discard and only ever delete the job's own files, never a user-picked folder wholesale.
+2. **Resume across app restarts** — persist partial `.part` state and continue via HTTP `Range` on relaunch; the "Resumable Transfer" concept in `CONTEXT.md` isn't fully realized yet.
+3. **Checksum / integrity verification** — verify against metalink or known hashes after completion; mark corrupt downloads Failed.
+4. **Concurrency limit + queue reordering** — a "max N simultaneous downloads" setting plus drag-to-reorder / priority, so a large job doesn't starve the rest.
+5. **Disk-space pre-check** — refuse to start when a known total won't fit; surface it instead of failing mid-write.
+
+## Tier 2 — Video intelligence (the product's differentiator)
+
+6. **Subtitles, chapters, thumbnails, metadata** — expose yt-dlp's `--write-subs` / `--embed-*` in the probe sheet.
+7. **Audio-only / extract-audio mode** and a **default-quality policy** (e.g. "best ≤ 1080p, prefer mp4") so users don't re-pick every time.
+8. **"Already downloaded" detection** for playlists/channels — grey out or skip items already in the library.
+9. **Post-processing via ffmpeg** — remux/transcode, embed thumbnail + subs + metadata.
+10. **Authenticated sources** — `cookies-from-browser` / cookie passing for logged-in sites.
+
+## Tier 3 — UX & quality-of-life
+
+11. **Reveal in folder / Open file** actions on queue rows (neither shell has these today).
+12. **Desktop notifications** on completion / failure.
+13. **Multi-URL paste** and **clipboard auto-capture**.
+14. **Search / filter / sort** the queue, and a persisted **History** view with re-download.
+15. **Duplicate-URL detection** before enqueue.
+16. **Filename templating** for Job Destinations.
+
+## Tier 4 — Platform & ecosystem (roadmap items in `CONTEXT.md`)
+
+17. **Chrome Companion** browser extension to hand off URLs / cookies.
+18. **Extractor Toolchain auto-update** + Extractor Plugin management.
+19. **Proxy support** and **time-based bandwidth scheduling**.
+20. **Accessibility & i18n** — keyboard navigation, screen-reader labels, localization.
