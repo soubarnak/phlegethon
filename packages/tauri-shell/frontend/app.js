@@ -4,6 +4,8 @@
 /*  Communicates with Download Core via Tauri commands                 */
 /* ------------------------------------------------------------------ */
 
+import { buildDiscardConfirmCopy } from "./discardConfirm.js";
+
 // Resolve Tauri APIs lazily — withGlobalTauri must be enabled in tauri.conf.json.
 function getInvoke() {
   const invoke = window.__TAURI__?.core?.invoke;
@@ -60,6 +62,14 @@ const settingsClose = $("settingsClose");
 const libraryRootPath = $("libraryRootPath");
 const libraryRootPick = $("libraryRootPick");
 const libraryRootApply = $("libraryRootApply");
+const discardConfirmOverlay = $("discardConfirmOverlay");
+const discardConfirmTitle = $("discardConfirmTitle");
+const discardConfirmBody = $("discardConfirmBody");
+const discardConfirmCancel = $("discardConfirmCancel");
+const discardConfirmOk = $("discardConfirmOk");
+
+/** @type {{ resolve: (ok: boolean) => void } | null} */
+let discardConfirmWaiter = null;
 
 // ---- Theme ----
 function setTheme(theme) {
@@ -447,6 +457,10 @@ probeOverlay.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    if (!discardConfirmOverlay.hidden) {
+      closeDiscardConfirm(false);
+      return;
+    }
     if (!settingsOverlay.hidden) {
       closeSettings();
       return;
@@ -586,6 +600,44 @@ function formatBytes(bytes) {
 }
 
 // ---- Job Actions ----
+function closeDiscardConfirm(confirmed) {
+  if (!discardConfirmOverlay.hidden) {
+    discardConfirmOverlay.hidden = true;
+  }
+  const waiter = discardConfirmWaiter;
+  discardConfirmWaiter = null;
+  if (waiter) {
+    waiter.resolve(Boolean(confirmed));
+  }
+}
+
+/**
+ * Always-confirm Discard. Copy differs for Completed vs unfinished.
+ * @param {{ status: string, destination?: string }} job
+ * @returns {Promise<boolean>}
+ */
+function confirmDiscard(job) {
+  const copy = buildDiscardConfirmCopy(job.status, job.destination || "");
+  discardConfirmTitle.textContent = copy.title;
+  discardConfirmBody.textContent = copy.body;
+  discardConfirmOk.textContent = copy.confirmLabel;
+  discardConfirmCancel.textContent = copy.cancelLabel;
+  discardConfirmOverlay.hidden = false;
+  discardConfirmOk.focus();
+
+  return new Promise((resolve) => {
+    discardConfirmWaiter = { resolve };
+  });
+}
+
+discardConfirmCancel.addEventListener("click", () => closeDiscardConfirm(false));
+discardConfirmOk.addEventListener("click", () => closeDiscardConfirm(true));
+discardConfirmOverlay.addEventListener("click", (e) => {
+  if (e.target === discardConfirmOverlay) {
+    closeDiscardConfirm(false);
+  }
+});
+
 async function handleJobAction(action, jobId) {
   try {
     const invoke = getInvoke();
@@ -599,11 +651,19 @@ async function handleJobAction(action, jobId) {
       case "retry":
         await invoke("retry_job", { jobId });
         break;
-      case "discard":
+      case "discard": {
+        const job = state.jobs.find((j) => j.job_id === jobId);
+        if (!job) return;
+        const confirmed = await confirmDiscard(job);
+        if (!confirmed) return;
+        await invoke("discard_job", { jobId });
         state.jobs = state.jobs.filter((j) => j.job_id !== jobId);
+        if (state.selectedJobId === jobId) {
+          state.selectedJobId = null;
+        }
         renderQueue();
-        await invoke("discard_job", { jobId }).catch(() => {});
         return;
+      }
     }
     // Refresh state
     await refreshJobs();
@@ -677,6 +737,15 @@ async function pollEvents() {
 }
 
 function handleCoreEvent(evt) {
+  if (evt.type === "JobDiscarded") {
+    state.jobs = state.jobs.filter((j) => j.job_id !== evt.job_id);
+    if (state.selectedJobId === evt.job_id) {
+      state.selectedJobId = null;
+    }
+    renderQueue();
+    return;
+  }
+
   const job = state.jobs.find((j) => j.job_id === evt.job_id);
   if (!job) return;
 

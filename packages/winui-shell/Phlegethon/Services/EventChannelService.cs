@@ -45,6 +45,11 @@ public class JobQueuedEventArgs : EventArgs
     public string Title { get; init; } = "";
 }
 
+public class JobDiscardedEventArgs : EventArgs
+{
+    public string JobId { get; init; } = "";
+}
+
 // ---------------------------------------------------------------------------
 // Data models matching Rust structs
 // ---------------------------------------------------------------------------
@@ -116,6 +121,7 @@ public class EventChannelService : IDisposable
     public event EventHandler<JobCompletedEventArgs>? OnJobCompleted;
     public event EventHandler<JobFailedEventArgs>? OnJobFailed;
     public event EventHandler<JobQueuedEventArgs>? OnJobQueued;
+    public event EventHandler<JobDiscardedEventArgs>? OnJobDiscarded;
 
     // -----------------------------------------------------------------------
     // URL enqueue
@@ -204,6 +210,14 @@ public class EventChannelService : IDisposable
         }
 
         return resultJson;
+    }
+
+    /// <summary>
+    /// Discard a job via Core (caller must have confirmed with the user).
+    /// </summary>
+    public void DiscardJob(string jobId)
+    {
+        _core.DiscardJob(jobId);
     }
 
     private static string TitleFromUrl(string url)
@@ -327,6 +341,13 @@ public class EventChannelService : IDisposable
                 {
                     JobId = ev.GetProperty("job_id").GetString() ?? "",
                     Error = ev.GetProperty("error").GetString() ?? "",
+                });
+                break;
+
+            case "JobDiscarded":
+                OnJobDiscarded?.Invoke(this, new JobDiscardedEventArgs
+                {
+                    JobId = ev.GetProperty("job_id").GetString() ?? "",
                 });
                 break;
         }

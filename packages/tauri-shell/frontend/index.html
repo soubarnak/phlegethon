@@ -92,9 +92,21 @@
     </div>
   </div>
 
+  <!-- Discard confirmation -->
+  <div class="confirm-overlay" id="discardConfirmOverlay" hidden>
+    <div class="confirm-sheet" role="alertdialog" aria-modal="true" aria-labelledby="discardConfirmTitle" aria-describedby="discardConfirmBody">
+      <h2 id="discardConfirmTitle">Discard job?</h2>
+      <p class="confirm-body" id="discardConfirmBody"></p>
+      <div class="confirm-actions">
+        <button class="btn" id="discardConfirmCancel" type="button">Cancel</button>
+        <button class="btn btn-danger" id="discardConfirmOk" type="button">Discard</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Hidden file input for drop-to-enqueue -->
   <input type="file" id="fileDropZone" multiple hidden />
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

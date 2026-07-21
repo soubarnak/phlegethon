@@ -18,6 +18,7 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     private string _destination = "";
     private string _statusIcon = "⋯";
     private string _actionLabel = "Pause";
+    private Visibility _primaryActionVisible = Visibility.Visible;
     private double _progressPercent;
     private DownloadStatus _status = DownloadStatus.Queued;
 
@@ -58,6 +59,13 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     {
         get => _actionLabel;
         set => SetField(ref _actionLabel, value);
+    }
+
+    /// <summary>Hide primary action for Completed (Discard is the only row action).</summary>
+    public Visibility PrimaryActionVisible
+    {
+        get => _primaryActionVisible;
+        set => SetField(ref _primaryActionVisible, value);
     }
 
     public double ProgressPercent
@@ -104,6 +112,9 @@ public sealed partial class DownloadQueueControl : UserControl
         this.InitializeComponent();
         DownloadList.ItemsSource = _items;
     }
+
+    /// <summary>Raised when the user clicks Discard on a row (before confirmation).</summary>
+    public event EventHandler<DownloadItemViewModel>? DiscardRequested;
 
     /// <summary>
     /// Add or update a job row.
@@ -224,6 +235,20 @@ public sealed partial class DownloadQueueControl : UserControl
         }
     }
 
+    /// <summary>Remove a job row after confirmed Discard (or Core JobDiscarded).</summary>
+    public void RemoveJob(string jobId)
+    {
+        for (var i = 0; i < _items.Count; i++)
+        {
+            if (_items[i].JobId == jobId)
+            {
+                _items.RemoveAt(i);
+                UpdateEmptyState();
+                return;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Event handlers
     // -----------------------------------------------------------------------
@@ -237,22 +262,30 @@ public sealed partial class DownloadQueueControl : UserControl
         {
             case DownloadStatus.Downloading:
             case DownloadStatus.Queued:
-                // Pause
                 item.Status = DownloadStatus.Paused;
                 UpdateVisualStatus(item);
                 break;
             case DownloadStatus.Paused:
-                // Resume
                 item.Status = DownloadStatus.Downloading;
                 UpdateVisualStatus(item);
                 break;
-            case DownloadStatus.Completed:
             case DownloadStatus.Failed:
-                // Retry or clear
-                _items.Remove(item);
-                UpdateEmptyState();
+                // Retry stays local until Core pause/resume/retry wiring lands.
+                item.Status = DownloadStatus.Queued;
+                item.Subtitle = "Queued";
+                UpdateVisualStatus(item);
+                break;
+            case DownloadStatus.Completed:
+                // Completed uses Discard only (always-confirm flow).
                 break;
         }
+    }
+
+    private void OnDiscardClick(object sender, RoutedEventArgs e)
+    {
+        var button = (Button)sender;
+        var item = (DownloadItemViewModel)button.DataContext;
+        DiscardRequested?.Invoke(this, item);
     }
 
     // -----------------------------------------------------------------------
@@ -289,22 +322,27 @@ public sealed partial class DownloadQueueControl : UserControl
             case DownloadStatus.Queued:
                 item.StatusIcon = "⋯";
                 item.ActionLabel = "Pause";
+                item.PrimaryActionVisible = Visibility.Visible;
                 break;
             case DownloadStatus.Downloading:
                 item.StatusIcon = "↓";
                 item.ActionLabel = "Pause";
+                item.PrimaryActionVisible = Visibility.Visible;
                 break;
             case DownloadStatus.Paused:
                 item.StatusIcon = "⏸";
                 item.ActionLabel = "Resume";
+                item.PrimaryActionVisible = Visibility.Visible;
                 break;
             case DownloadStatus.Completed:
                 item.StatusIcon = "✓";
-                item.ActionLabel = "Clear";
+                item.ActionLabel = "Discard";
+                item.PrimaryActionVisible = Visibility.Collapsed;
                 break;
             case DownloadStatus.Failed:
                 item.StatusIcon = "✗";
                 item.ActionLabel = "Retry";
+                item.PrimaryActionVisible = Visibility.Visible;
                 break;
         }
     }

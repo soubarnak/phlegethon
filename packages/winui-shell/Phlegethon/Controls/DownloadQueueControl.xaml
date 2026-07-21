@@ -121,17 +121,30 @@
                                     HorizontalAlignment="Left" />
                             </Grid>
 
-                            <!-- Action button -->
-                            <Button
+                            <!-- Primary action + Discard -->
+                            <StackPanel
                                 Grid.Column="3"
-                                Content="{Binding ActionLabel}"
-                                FontFamily="{ThemeResource GeistSansFont}"
-                                FontSize="{ThemeResource GeistTypeSize12}"
-                                Height="28"
-                                MinWidth="64"
-                                Padding="8,0"
-                                VerticalAlignment="Center"
-                                Click="OnItemAction" />
+                                Orientation="Horizontal"
+                                Spacing="6"
+                                VerticalAlignment="Center">
+                                <Button
+                                    Content="{Binding ActionLabel}"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="{ThemeResource GeistTypeSize12}"
+                                    Height="28"
+                                    MinWidth="64"
+                                    Padding="8,0"
+                                    Click="OnItemAction"
+                                    Visibility="{Binding PrimaryActionVisible}" />
+                                <Button
+                                    Content="Discard"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="{ThemeResource GeistTypeSize12}"
+                                    Height="28"
+                                    MinWidth="64"
+                                    Padding="8,0"
+                                    Click="OnDiscardClick" />
+                            </StackPanel>
                         </Grid>
                     </Border>
                 </DataTemplate>

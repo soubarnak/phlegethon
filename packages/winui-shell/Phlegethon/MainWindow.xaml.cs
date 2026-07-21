@@ -23,6 +23,7 @@ public sealed partial class MainWindow : Window
         _eventService.OnJobCompleted += OnJobCompleted;
         _eventService.OnJobFailed += OnJobFailed;
         _eventService.OnJobQueued += OnJobQueued;
+        _eventService.OnJobDiscarded += OnJobDiscarded;
 
         // Start the event loop background task
         _ = _eventService.StartEventLoopAsync();
@@ -31,6 +32,8 @@ public sealed partial class MainWindow : Window
         this.Content.AllowDrop = true;
         this.Content.Drop += OnDrop;
         this.Content.PrePaste += OnPaste;
+
+        DownloadQueueView.DiscardRequested += OnDiscardRequested;
 
         // Wire up probe sheet
         ProbeSheetView.Canceled += (_, _) => OnProbeConfirmed();
@@ -191,6 +194,50 @@ public sealed partial class MainWindow : Window
         {
             DownloadQueueView.MarkJobFailed(args.JobId, args.Error);
         });
+    }
+
+    private void OnJobDiscarded(object? sender, JobDiscardedEventArgs args)
+    {
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            DownloadQueueView.RemoveJob(args.JobId);
+        });
+    }
+
+    private async void OnDiscardRequested(object? sender, DownloadItemViewModel item)
+    {
+        var copy = DiscardConfirmCopy.Build(item.Status, item.Destination);
+        var dialog = new ContentDialog
+        {
+            Title = copy.Title,
+            Content = new TextBlock
+            {
+                Text = copy.Body,
+                TextWrapping = TextWrapping.Wrap,
+                FontFamily = (Windows.UI.Xaml.Media.FontFamily)Application.Current.Resources["GeistSansFont"],
+            },
+            PrimaryButtonText = copy.ConfirmLabel,
+            CloseButtonText = copy.CancelLabel,
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = this.Content.XamlRoot,
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.Run(() => _eventService.DiscardJob(item.JobId));
+            DownloadQueueView.RemoveJob(item.JobId);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Discard error: {ex.Message}");
+            UrlStatusText.Text = $"Discard failed: {ex.Message}";
+        }
     }
 
     /// <summary>

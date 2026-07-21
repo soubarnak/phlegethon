@@ -472,6 +472,66 @@ body {
   white-space: nowrap;
 }
 
+/* ---- Confirm dialog ---- */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg, rgba(0, 0, 0, 0.45));
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+
+.confirm-overlay[hidden] {
+  display: none;
+}
+
+.confirm-sheet {
+  width: min(440px, 100%);
+  background: var(--bg-surface);
+  border: var(--border-width) solid var(--border-base);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0, 0, 0, 0.25));
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.confirm-sheet h2 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin: 0;
+}
+
+.confirm-body {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-sans);
+  line-height: 1.45;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+.btn-danger {
+  background: var(--danger-bg, #b42318);
+  color: var(--danger-fg, #fff);
+  border-color: var(--danger-bg, #b42318);
+}
+
+.btn-danger:hover {
+  filter: brightness(1.05);
+}
+
 /* ---- Settings ---- */
 .settings-overlay {
   position: fixed;
