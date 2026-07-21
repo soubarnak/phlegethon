@@ -396,6 +396,84 @@
                     Padding="8,0"
                     Margin="8,0,0,0"
                     Click="OnProxySettingsApply" />
+                <CheckBox
+                    x:Name="CheckSidecarUpdatesOnLaunchBox"
+                    Content="Check sidecar updates on launch"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    VerticalAlignment="Center"
+                    Margin="16,0,0,0"
+                    Checked="OnSidecarUpdateSettingsChanged"
+                    Unchecked="OnSidecarUpdateSettingsChanged" />
+                <Button
+                    Content="Check updates"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="8,0,0,0"
+                    Click="OnCheckSidecarUpdates" />
+                <Button
+                    Content="Apply updates"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="8,0,0,0"
+                    Click="OnApplySidecarUpdates" />
+                <TextBox
+                    x:Name="ToolchainPinBox"
+                    PlaceholderText="Toolchain pin"
+                    Width="100"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <Button
+                    Content="Pin toolchain"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="4,0,0,0"
+                    Click="OnPinToolchain" />
+                <Button
+                    Content="Rollback toolchain"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="4,0,0,0"
+                    Click="OnRollbackToolchain" />
+                <TextBox
+                    x:Name="PluginPinBox"
+                    PlaceholderText="Plugin pin"
+                    Width="90"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Margin="8,0,0,0" />
+                <Button
+                    Content="Pin plugin"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="4,0,0,0"
+                    Click="OnPinPlugin" />
+                <Button
+                    Content="Rollback plugin"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="4,0,0,0"
+                    Click="OnRollbackPlugin" />
+                <TextBlock
+                    x:Name="SidecarUpdateStatusText"
+                    Text=""
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    VerticalAlignment="Center"
+                    Margin="8,0,0,0" />
             </StackPanel>
         </Border>
     </Grid>

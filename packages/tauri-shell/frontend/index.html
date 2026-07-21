@@ -193,6 +193,29 @@
           <input type="text" class="url-input" id="proxyUrlInput" placeholder="http://host:port or socks5://host:port" />
           <button class="btn btn-primary" id="proxySettingsApply" type="button">Apply proxy</button>
         </div>
+        <label class="settings-label">Sidecar updates</label>
+        <p class="settings-help">Extractor Toolchain and Extractor Plugin updates. Applied when idle; never swapped mid-transfer.</p>
+        <div class="settings-row">
+          <label class="settings-checkbox">
+            <input type="checkbox" id="checkSidecarUpdatesOnLaunchInput" />
+            Check for updates on launch
+          </label>
+        </div>
+        <div class="settings-row">
+          <button class="btn" id="checkSidecarUpdatesBtn" type="button">Check updates</button>
+          <button class="btn btn-primary" id="applySidecarUpdatesBtn" type="button">Apply updates</button>
+        </div>
+        <div class="settings-row">
+          <input type="text" class="url-input" id="toolchainPinInput" placeholder="Toolchain pin version" />
+          <button class="btn" id="pinToolchainBtn" type="button">Pin toolchain</button>
+          <button class="btn" id="rollbackToolchainBtn" type="button">Rollback toolchain</button>
+        </div>
+        <div class="settings-row">
+          <input type="text" class="url-input" id="pluginPinInput" placeholder="Plugin pin version" />
+          <button class="btn" id="pinPluginBtn" type="button">Pin plugin</button>
+          <button class="btn" id="rollbackPluginBtn" type="button">Rollback plugin</button>
+        </div>
+        <p class="settings-help" id="sidecarUpdateStatus"></p>
         <label class="settings-label" for="clipboardWatcherInput">Clipboard watcher</label>
         <p class="settings-help">When enabled, detected URLs fill the input bar. Downloads never start automatically.</p>
         <div class="settings-row">

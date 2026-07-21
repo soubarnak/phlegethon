@@ -108,7 +108,10 @@ public class EventChannelService : IDisposable
         // Set a default library root
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var libraryRoot = System.IO.Path.Combine(appData, "Phlegethon", "Library");
+        var sidecarRoot = System.IO.Path.Combine(appData, "Phlegethon", "Sidecar");
         _core.SetLibraryRoot(libraryRoot);
+        _core.SetSidecarRoot(sidecarRoot);
+        _ = _core.ApplySidecarUpdatesOnLaunchJson();
     }
 
     public CoreHandle Core => _core;
@@ -309,6 +312,42 @@ public class EventChannelService : IDisposable
         var json = System.Text.Json.JsonSerializer.Serialize(settings);
         _core.SetProxySettingsJson(json);
     }
+
+    public SidecarUpdateSettings GetSidecarUpdateSettings()
+    {
+        var json = _core.GetSidecarUpdateSettingsJson();
+        return System.Text.Json.JsonSerializer.Deserialize<SidecarUpdateSettings>(json)
+            ?? new SidecarUpdateSettings();
+    }
+
+    public void SetSidecarUpdateSettings(SidecarUpdateSettings settings)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(settings);
+        _core.SetSidecarUpdateSettingsJson(json);
+    }
+
+    public SidecarUpdateCheckResult CheckSidecarUpdates()
+    {
+        var json = _core.CheckSidecarUpdatesJson();
+        return System.Text.Json.JsonSerializer.Deserialize<SidecarUpdateCheckResult>(json)
+            ?? new SidecarUpdateCheckResult();
+    }
+
+    public SidecarApplyResult ApplySidecarUpdates()
+    {
+        var json = _core.ApplySidecarUpdatesJson();
+        return System.Text.Json.JsonSerializer.Deserialize<SidecarApplyResult>(json)
+            ?? new SidecarApplyResult();
+    }
+
+    public void PinSidecarVersion(string component, string version) =>
+        _core.PinSidecarVersion(component, version);
+
+    public void UnpinSidecarVersion(string component) =>
+        _core.UnpinSidecarVersion(component);
+
+    public void RollbackSidecar(string component) =>
+        _core.RollbackSidecar(component);
 
     public string GetFilenameTemplate() => _core.GetFilenameTemplate();
 

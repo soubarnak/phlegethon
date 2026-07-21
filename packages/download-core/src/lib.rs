@@ -23,6 +23,7 @@ mod transfer;
 mod url_input;
 mod proxy_settings;
 pub mod plugin_sidecar;
+mod sidecar_updates;
 mod storage;
 pub mod ytdlp_extractor;
 pub use plugin_sidecar::{
@@ -33,6 +34,15 @@ pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolcha
 
 pub use cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
 pub use proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
+pub use sidecar_updates::{
+    apply_sidecar_updates, apply_sidecar_updates_on_launch, check_sidecar_updates,
+    rollback_sidecar_component, toolchain_binary_path, write_toolchain_manifest,
+    CatalogVersionEntry, FakeSidecarUpdateSource, FileSidecarUpdateSource,
+    SidecarApplyOutcome, SidecarApplyResult, SidecarComponent, SidecarComponentStatus,
+    SidecarRuntimeState, SidecarUpdateCheckResult, SidecarUpdateSettings,
+    SidecarUpdateSource, ToolchainManifest, UpdateCatalog, TOOLCHAIN_MANIFEST_FILENAME,
+    UPDATE_CATALOG_FILENAME,
+};
 pub use bandwidth::{Clock, ManualClock, SystemClock, TransferProgress};
 pub use event::CoreEvent;
 pub use extractor::{
@@ -137,6 +147,10 @@ pub struct Core {
     default_media_extras: MediaExtrasOptions,
     cookie_channel: CookieChannel,
     proxy_settings: ProxySettings,
+    sidecar_update_settings: SidecarUpdateSettings,
+    sidecar_root: Option<PathBuf>,
+    sidecar_runtime_state: SidecarRuntimeState,
+    sidecar_update_source: Arc<dyn SidecarUpdateSource>,
     filename_template: String,
     clock: Arc<dyn bandwidth::Clock>,
     /// Pending probe results, keyed by URL.
@@ -301,6 +315,10 @@ impl Core {
             default_media_extras: MediaExtrasOptions::default(),
             cookie_channel: CookieChannel::default(),
             proxy_settings: ProxySettings::default(),
+            sidecar_update_settings: SidecarUpdateSettings::default(),
+            sidecar_root: None,
+            sidecar_runtime_state: SidecarRuntimeState::default(),
+            sidecar_update_source: Arc::new(FileSidecarUpdateSource),
             filename_template: DEFAULT_FILENAME_TEMPLATE.to_string(),
             clock,
             pending_probes: HashMap::new(),
@@ -413,6 +431,7 @@ impl Core {
         self.cookie_channel = storage::load_cookie_channel(&root)?;
         self.proxy_settings = storage::load_proxy_settings(&root)?;
         self.http.apply_proxy_settings(&self.proxy_settings);
+        self.sidecar_update_settings = storage::load_sidecar_update_settings(&root)?;
         self.filename_template = storage::load_filename_template(&root)?;
         self.download_archive = download_archive::DownloadArchive::load(&root)?;
         self.library_root = Some(root);
@@ -449,6 +468,7 @@ impl Core {
                 &self.default_media_extras,
                 &self.cookie_channel,
                 &self.proxy_settings,
+                &self.sidecar_update_settings,
                 &self.filename_template,
             );
             storage::save_queue(root, &queue)?;
@@ -1038,6 +1058,126 @@ impl Core {
         self.proxy_settings = settings.clone();
         self.http.apply_proxy_settings(&settings);
         self.persist_queue_now()
+    }
+
+    /// Current sidecar update manager settings.
+    pub fn sidecar_update_settings(&self) -> SidecarUpdateSettings {
+        self.sidecar_update_settings.clone()
+    }
+
+    /// Update sidecar update manager settings and persist them.
+    pub fn set_sidecar_update_settings(
+        &mut self,
+        settings: SidecarUpdateSettings,
+    ) -> Result<(), String> {
+        self.sidecar_update_settings = settings;
+        self.persist_queue_now()
+    }
+
+    /// App-managed sidecar root for Extractor Toolchain and Extractor Plugins.
+    pub fn sidecar_root(&self) -> Option<&Path> {
+        self.sidecar_root.as_deref()
+    }
+
+    /// Set the sidecar root and load persisted runtime state from disk.
+    pub fn set_sidecar_root(&mut self, root: PathBuf) -> Result<(), String> {
+        std::fs::create_dir_all(&root).map_err(|e| format!("create sidecar root: {e}"))?;
+        self.sidecar_runtime_state =
+            sidecar_updates::load_sidecar_runtime_state(&root)?;
+        self.sidecar_root = Some(root);
+        Ok(())
+    }
+
+    /// Replace the sidecar update source (acceptance tests).
+    pub fn set_sidecar_update_source(&mut self, source: Arc<dyn SidecarUpdateSource>) {
+        self.sidecar_update_source = source;
+    }
+
+    fn transfers_active(&self) -> bool {
+        self.job_signals.active_transfer_count() > 0
+    }
+
+    fn require_sidecar_root(&self) -> Result<&Path, String> {
+        self.sidecar_root
+            .as_deref()
+            .ok_or_else(|| "sidecar root not configured".to_string())
+    }
+
+    /// Manual check for Extractor Toolchain and Extractor Plugin updates.
+    pub fn check_sidecar_updates(&self) -> Result<SidecarUpdateCheckResult, String> {
+        let root = self.require_sidecar_root()?;
+        check_sidecar_updates(
+            root,
+            &self.sidecar_update_settings,
+            self.sidecar_update_source.as_ref(),
+        )
+    }
+
+    /// Apply available sidecar updates when idle; defer while transfers are active.
+    pub fn apply_sidecar_updates(&mut self) -> Result<SidecarApplyResult, String> {
+        let root = self.require_sidecar_root()?.to_path_buf();
+        let transfers_active = self.transfers_active();
+        apply_sidecar_updates(
+            &root,
+            &self.sidecar_update_settings,
+            self.sidecar_update_source.as_ref(),
+            transfers_active,
+            &mut self.sidecar_runtime_state,
+        )
+    }
+
+    /// On launch: apply deferred updates and optional on-launch check when idle.
+    pub fn apply_sidecar_updates_on_launch(&mut self) -> Result<SidecarApplyResult, String> {
+        let root = self.require_sidecar_root()?.to_path_buf();
+        let transfers_active = self.transfers_active();
+        apply_sidecar_updates_on_launch(
+            &root,
+            &self.sidecar_update_settings,
+            self.sidecar_update_source.as_ref(),
+            transfers_active,
+            &mut self.sidecar_runtime_state,
+        )
+    }
+
+    /// Pin a sidecar component to a specific version.
+    pub fn pin_sidecar_version(
+        &mut self,
+        component: SidecarComponent,
+        version: String,
+    ) -> Result<(), String> {
+        let trimmed = version.trim();
+        if trimmed.is_empty() {
+            return Err("pin version cannot be empty".to_string());
+        }
+        match component {
+            SidecarComponent::Toolchain => {
+                self.sidecar_update_settings.toolchain_pin = Some(trimmed.to_string());
+            }
+            SidecarComponent::Plugin => {
+                self.sidecar_update_settings.plugin_pin = Some(trimmed.to_string());
+            }
+        }
+        self.persist_queue_now()
+    }
+
+    /// Clear a sidecar version pin.
+    pub fn unpin_sidecar_version(&mut self, component: SidecarComponent) -> Result<(), String> {
+        match component {
+            SidecarComponent::Toolchain => self.sidecar_update_settings.toolchain_pin = None,
+            SidecarComponent::Plugin => self.sidecar_update_settings.plugin_pin = None,
+        }
+        self.persist_queue_now()
+    }
+
+    /// Roll back one sidecar component to the previous installed version.
+    pub fn rollback_sidecar(&mut self, component: SidecarComponent) -> Result<(), String> {
+        let root = self.require_sidecar_root()?.to_path_buf();
+        rollback_sidecar_component(
+            &root,
+            component,
+            self.transfers_active(),
+            &mut self.sidecar_runtime_state,
+        )
     }
 
     /// Current Filename Template for extractor job outputs.

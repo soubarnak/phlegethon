@@ -226,6 +226,72 @@ internal static class CoreBridge
         int errorBufLen);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_get_sidecar_update_settings_json(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_set_sidecar_update_settings_json(
+        IntPtr handle,
+        string settingsJson,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_set_sidecar_root(
+        IntPtr handle,
+        string path,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_check_sidecar_updates_json(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_apply_sidecar_updates_json(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_apply_sidecar_updates_on_launch_json(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_pin_sidecar_version(
+        IntPtr handle,
+        string component,
+        string version,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_unpin_sidecar_version(
+        IntPtr handle,
+        string component,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_rollback_sidecar(
+        IntPtr handle,
+        string component,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     public static extern int core_get_filename_template(
         IntPtr handle,
         IntPtr outBuf,
@@ -567,6 +633,62 @@ public class CoreHandle : IDisposable
     {
         ThrowOnError(
             CoreBridge.core_set_proxy_settings_json(_handle, settingsJson, IntPtr.Zero, 0));
+    }
+
+    public string GetSidecarUpdateSettingsJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_get_sidecar_update_settings_json(h, o, ol),
+            _handle);
+    }
+
+    public void SetSidecarUpdateSettingsJson(string settingsJson)
+    {
+        ThrowOnError(
+            CoreBridge.core_set_sidecar_update_settings_json(_handle, settingsJson, IntPtr.Zero, 0));
+    }
+
+    public void SetSidecarRoot(string path)
+    {
+        ThrowOnError(CoreBridge.core_set_sidecar_root(_handle, path, IntPtr.Zero, 0));
+    }
+
+    public string CheckSidecarUpdatesJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_check_sidecar_updates_json(h, o, ol, e, el),
+            _handle);
+    }
+
+    public string ApplySidecarUpdatesJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_apply_sidecar_updates_json(h, o, ol, e, el),
+            _handle);
+    }
+
+    public string ApplySidecarUpdatesOnLaunchJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_apply_sidecar_updates_on_launch_json(h, o, ol, e, el),
+            _handle);
+    }
+
+    public void PinSidecarVersion(string component, string version)
+    {
+        ThrowOnError(
+            CoreBridge.core_pin_sidecar_version(_handle, component, version, IntPtr.Zero, 0));
+    }
+
+    public void UnpinSidecarVersion(string component)
+    {
+        ThrowOnError(
+            CoreBridge.core_unpin_sidecar_version(_handle, component, IntPtr.Zero, 0));
+    }
+
+    public void RollbackSidecar(string component)
+    {
+        ThrowOnError(CoreBridge.core_rollback_sidecar(_handle, component, IntPtr.Zero, 0));
     }
 
     public string GetFilenameTemplate()

@@ -6,6 +6,7 @@
 use crate::cookie_channel::CookieChannel;
 use crate::filename_template::DEFAULT_FILENAME_TEMPLATE;
 use crate::proxy_settings::ProxySettings;
+use crate::sidecar_updates::SidecarUpdateSettings;
 use crate::integrity::ExpectedHash;
 use crate::job::{Job, JobState};
 use crate::media_extras::MediaExtrasOptions;
@@ -66,6 +67,10 @@ fn default_proxy_settings() -> ProxySettings {
     ProxySettings::default()
 }
 
+fn default_sidecar_update_settings() -> SidecarUpdateSettings {
+    SidecarUpdateSettings::default()
+}
+
 /// On-disk representation of the job queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedQueue {
@@ -83,6 +88,8 @@ pub struct PersistedQueue {
     pub cookie_channel: CookieChannel,
     #[serde(default = "default_proxy_settings")]
     pub proxy_settings: ProxySettings,
+    #[serde(default = "default_sidecar_update_settings")]
+    pub sidecar_update_settings: SidecarUpdateSettings,
     #[serde(default = "default_filename_template")]
     pub filename_template: String,
     pub jobs: Vec<PersistedJob>,
@@ -261,6 +268,19 @@ pub fn load_proxy_settings(library_root: &Path) -> Result<ProxySettings, String>
     Ok(queue.proxy_settings.normalized())
 }
 
+/// Load sidecar update manager settings from the queue file, if present.
+pub fn load_sidecar_update_settings(library_root: &Path) -> Result<SidecarUpdateSettings, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(SidecarUpdateSettings::default());
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    Ok(queue.sidecar_update_settings)
+}
+
 /// Load Filename Template from the queue file, if present.
 pub fn load_filename_template(library_root: &Path) -> Result<String, String> {
     let path = queue_path(library_root);
@@ -284,6 +304,7 @@ pub fn build_queue(
     default_media_extras: &MediaExtrasOptions,
     cookie_channel: &CookieChannel,
     proxy_settings: &ProxySettings,
+    sidecar_update_settings: &SidecarUpdateSettings,
     filename_template: &str,
 ) -> PersistedQueue {
     PersistedQueue {
@@ -295,6 +316,7 @@ pub fn build_queue(
         default_media_extras: *default_media_extras,
         cookie_channel: cookie_channel.clone(),
         proxy_settings: proxy_settings.clone(),
+        sidecar_update_settings: sidecar_update_settings.clone(),
         filename_template: filename_template.to_string(),
         jobs: jobs.iter().map(Job::to_persisted).collect(),
     }
@@ -411,6 +433,7 @@ mod tests {
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
             &ProxySettings::default(),
+            &SidecarUpdateSettings::default(),
             DEFAULT_FILENAME_TEMPLATE,
         );
         save_queue(&root, &queue).unwrap();
@@ -502,6 +525,7 @@ mod tests {
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
             &ProxySettings::default(),
+            &SidecarUpdateSettings::default(),
             DEFAULT_FILENAME_TEMPLATE,
         );
         save_queue(&root, &queue).unwrap();

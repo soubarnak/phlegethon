@@ -192,6 +192,18 @@ public sealed partial class DownloadQueueControl : UserControl
         ProxyUrlBox.Text = settings.Url ?? string.Empty;
     }
 
+    public void SetSidecarUpdateSettingsDisplay(SidecarUpdateSettings settings)
+    {
+        CheckSidecarUpdatesOnLaunchBox.IsChecked = settings.CheckOnLaunch;
+        ToolchainPinBox.Text = settings.ToolchainPin ?? string.Empty;
+        PluginPinBox.Text = settings.PluginPin ?? string.Empty;
+    }
+
+    public void SetSidecarUpdateStatus(string message)
+    {
+        SidecarUpdateStatusText.Text = message;
+    }
+
     public void SetFilenameTemplateDisplay(string template)
     {
         FilenameTemplateBox.Text = template;
@@ -232,6 +244,46 @@ public sealed partial class DownloadQueueControl : UserControl
             Url = string.IsNullOrEmpty(url) ? null : url,
         });
     }
+
+    private void OnSidecarUpdateSettingsChanged(object sender, RoutedEventArgs e)
+    {
+        SidecarUpdateSettingsChanged?.Invoke(this, new SidecarUpdateSettings
+        {
+            CheckOnLaunch = CheckSidecarUpdatesOnLaunchBox.IsChecked == true,
+            ToolchainPin = string.IsNullOrWhiteSpace(ToolchainPinBox.Text)
+                ? null
+                : ToolchainPinBox.Text.Trim(),
+            PluginPin = string.IsNullOrWhiteSpace(PluginPinBox.Text)
+                ? null
+                : PluginPinBox.Text.Trim(),
+        });
+    }
+
+    private void OnCheckSidecarUpdates(object sender, RoutedEventArgs e) =>
+        CheckSidecarUpdatesRequested?.Invoke(this, EventArgs.Empty);
+
+    private void OnApplySidecarUpdates(object sender, RoutedEventArgs e) =>
+        ApplySidecarUpdatesRequested?.Invoke(this, EventArgs.Empty);
+
+    private void OnPinToolchain(object sender, RoutedEventArgs e)
+    {
+        var version = ToolchainPinBox.Text.Trim();
+        if (!string.IsNullOrEmpty(version))
+            PinSidecarVersionRequested?.Invoke(this, ("toolchain", version));
+    }
+
+    private void OnRollbackToolchain(object sender, RoutedEventArgs e) =>
+        RollbackSidecarRequested?.Invoke(this, "toolchain");
+
+    private void OnPinPlugin(object sender, RoutedEventArgs e)
+    {
+        var version = PluginPinBox.Text.Trim();
+        if (!string.IsNullOrEmpty(version))
+            PinSidecarVersionRequested?.Invoke(this, ("plugin", version));
+    }
+
+    private void OnRollbackPlugin(object sender, RoutedEventArgs e) =>
+        RollbackSidecarRequested?.Invoke(this, "plugin");
 
     public int ActiveJobLimitValue => (int)ActiveJobLimitBox.Value;
 
@@ -569,6 +621,21 @@ public sealed partial class DownloadQueueControl : UserControl
 
     /// <summary>Raised when the user applies global proxy settings.</summary>
     public event EventHandler<ProxySettings>? ProxySettingsChanged;
+
+    /// <summary>Raised when sidecar update settings change.</summary>
+    public event EventHandler<SidecarUpdateSettings>? SidecarUpdateSettingsChanged;
+
+    /// <summary>Raised when the user requests a manual sidecar update check.</summary>
+    public event EventHandler? CheckSidecarUpdatesRequested;
+
+    /// <summary>Raised when the user requests applying sidecar updates.</summary>
+    public event EventHandler? ApplySidecarUpdatesRequested;
+
+    /// <summary>Raised when the user pins a sidecar component version.</summary>
+    public event EventHandler<(string Component, string Version)>? PinSidecarVersionRequested;
+
+    /// <summary>Raised when the user rolls back a sidecar component.</summary>
+    public event EventHandler<string>? RollbackSidecarRequested;
 
     public event EventHandler<string>? FilenameTemplateChanged;
 

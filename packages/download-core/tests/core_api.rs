@@ -6648,6 +6648,202 @@ fn proxy_settings_rejects_invalid_scheme() {
 }
 
 // ---------------------------------------------------------------------------
+// Sidecar update manager (#63)
+// ---------------------------------------------------------------------------
+
+fn write_toolchain_fixture(sidecar: &std::path::Path, version: &str, bytes: &[u8]) {
+    let manifest = ToolchainManifest::stub(version);
+    write_toolchain_manifest(sidecar, &manifest).unwrap();
+    std::fs::write(toolchain_binary_path(sidecar, &manifest), bytes).unwrap();
+}
+
+fn toolchain_catalog(tmp: &tempfile::TempDir, version: &str, bytes: &[u8]) -> UpdateCatalog {
+    let binary = tmp.path().join(format!("yt-dlp-{version}"));
+    std::fs::write(&binary, bytes).unwrap();
+    UpdateCatalog {
+        toolchain_latest: Some(version.to_string()),
+        toolchain_versions: std::collections::HashMap::from([(
+            version.to_string(),
+            CatalogVersionEntry {
+                source_path: binary,
+            },
+        )]),
+        ..Default::default()
+    }
+}
+
+fn setup_sidecar_core(
+    tmp: &tempfile::TempDir,
+    catalog: UpdateCatalog,
+) -> (
+    Core,
+    crossbeam_channel::Receiver<CoreEvent>,
+    PathBuf,
+    Arc<dyn SidecarUpdateSource>,
+) {
+    let (mut core, rx) = make_core(Box::new(fake_http()));
+    let sidecar = tmp.path().join("sidecar");
+    let library = tmp.path().join("library");
+    let source: Arc<dyn SidecarUpdateSource> = FakeSidecarUpdateSource::new(catalog);
+    core.set_sidecar_update_source(Arc::clone(&source));
+    core.set_sidecar_root(sidecar.clone()).unwrap();
+    core.set_library_root(library).unwrap();
+    (core, rx, sidecar, source)
+}
+
+#[test]
+fn sidecar_update_settings_default_check_on_launch_off() {
+    let (core, _rx) = make_core(Box::new(fake_http()));
+    assert!(!core.sidecar_update_settings().check_on_launch);
+}
+
+#[test]
+fn sidecar_update_settings_persist_across_library_root_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(root.clone()).unwrap();
+
+    let settings = SidecarUpdateSettings {
+        check_on_launch: true,
+        toolchain_pin: Some("1.0.0".to_string()),
+        plugin_pin: None,
+    };
+    core.set_sidecar_update_settings(settings.clone()).unwrap();
+
+    let (mut core2, _rx2) = make_core(Box::new(fake_http()));
+    core2.set_library_root(root).unwrap();
+    assert_eq!(core2.sidecar_update_settings(), settings);
+}
+
+#[test]
+fn check_sidecar_updates_reports_installed_and_available() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    let result = core.check_sidecar_updates().unwrap();
+    assert!(result.toolchain.update_available);
+    assert_eq!(result.toolchain.installed_version.as_deref(), Some("1.0.0"));
+    assert_eq!(result.toolchain.available_version.as_deref(), Some("2.0.0"));
+}
+
+#[test]
+fn apply_sidecar_updates_when_idle_installs_new_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    let result = core.apply_sidecar_updates().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::Applied);
+    assert_eq!(result.applied, vec![SidecarComponent::Toolchain]);
+
+    let installed = core.check_sidecar_updates().unwrap();
+    assert_eq!(
+        installed.toolchain.installed_version.as_deref(),
+        Some("2.0.0")
+    );
+    assert!(!installed.toolchain.update_available);
+}
+
+#[test]
+fn apply_sidecar_updates_blocked_mid_transfer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.job_signals()
+        .set_transfer_active_for_test(&job_id, true);
+
+    let result = core.apply_sidecar_updates().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::BlockedMidTransfer);
+    assert!(result.applied.is_empty());
+
+    let installed = core.check_sidecar_updates().unwrap();
+    assert_eq!(
+        installed.toolchain.installed_version.as_deref(),
+        Some("1.0.0"),
+        "mid-transfer apply must not swap sidecar"
+    );
+}
+
+#[test]
+fn pin_prevents_update_available_when_installed_matches_pin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    core.pin_sidecar_version(SidecarComponent::Toolchain, "1.0.0".to_string())
+        .unwrap();
+
+    let result = core.check_sidecar_updates().unwrap();
+    assert!(!result.toolchain.update_available);
+}
+
+#[test]
+fn rollback_restores_previous_toolchain_version_when_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    core.apply_sidecar_updates().unwrap();
+    core.rollback_sidecar(SidecarComponent::Toolchain).unwrap();
+
+    let installed = core.check_sidecar_updates().unwrap();
+    assert_eq!(
+        installed.toolchain.installed_version.as_deref(),
+        Some("1.0.0")
+    );
+}
+
+#[test]
+fn deferred_updates_apply_on_launch_when_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.job_signals()
+        .set_transfer_active_for_test(&job_id, true);
+    core.apply_sidecar_updates().unwrap();
+
+    core.job_signals()
+        .set_transfer_active_for_test(&job_id, false);
+    let result = core.apply_sidecar_updates_on_launch().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::Applied);
+    assert_eq!(
+        core.check_sidecar_updates()
+            .unwrap()
+            .toolchain
+            .installed_version
+            .as_deref(),
+        Some("2.0.0")
+    );
+}
+
+#[test]
+fn check_on_launch_applies_updates_when_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    core.set_sidecar_update_settings(SidecarUpdateSettings {
+        check_on_launch: true,
+        ..Default::default()
+    })
+    .unwrap();
+
+    let result = core.apply_sidecar_updates_on_launch().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::Applied);
+}
+
+// ---------------------------------------------------------------------------
 // URL input: normalization, multi-paste, duplicate detection (#57)
 // ---------------------------------------------------------------------------
 

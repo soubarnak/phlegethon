@@ -85,4 +85,11 @@ impl JobSignals {
             .filter(|flag| flag.load(Ordering::Acquire))
             .count()
     }
+
+    #[doc(hidden)]
+    pub fn set_transfer_active_for_test(&self, job_id: &str, active: bool) {
+        if let Some(flag) = self.transfer_active.lock().unwrap().get(job_id) {
+            flag.store(active, Ordering::Release);
+        }
+    }
 }

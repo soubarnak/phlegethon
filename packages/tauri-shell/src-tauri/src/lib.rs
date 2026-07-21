@@ -505,6 +505,65 @@ fn set_proxy_settings(
 }
 
 #[tauri::command]
+fn get_sidecar_update_settings(
+    state: State<AppState>,
+) -> Result<download_core::SidecarUpdateSettings, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.sidecar_update_settings())
+}
+
+#[tauri::command]
+fn set_sidecar_update_settings(
+    state: State<AppState>,
+    settings: download_core::SidecarUpdateSettings,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_sidecar_update_settings(settings)
+}
+
+#[tauri::command]
+fn check_sidecar_updates(
+    state: State<AppState>,
+) -> Result<download_core::SidecarUpdateCheckResult, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    core.check_sidecar_updates()
+}
+
+#[tauri::command]
+fn apply_sidecar_updates(state: State<AppState>) -> Result<download_core::SidecarApplyResult, String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.apply_sidecar_updates()
+}
+
+#[tauri::command]
+fn pin_sidecar_version(
+    state: State<AppState>,
+    component: download_core::SidecarComponent,
+    version: String,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.pin_sidecar_version(component, version)
+}
+
+#[tauri::command]
+fn unpin_sidecar_version(
+    state: State<AppState>,
+    component: download_core::SidecarComponent,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.unpin_sidecar_version(component)
+}
+
+#[tauri::command]
+fn rollback_sidecar(
+    state: State<AppState>,
+    component: download_core::SidecarComponent,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.rollback_sidecar(component)
+}
+
+#[tauri::command]
 fn get_filename_template(state: State<AppState>) -> Result<String, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.filename_template().to_string())
@@ -684,9 +743,12 @@ pub fn run() {
 
             let state: State<AppState> = app.state();
             let root = load_library_root_preference().unwrap_or_else(default_library_root);
+            let sidecar_root = dirs_data_dir();
             {
                 let mut core = state.core.lock().unwrap();
+                let _ = core.set_sidecar_root(sidecar_root);
                 let _ = core.set_library_root(root.clone());
+                let _ = core.apply_sidecar_updates_on_launch();
             }
             {
                 let mut stored = state.library_root.lock().unwrap();
@@ -724,6 +786,13 @@ pub fn run() {
             set_cookie_channel,
             get_proxy_settings,
             set_proxy_settings,
+            get_sidecar_update_settings,
+            set_sidecar_update_settings,
+            check_sidecar_updates,
+            apply_sidecar_updates,
+            pin_sidecar_version,
+            unpin_sidecar_version,
+            rollback_sidecar,
             get_filename_template,
             set_filename_template,
             select_default_quality,

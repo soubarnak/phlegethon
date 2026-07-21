@@ -69,10 +69,16 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.SetMediaExtrasDefaultsDisplay(_eventService.GetDefaultMediaExtras());
         DownloadQueueView.SetCookieChannelDisplay(_eventService.GetCookieChannel());
         DownloadQueueView.SetProxySettingsDisplay(_eventService.GetProxySettings());
+        DownloadQueueView.SetSidecarUpdateSettingsDisplay(_eventService.GetSidecarUpdateSettings());
         DownloadQueueView.SetFilenameTemplateDisplay(_eventService.GetFilenameTemplate());
         DownloadQueueView.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
         DownloadQueueView.CookieChannelChanged += OnCookieChannelChanged;
         DownloadQueueView.ProxySettingsChanged += OnProxySettingsChanged;
+        DownloadQueueView.SidecarUpdateSettingsChanged += OnSidecarUpdateSettingsChanged;
+        DownloadQueueView.CheckSidecarUpdatesRequested += OnCheckSidecarUpdatesRequested;
+        DownloadQueueView.ApplySidecarUpdatesRequested += OnApplySidecarUpdatesRequested;
+        DownloadQueueView.PinSidecarVersionRequested += OnPinSidecarVersionRequested;
+        DownloadQueueView.RollbackSidecarRequested += OnRollbackSidecarRequested;
         DownloadQueueView.FilenameTemplateChanged += OnFilenameTemplateChanged;
 
         HistoryView.FilterChanged += (_, _) => RefreshHistory();
@@ -658,6 +664,83 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             UrlStatusText.Text = $"Proxy settings failed: {ex.Message}";
+        }
+    }
+
+    private void OnSidecarUpdateSettingsChanged(object? sender, SidecarUpdateSettings settings)
+    {
+        try
+        {
+            _eventService.SetSidecarUpdateSettings(settings);
+            UrlStatusText.Text = "Sidecar update settings saved";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Sidecar settings failed: {ex.Message}";
+        }
+    }
+
+    private void OnCheckSidecarUpdatesRequested(object? sender, EventArgs e)
+    {
+        try
+        {
+            var result = _eventService.CheckSidecarUpdates();
+            var message =
+                $"Toolchain {result.Toolchain.InstalledVersion ?? "none"}"
+                + $" → {result.Toolchain.AvailableVersion ?? "none"}"
+                + (result.Toolchain.UpdateAvailable ? " (update)" : "")
+                + $"; Plugin {result.Plugin.InstalledVersion ?? "none"}"
+                + $" → {result.Plugin.AvailableVersion ?? "none"}"
+                + (result.Plugin.UpdateAvailable ? " (update)" : "");
+            DownloadQueueView.SetSidecarUpdateStatus(message);
+            UrlStatusText.Text = "Sidecar update check complete";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Sidecar check failed: {ex.Message}";
+        }
+    }
+
+    private void OnApplySidecarUpdatesRequested(object? sender, EventArgs e)
+    {
+        try
+        {
+            var result = _eventService.ApplySidecarUpdates();
+            DownloadQueueView.SetSidecarUpdateStatus($"Apply: {result.Outcome}");
+            UrlStatusText.Text = $"Sidecar updates: {result.Outcome}";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Sidecar apply failed: {ex.Message}";
+        }
+    }
+
+    private void OnPinSidecarVersionRequested(object? sender, (string Component, string Version) args)
+    {
+        try
+        {
+            _eventService.PinSidecarVersion(args.Component, args.Version);
+            var settings = _eventService.GetSidecarUpdateSettings();
+            DownloadQueueView.SetSidecarUpdateSettingsDisplay(settings);
+            UrlStatusText.Text = $"Pinned {args.Component} to {args.Version}";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Pin failed: {ex.Message}";
+        }
+    }
+
+    private void OnRollbackSidecarRequested(object? sender, string component)
+    {
+        try
+        {
+            _eventService.RollbackSidecar(component);
+            UrlStatusText.Text = $"Rolled back {component}";
+            OnCheckSidecarUpdatesRequested(sender, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Rollback failed: {ex.Message}";
         }
     }
 

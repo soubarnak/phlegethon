@@ -115,6 +115,16 @@ const cookieFileInput = $("cookieFileInput");
 const cookieChannelApply = $("cookieChannelApply");
 const proxyUrlInput = $("proxyUrlInput");
 const proxySettingsApply = $("proxySettingsApply");
+const checkSidecarUpdatesOnLaunchInput = $("checkSidecarUpdatesOnLaunchInput");
+const checkSidecarUpdatesBtn = $("checkSidecarUpdatesBtn");
+const applySidecarUpdatesBtn = $("applySidecarUpdatesBtn");
+const toolchainPinInput = $("toolchainPinInput");
+const pinToolchainBtn = $("pinToolchainBtn");
+const rollbackToolchainBtn = $("rollbackToolchainBtn");
+const pluginPinInput = $("pluginPinInput");
+const pinPluginBtn = $("pinPluginBtn");
+const rollbackPluginBtn = $("rollbackPluginBtn");
+const sidecarUpdateStatus = $("sidecarUpdateStatus");
 const filenameTemplateInput = $("filenameTemplateInput");
 const filenameTemplateApply = $("filenameTemplateApply");
 const discardConfirmOverlay = $("discardConfirmOverlay");
@@ -1271,6 +1281,7 @@ async function openSettings() {
     const mediaDefaults = await invoke("get_default_media_extras");
     const cookieChannel = await invoke("get_cookie_channel");
     const proxySettings = await invoke("get_proxy_settings");
+    const sidecarSettings = await invoke("get_sidecar_update_settings");
     const filenameTemplate = await invoke("get_filename_template");
     const caps = await loadMediaExtrasCapabilities();
     state.pendingLibraryRoot = root;
@@ -1284,6 +1295,10 @@ async function openSettings() {
     cookiesFromBrowserInput.value = cookieChannel.cookies_from_browser || "";
     cookieFileInput.value = cookieChannel.cookie_file || "";
     proxyUrlInput.value = proxySettings.url || "";
+    checkSidecarUpdatesOnLaunchInput.checked = Boolean(sidecarSettings.check_on_launch);
+    toolchainPinInput.value = sidecarSettings.toolchain_pin || "";
+    pluginPinInput.value = sidecarSettings.plugin_pin || "";
+    sidecarUpdateStatus.textContent = "";
     filenameTemplateInput.value = filenameTemplate || "";
     const watcherPref = localStorage.getItem("phlegethon-clipboard-watcher") === "1";
     clipboardWatcherInput.checked = watcherPref;
@@ -1413,6 +1428,101 @@ proxySettingsApply.addEventListener("click", async () => {
     closeSettings();
   } catch (err) {
     showError(`Apply proxy settings failed: ${err}`);
+  }
+});
+
+async function persistSidecarUpdateSettings() {
+  await getInvoke()("set_sidecar_update_settings", {
+    settings: {
+      check_on_launch: checkSidecarUpdatesOnLaunchInput.checked,
+      toolchain_pin: toolchainPinInput.value.trim() || null,
+      plugin_pin: pluginPinInput.value.trim() || null,
+    },
+  });
+}
+
+checkSidecarUpdatesOnLaunchInput.addEventListener("change", async () => {
+  try {
+    await persistSidecarUpdateSettings();
+  } catch (err) {
+    showError(`Save sidecar settings failed: ${err}`);
+  }
+});
+
+function formatSidecarStatus(result) {
+  const tc = result.toolchain;
+  const pl = result.plugin;
+  return [
+    `Toolchain ${tc.installed_version || "none"} → ${tc.available_version || "none"}${tc.update_available ? " (update)" : ""}`,
+    `Plugin ${pl.installed_version || "none"} → ${pl.available_version || "none"}${pl.update_available ? " (update)" : ""}`,
+  ].join("; ");
+}
+
+checkSidecarUpdatesBtn.addEventListener("click", async () => {
+  try {
+    await persistSidecarUpdateSettings();
+    const result = await getInvoke()("check_sidecar_updates");
+    sidecarUpdateStatus.textContent = formatSidecarStatus(result);
+  } catch (err) {
+    showError(`Check sidecar updates failed: ${err}`);
+  }
+});
+
+applySidecarUpdatesBtn.addEventListener("click", async () => {
+  try {
+    await persistSidecarUpdateSettings();
+    const result = await getInvoke()("apply_sidecar_updates");
+    sidecarUpdateStatus.textContent = `Apply: ${result.outcome}`;
+  } catch (err) {
+    showError(`Apply sidecar updates failed: ${err}`);
+  }
+});
+
+pinToolchainBtn.addEventListener("click", async () => {
+  try {
+    const version = toolchainPinInput.value.trim();
+    if (!version) {
+      showError("Enter a toolchain version to pin");
+      return;
+    }
+    await getInvoke()("pin_sidecar_version", { component: "toolchain", version });
+    sidecarUpdateStatus.textContent = `Pinned toolchain to ${version}`;
+  } catch (err) {
+    showError(`Pin toolchain failed: ${err}`);
+  }
+});
+
+rollbackToolchainBtn.addEventListener("click", async () => {
+  try {
+    await getInvoke()("rollback_sidecar", { component: "toolchain" });
+    const result = await getInvoke()("check_sidecar_updates");
+    sidecarUpdateStatus.textContent = `Rolled back toolchain. ${formatSidecarStatus(result)}`;
+  } catch (err) {
+    showError(`Rollback toolchain failed: ${err}`);
+  }
+});
+
+pinPluginBtn.addEventListener("click", async () => {
+  try {
+    const version = pluginPinInput.value.trim();
+    if (!version) {
+      showError("Enter a plugin version to pin");
+      return;
+    }
+    await getInvoke()("pin_sidecar_version", { component: "plugin", version });
+    sidecarUpdateStatus.textContent = `Pinned plugin to ${version}`;
+  } catch (err) {
+    showError(`Pin plugin failed: ${err}`);
+  }
+});
+
+rollbackPluginBtn.addEventListener("click", async () => {
+  try {
+    await getInvoke()("rollback_sidecar", { component: "plugin" });
+    const result = await getInvoke()("check_sidecar_updates");
+    sidecarUpdateStatus.textContent = `Rolled back plugin. ${formatSidecarStatus(result)}`;
+  } catch (err) {
+    showError(`Rollback plugin failed: ${err}`);
   }
 });
 
