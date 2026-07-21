@@ -5523,3 +5523,162 @@ fn reorder_does_not_preempt_active_transfer() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Acceptance: Integrity Check (issue #51)
+// ---------------------------------------------------------------------------
+
+const HELLO_FILE_SHA256: &str =
+    "f69af9e91e9e5d93dac3c583e5e896dc71b756ef1a42ecbc2a0028393b487868";
+
+#[test]
+fn integrity_check_pass_completes_when_hash_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.set_job_expected_hash(&job_id, "sha-256", HELLO_FILE_SHA256)
+        .unwrap();
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "matching hash should complete, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "matching hash must not fail"
+    );
+
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job still queued");
+    assert_eq!(snap.status, "completed");
+}
+
+#[test]
+fn integrity_check_mismatch_fails_and_keeps_file_on_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.set_job_expected_hash(&job_id, "sha-256", "0".repeat(64).as_str())
+        .unwrap();
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { job_id: id, .. } if id == &job_id)),
+        "mismatch should emit JobFailed, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "mismatch must not complete"
+    );
+
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job still queued");
+    assert_eq!(snap.status, "failed");
+
+    let final_path = snap.destination.clone() + "/file.zip";
+    let final_path = std::path::PathBuf::from(final_path);
+    assert!(final_path.exists(), "mismatched file must remain on disk");
+    assert_eq!(
+        std::fs::read(&final_path).unwrap(),
+        b"hello world this is a test file"
+    );
+}
+
+#[test]
+fn integrity_check_skipped_when_no_expected_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "no hash should complete normally, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "no hash must not fail verification"
+    );
+
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job still queued");
+    assert_eq!(snap.status, "completed");
+}
+
+#[test]
+fn add_metalink_to_job_sets_expected_hash_from_xml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    let metalink_xml = format!(
+        r#"
+        <metalink>
+            <file name="file.zip">
+                <hash type="sha-256">{HELLO_FILE_SHA256}</hash>
+                <url>https://example.com/file.zip</url>
+            </file>
+        </metalink>
+    "#
+    );
+    core.add_metalink_to_job(&job_id, &metalink_xml).unwrap();
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "metalink hash match should complete, got: {events:?}"
+    );
+}
+
+#[test]
+fn set_job_expected_hash_from_sidecar_loads_checksum_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    let sidecar = tmp.path().join("file.zip.sha256");
+    std::fs::write(
+        &sidecar,
+        format!("{HELLO_FILE_SHA256}  file.zip\n"),
+    )
+    .unwrap();
+    core.set_job_expected_hash_from_sidecar(&job_id, &sidecar)
+        .unwrap();
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "sidecar hash match should complete, got: {events:?}"
+    );
+}
+

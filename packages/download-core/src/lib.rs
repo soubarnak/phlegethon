@@ -9,6 +9,7 @@ mod classification;
 mod event;
 mod extractor;
 mod http;
+mod integrity;
 mod job;
 mod job_signals;
 mod mirror_set;
@@ -29,6 +30,7 @@ pub use extractor::{
     MediaItem, ProbeResult, ProbeSelection, Quality,
 };
 pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
+pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
 pub use mirror_set::MirrorSet;
@@ -735,19 +737,62 @@ impl Core {
     pub fn add_metalink_to_job(&mut self, job_id: &str, xml: &str) -> Result<usize, String> {
         let urls = MirrorSet::from_metalink(xml);
         let count = urls.len();
-        if count == 0 {
-            return Ok(0);
-        }
+        let expected_hash = hash_from_metalink(xml);
         let job = self
             .jobs
             .iter_mut()
             .find(|j| j.id() == job_id)
             .ok_or_else(|| format!("job {job_id} not found"))?;
+        let mut changed = false;
+        if let Some(hash) = expected_hash {
+            job.set_expected_hash(hash);
+            changed = true;
+        }
         for url in urls {
             job.add_mirror(url);
+            changed = true;
         }
-        self.persist_queue_now()?;
+        if changed {
+            self.persist_queue_now()?;
+        }
         Ok(count)
+    }
+
+    /// Set a user-supplied expected hash for post-completion Integrity Check.
+    pub fn set_job_expected_hash(
+        &mut self,
+        job_id: &str,
+        algorithm: &str,
+        digest: &str,
+    ) -> Result<(), String> {
+        let hash = ExpectedHash::parse(algorithm, digest)?;
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        job.set_expected_hash(hash);
+        self.persist_queue_now()?;
+        Ok(())
+    }
+
+    /// Load an expected hash from a GNU checksum sidecar file on disk.
+    pub fn set_job_expected_hash_from_sidecar(
+        &mut self,
+        job_id: &str,
+        sidecar_path: &Path,
+    ) -> Result<(), String> {
+        let text = std::fs::read_to_string(sidecar_path)
+            .map_err(|e| format!("read sidecar {}: {e}", sidecar_path.display()))?;
+        let hash = ExpectedHash::from_sidecar_contents(&text)?;
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        job.set_expected_hash(hash);
+        self.persist_queue_now()?;
+        Ok(())
     }
 
     /// Return all mirror URLs for a job.
@@ -1378,15 +1423,7 @@ impl Core {
                             bytes_downloaded: bytes,
                             total_bytes: total_for_progress,
                         });
-                        self.jobs[i].mark_completed();
-                        self.event_tx
-                            .send(CoreEvent::JobCompleted {
-                                job_id: job_id.clone(),
-                                bytes_written: bytes,
-                                path,
-                            })
-                            .map_err(|_| "event channel closed".to_string())?;
-                        self.persist_queue_now()?;
+                        self.finalize_completed_job(&job_id, i, &path, bytes)?;
                     }
                     Ok(ExtractorDownloadOutcome::Stopped) => {
                         self.finalize_stop_after_transfer(&job_id)?;
@@ -1723,10 +1760,34 @@ impl Core {
         std::fs::rename(part_path, file_path)
             .map_err(|e| format!("rename {part_path:?} -> {file_path:?}: {e}"))?;
 
+        self.finalize_completed_job(job_id, job_index, file_path, total)
+    }
+
+    /// Mark a job Completed after optional Integrity Check, or Failed on mismatch.
+    fn finalize_completed_job(
+        &mut self,
+        job_id: &str,
+        job_index: usize,
+        file_path: &Path,
+        bytes_written: u64,
+    ) -> Result<(), String> {
+        if let Some(expected) = self.jobs[job_index].expected_hash().cloned() {
+            if let Err(err) = expected.verify_file(file_path) {
+                self.jobs[job_index].mark_failed();
+                self.event_tx
+                    .send(CoreEvent::JobFailed {
+                        job_id: job_id.to_string(),
+                        error: err,
+                    })
+                    .map_err(|_| "event channel closed".to_string())?;
+                return self.persist_queue_now();
+            }
+        }
+
         self.event_tx
             .send(CoreEvent::JobCompleted {
                 job_id: job_id.to_string(),
-                bytes_written: total,
+                bytes_written,
                 path: file_path.to_path_buf(),
             })
             .map_err(|_| "event channel closed".to_string())?;

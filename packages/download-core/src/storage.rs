@@ -3,6 +3,7 @@
 //! Queue state lives at `{library_root}/.phlegethon/jobs.json`.
 //! Writes are atomic (temp file + rename).
 
+use crate::integrity::ExpectedHash;
 use crate::job::{Job, JobState};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -47,6 +48,8 @@ pub struct PersistedJob {
     pub source: Option<String>,
     pub extractor_format: Option<String>,
     pub filename: String,
+    #[serde(default)]
+    pub expected_hash: Option<ExpectedHash>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

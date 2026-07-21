@@ -1,5 +1,6 @@
 //! Job struct — state machine per download job.
 
+use crate::integrity::ExpectedHash;
 use crate::mirror_set::MirrorSet;
 use crate::storage::{PersistedJob, PersistedJobState};
 use std::path::PathBuf;
@@ -104,6 +105,8 @@ pub struct Job {
     extractor_format: Option<String>,
     /// Final filename under the Job Destination (stable across restarts).
     filename: String,
+    /// Optional expected digest for post-completion Integrity Check.
+    expected_hash: Option<ExpectedHash>,
 }
 
 impl Job {
@@ -176,6 +179,7 @@ impl Job {
             source,
             extractor_format: None,
             filename,
+            expected_hash: None,
         }
     }
 
@@ -197,6 +201,7 @@ impl Job {
             source: persisted.source,
             extractor_format: persisted.extractor_format,
             filename: persisted.filename,
+            expected_hash: persisted.expected_hash,
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -228,6 +233,7 @@ impl Job {
             source: self.source.clone(),
             extractor_format: self.extractor_format.clone(),
             filename: self.filename.clone(),
+            expected_hash: self.expected_hash.clone(),
         }
     }
 
@@ -341,6 +347,18 @@ impl Job {
 
     pub fn set_filename(&mut self, filename: impl Into<String>) {
         self.filename = filename.into();
+    }
+
+    pub fn expected_hash(&self) -> Option<&ExpectedHash> {
+        self.expected_hash.as_ref()
+    }
+
+    pub fn set_expected_hash(&mut self, hash: ExpectedHash) {
+        self.expected_hash = Some(hash);
+    }
+
+    pub fn clear_expected_hash(&mut self) {
+        self.expected_hash = None;
     }
 
     /// Final file path for this job under its Job Destination.
