@@ -128,6 +128,24 @@
                                 Spacing="6"
                                 VerticalAlignment="Center">
                                 <Button
+                                    Content="↑"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="{ThemeResource GeistTypeSize12}"
+                                    Height="28"
+                                    Width="28"
+                                    Padding="0"
+                                    Click="OnMoveUpClick"
+                                    ToolTipService.ToolTip="Move up" />
+                                <Button
+                                    Content="↓"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="{ThemeResource GeistTypeSize12}"
+                                    Height="28"
+                                    Width="28"
+                                    Padding="0"
+                                    Click="OnMoveDownClick"
+                                    ToolTipService.ToolTip="Move down" />
+                                <Button
                                     Content="{Binding ActionLabel}"
                                     FontFamily="{ThemeResource GeistSansFont}"
                                     FontSize="{ThemeResource GeistTypeSize12}"
@@ -170,12 +188,36 @@
             BorderThickness="0,1,0,0"
             Padding="12,6"
             Background="{ThemeResource GeistSurfaceBrush}">
-            <TextBlock
-                x:Name="StatusFooter"
-                Text="Ready"
-                FontFamily="{ThemeResource GeistSansFont}"
-                FontSize="{ThemeResource GeistTypeSize12}"
-                Foreground="{ThemeResource GeistTextSecondaryBrush}" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock
+                    x:Name="StatusFooter"
+                    Text="Ready"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    VerticalAlignment="Center" />
+                <TextBlock
+                    Text="Active limit"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    VerticalAlignment="Center"
+                    Margin="16,0,0,0" />
+                <NumberBox
+                    x:Name="ActiveJobLimitBox"
+                    Minimum="1"
+                    SpinButtonPlacementMode="Inline"
+                    Width="72"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <Button
+                    Content="Apply"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Click="OnActiveJobLimitApply" />
+            </StackPanel>
         </Border>
     </Grid>
 </UserControl>

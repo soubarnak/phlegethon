@@ -63,6 +63,8 @@ const settingsClose = $("settingsClose");
 const libraryRootPath = $("libraryRootPath");
 const libraryRootPick = $("libraryRootPick");
 const libraryRootApply = $("libraryRootApply");
+const activeJobLimitInput = $("activeJobLimitInput");
+const activeJobLimitApply = $("activeJobLimitApply");
 const discardConfirmOverlay = $("discardConfirmOverlay");
 const discardConfirmTitle = $("discardConfirmTitle");
 const discardConfirmBody = $("discardConfirmBody");
@@ -506,7 +508,7 @@ function renderQueue() {
   queueEmpty.style.display = "none";
 
   let html = "";
-  state.jobs.forEach((job) => {
+  state.jobs.forEach((job, index) => {
     const pct = displayProgressPercent(job.bytes_downloaded, job.total_bytes);
     const hasTotal = pct != null;
 
@@ -554,6 +556,8 @@ function renderQueue() {
         </div>
         <div class="row-meta">${formatBytes(job.bytes_downloaded)}${sizeLabel ? ` / ${sizeLabel}` : ""}${hasTotal ? ` (${pct}%)` : ""}</div>
         <div class="row-actions">
+          ${index > 0 ? `<button class="btn-icon btn-sm" data-action="reorder-up" data-index="${index}" title="Move up">↑</button>` : ""}
+          ${index < state.jobs.length - 1 ? `<button class="btn-icon btn-sm" data-action="reorder-down" data-index="${index}" title="Move down">↓</button>` : ""}
           ${job.status === "pending" || job.status === "downloading" ? `<button class="btn-icon btn-sm" data-action="pause" data-job-id="${job.job_id}" title="Pause">⏸</button>` : ""}
           ${job.status === "paused" ? `<button class="btn-icon btn-sm" data-action="resume" data-job-id="${job.job_id}" title="Resume">▶</button>` : ""}
           ${job.status === "failed" ? `<button class="btn-icon btn-sm" data-action="retry" data-job-id="${job.job_id}" title="Retry">↻</button>` : ""}
@@ -570,6 +574,10 @@ function renderQueue() {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const action = btn.dataset.action;
+      if (action === "reorder-up" || action === "reorder-down") {
+        handleReorder(action, Number(btn.dataset.index));
+        return;
+      }
       const jobId = btn.dataset.jobId;
       handleJobAction(action, jobId);
     });
@@ -636,6 +644,16 @@ discardConfirmOverlay.addEventListener("click", (e) => {
     closeDiscardConfirm(false);
   }
 });
+
+async function handleReorder(action, fromIndex) {
+  const toIndex = action === "reorder-up" ? fromIndex - 1 : fromIndex + 1;
+  try {
+    await getInvoke()("reorder_job", { fromIndex, toIndex });
+    await refreshJobs();
+  } catch (err) {
+    showError(`Reorder failed: ${err}`);
+  }
+}
 
 async function handleJobAction(action, jobId) {
   try {
@@ -909,8 +927,10 @@ async function openSettings() {
   try {
     const invoke = getInvoke();
     const root = await invoke("get_library_root");
+    const limit = await invoke("get_active_job_limit");
     state.pendingLibraryRoot = root;
     libraryRootPath.value = root || "";
+    activeJobLimitInput.value = String(limit);
     settingsOverlay.hidden = false;
   } catch (err) {
     showError(`Settings failed: ${err}`);
@@ -952,6 +972,20 @@ libraryRootApply.addEventListener("click", async () => {
     closeSettings();
   } catch (err) {
     showError(`Apply Library Root failed: ${err}`);
+  }
+});
+
+activeJobLimitApply.addEventListener("click", async () => {
+  const limit = Number.parseInt(activeJobLimitInput.value, 10);
+  if (!Number.isFinite(limit) || limit < 1) {
+    showError("Active Job Limit must be at least 1.");
+    return;
+  }
+  try {
+    await getInvoke()("set_active_job_limit", { limit });
+    closeSettings();
+  } catch (err) {
+    showError(`Apply Active Job Limit failed: ${err}`);
   }
 });
 

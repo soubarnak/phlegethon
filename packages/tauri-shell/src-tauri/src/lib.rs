@@ -19,7 +19,7 @@ use tauri_plugin_dialog::DialogExt;
 // ---------------------------------------------------------------------------
 
 struct AppState {
-    core: Mutex<Core>,
+    core: Arc<Mutex<Core>>,
     job_signals: Arc<JobSignals>,
     event_rx: Mutex<crossbeam_channel::Receiver<CoreEvent>>,
     library_root: Mutex<Option<PathBuf>>,
@@ -47,7 +47,7 @@ impl AppState {
         );
 
         Self {
-            core: Mutex::new(core),
+            core: Arc::new(Mutex::new(core)),
             job_signals,
             event_rx: Mutex::new(rx),
             library_root: Mutex::new(None),
@@ -308,10 +308,8 @@ fn process_pending(app: tauri::AppHandle, state: State<AppState>) -> Result<(), 
         };
 
         if let Some(state) = app.try_state::<AppState>() {
-            if let Ok(mut core) = state.core.lock() {
-                if let Err(e) = core.process_pending() {
-                    log::error!("process_pending failed: {e}");
-                }
+            if let Err(e) = Core::dispatch_pending(Arc::clone(&state.core)) {
+                log::error!("dispatch_pending failed: {e}");
             }
         }
 
@@ -367,6 +365,28 @@ fn discard_job(state: State<AppState>, job_id: String) -> Result<(), String> {
 
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.discard_job(&job_id)
+}
+
+#[tauri::command]
+fn get_active_job_limit(state: State<AppState>) -> Result<u32, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.active_job_limit())
+}
+
+#[tauri::command]
+fn set_active_job_limit(state: State<AppState>, limit: u32) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_active_job_limit(limit)
+}
+
+#[tauri::command]
+fn reorder_job(
+    state: State<AppState>,
+    from_index: usize,
+    to_index: usize,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.reorder_job(from_index, to_index)
 }
 
 #[tauri::command]
@@ -473,6 +493,9 @@ pub fn run() {
             resume_job,
             retry_job,
             discard_job,
+            get_active_job_limit,
+            set_active_job_limit,
+            reorder_job,
             poll_events,
         ])
         .run(tauri::generate_context!())

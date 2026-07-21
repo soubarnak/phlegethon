@@ -143,6 +143,24 @@ internal static class CoreBridge
         IntPtr errorBuf,
         int errorBufLen);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern uint core_get_active_job_limit(IntPtr handle);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int core_set_active_job_limit(
+        IntPtr handle,
+        uint limit,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int core_reorder_job(
+        IntPtr handle,
+        UIntPtr fromIndex,
+        UIntPtr toIndex,
+        IntPtr errorBuf,
+        int errorBufLen);
+
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
@@ -332,6 +350,26 @@ public class CoreHandle : IDisposable
     public void ProcessPending()
     {
         ThrowOnError(CoreBridge.core_process_pending(_handle, IntPtr.Zero, 0));
+    }
+
+    public uint GetActiveJobLimit()
+    {
+        return CoreBridge.core_get_active_job_limit(_handle);
+    }
+
+    public void SetActiveJobLimit(uint limit)
+    {
+        ThrowOnError(CoreBridge.core_set_active_job_limit(_handle, limit, IntPtr.Zero, 0));
+    }
+
+    public void ReorderJob(int fromIndex, int toIndex)
+    {
+        ThrowOnError(CoreBridge.core_reorder_job(
+            _handle,
+            (UIntPtr)(uint)fromIndex,
+            (UIntPtr)(uint)toIndex,
+            IntPtr.Zero,
+            0));
     }
 
     public string DrainEvents()

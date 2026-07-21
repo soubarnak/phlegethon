@@ -111,10 +111,22 @@ public sealed partial class DownloadQueueControl : UserControl
     {
         this.InitializeComponent();
         DownloadList.ItemsSource = _items;
+        ActiveJobLimitBox.Value = 3;
     }
+
+    /// <summary>Sync the Active Job Limit field from Core settings.</summary>
+    public void SetActiveJobLimitDisplay(int limit)
+    {
+        ActiveJobLimitBox.Value = limit;
+    }
+
+    public int ActiveJobLimitValue => (int)ActiveJobLimitBox.Value;
 
     /// <summary>Raised when the user clicks Discard on a row (before confirmation).</summary>
     public event EventHandler<DownloadItemViewModel>? DiscardRequested;
+
+    /// <summary>Raised when the user reorders a row (fromIndex, toIndex).</summary>
+    public event EventHandler<(int FromIndex, int ToIndex)>? ReorderRequested;
 
     /// <summary>
     /// Add or update a job row.
@@ -280,6 +292,36 @@ public sealed partial class DownloadQueueControl : UserControl
         var item = (DownloadItemViewModel)button.DataContext;
         DiscardRequested?.Invoke(this, item);
     }
+
+    private void OnMoveUpClick(object sender, RoutedEventArgs e)
+    {
+        var button = (Button)sender;
+        var item = (DownloadItemViewModel)button.DataContext;
+        var index = _items.IndexOf(item);
+        if (index > 0)
+        {
+            ReorderRequested?.Invoke(this, (index, index - 1));
+        }
+    }
+
+    private void OnMoveDownClick(object sender, RoutedEventArgs e)
+    {
+        var button = (Button)sender;
+        var item = (DownloadItemViewModel)button.DataContext;
+        var index = _items.IndexOf(item);
+        if (index >= 0 && index < _items.Count - 1)
+        {
+            ReorderRequested?.Invoke(this, (index, index + 1));
+        }
+    }
+
+    private void OnActiveJobLimitApply(object sender, RoutedEventArgs e)
+    {
+        ActiveJobLimitChanged?.Invoke(this, ActiveJobLimitValue);
+    }
+
+    /// <summary>Raised when the user applies a new Active Job Limit.</summary>
+    public event EventHandler<int>? ActiveJobLimitChanged;
 
     // -----------------------------------------------------------------------
     // Helpers

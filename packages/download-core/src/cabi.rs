@@ -30,7 +30,7 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -133,7 +133,7 @@ pub unsafe extern "C" fn core_create() -> *mut Core {
         // We need to keep the receiver alive to drain events.
         // We store it in a leaked box alongside the core.
         let ctx = Box::new(CoreContext {
-            core: Mutex::new(Some(core)),
+            core: Arc::new(Mutex::new(core)),
             event_rx: Mutex::new(Some(rx)),
             job_signals,
         });
@@ -143,7 +143,7 @@ pub unsafe extern "C" fn core_create() -> *mut Core {
 
 /// Internal context stored alongside the Core handle.
 struct CoreContext {
-    core: Mutex<Option<Core>>,
+    core: Arc<Mutex<Core>>,
     event_rx: Mutex<Option<crossbeam_channel::Receiver<CoreEvent>>>,
     job_signals: std::sync::Arc<crate::job_signals::JobSignals>,
 }
@@ -173,7 +173,7 @@ pub unsafe extern "C" fn core_set_library_root(
         let ctx = &*(handle as *mut CoreContext);
         let path_str = cstr_to_str(path);
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
         match core.set_library_root(std::path::PathBuf::from(path_str)) {
             Ok(()) => 0,
             Err(e) => {
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn core_get_library_root(
     catch_panic_i32!({
         let ctx = &*(handle as *mut CoreContext);
         let core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_ref().unwrap();
+        let core = &*core_guard;
         match core.library_root() {
             Some(root) => {
                 write_str_to_buf(&root.to_string_lossy(), out_path_buf, out_buf_len);
@@ -275,7 +275,7 @@ pub unsafe extern "C" fn core_enqueue_with_destination(
             }
         };
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
 
         match core.enqueue(url_str, dest) {
             Ok(outcome) => {
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn core_probe(
         let ctx = &*(handle as *mut CoreContext);
         let url_str = cstr_to_str(url);
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
 
         match core.probe(url_str) {
             Ok(result) => {
@@ -395,7 +395,7 @@ pub unsafe extern "C" fn core_confirm_probe_selection(
         };
 
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
 
         match core.confirm_probe_selection(&selection, args.destination) {
             Ok(job_ids) => {
@@ -455,7 +455,7 @@ pub unsafe extern "C" fn core_preview_probe_destination(
         };
 
         let core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_ref().unwrap();
+        let core = &*core_guard;
 
         match core.preview_probe_destination(&selection, args.destination) {
             Ok(preview) => {
@@ -488,7 +488,7 @@ macro_rules! lifecycle_cmd {
                 let ctx = &*(handle as *mut CoreContext);
                 let jid = cstr_to_str(job_id);
                 let mut core_guard = ctx.core.lock().unwrap();
-                let core = core_guard.as_mut().unwrap();
+                let core = &mut *core_guard;
                 match core.$method(jid) {
                     Ok(()) => 0,
                     Err(e) => {
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn core_pause_job(
 
         {
             let core_guard = ctx.core.lock().unwrap();
-            let core = core_guard.as_ref().unwrap();
+            let core = &*core_guard;
             if let Err(err) = core.can_pause_job(jid) {
                 write_str_to_buf(&err, error_buf, error_buf_len);
                 return -1;
@@ -530,7 +530,7 @@ pub unsafe extern "C" fn core_pause_job(
         }
 
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
         match core.finish_pause_if_idle(jid) {
             Ok(()) => 0,
             Err(e) => {
@@ -561,7 +561,7 @@ pub unsafe extern "C" fn core_discard_job(
         }
 
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
         match core.discard_job(jid) {
             Ok(()) => 0,
             Err(e) => {
@@ -587,9 +587,7 @@ pub unsafe extern "C" fn core_process_pending(
 ) -> i32 {
     catch_panic_i32!({
         let ctx = &*(handle as *mut CoreContext);
-        let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
-        match core.process_pending() {
+        match Core::dispatch_pending(Arc::clone(&ctx.core)) {
             Ok(()) => 0,
             Err(e) => {
                 write_str_to_buf(&e, error_buf, error_buf_len);
@@ -636,6 +634,60 @@ pub unsafe extern "C" fn core_drain_events_json(
 }
 
 // ---------------------------------------------------------------------------
+// Active Job Limit + queue reorder
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn core_get_active_job_limit(handle: *mut Core) -> u32 {
+    let ctx = &*(handle as *mut CoreContext);
+    let core_guard = ctx.core.lock().unwrap();
+    core_guard.active_job_limit()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_set_active_job_limit(
+    handle: *mut Core,
+    limit: u32,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = &mut *core_guard;
+        match core.set_active_job_limit(limit) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_reorder_job(
+    handle: *mut Core,
+    from_index: usize,
+    to_index: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = &mut *core_guard;
+        match core.reorder_job(from_index, to_index) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Bandwidth caps
 // ---------------------------------------------------------------------------
 
@@ -646,7 +698,7 @@ pub unsafe extern "C" fn core_set_global_bandwidth_cap(
 ) {
     let ctx = &*(handle as *mut CoreContext);
     let mut core_guard = ctx.core.lock().unwrap();
-    let core = core_guard.as_mut().unwrap();
+    let core = &mut *core_guard;
     core.set_global_bandwidth_cap(cap);
 }
 
@@ -656,7 +708,7 @@ pub unsafe extern "C" fn core_remove_global_bandwidth_cap(
 ) {
     let ctx = &*(handle as *mut CoreContext);
     let mut core_guard = ctx.core.lock().unwrap();
-    let core = core_guard.as_mut().unwrap();
+    let core = &mut *core_guard;
     core.remove_global_bandwidth_cap();
 }
 
@@ -672,7 +724,7 @@ pub unsafe extern "C" fn core_set_job_bandwidth_cap(
         let ctx = &*(handle as *mut CoreContext);
         let jid = cstr_to_str(job_id);
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
         match core.set_job_bandwidth_cap(jid, cap) {
             Ok(()) => 0,
             Err(e) => {
@@ -694,7 +746,7 @@ pub unsafe extern "C" fn core_remove_job_bandwidth_cap(
         let ctx = &*(handle as *mut CoreContext);
         let jid = cstr_to_str(job_id);
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
         match core.remove_job_bandwidth_cap(jid) {
             Ok(()) => 0,
             Err(e) => {
@@ -722,7 +774,7 @@ pub unsafe extern "C" fn core_add_job_mirror(
         let jid = cstr_to_str(job_id);
         let url_str = cstr_to_str(url);
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
         match core.add_job_mirror(jid, url_str.to_string()) {
             Ok(()) => 0,
             Err(e) => {
@@ -746,7 +798,7 @@ pub unsafe extern "C" fn core_job_mirrors(
         let ctx = &*(handle as *mut CoreContext);
         let jid = cstr_to_str(job_id);
         let mut core_guard = ctx.core.lock().unwrap();
-        let core = core_guard.as_mut().unwrap();
+        let core = &mut *core_guard;
         match core.job_mirrors(jid) {
             Ok(mirrors) => {
                 let json = serde_json::json!(mirrors);

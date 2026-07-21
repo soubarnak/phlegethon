@@ -75,4 +75,14 @@ impl JobSignals {
             .get(job_id)
             .is_some_and(|flag| flag.load(Ordering::Acquire))
     }
+
+    /// Number of jobs currently writing body bytes.
+    pub fn active_transfer_count(&self) -> usize {
+        self.transfer_active
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|flag| flag.load(Ordering::Acquire))
+            .count()
+    }
 }

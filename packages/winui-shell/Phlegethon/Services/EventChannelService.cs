@@ -243,6 +243,16 @@ public class EventChannelService : IDisposable
         _core.DiscardJob(jobId);
     }
 
+    public void ReorderJob(int fromIndex, int toIndex)
+    {
+        _core.ReorderJob(fromIndex, toIndex);
+    }
+
+    public void SetActiveJobLimit(uint limit)
+    {
+        _core.SetActiveJobLimit(limit);
+    }
+
     private static string TitleFromUrl(string url)
     {
         try

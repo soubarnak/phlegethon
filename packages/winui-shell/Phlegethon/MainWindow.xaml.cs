@@ -34,6 +34,10 @@ public sealed partial class MainWindow : Window
         this.Content.PrePaste += OnPaste;
 
         DownloadQueueView.DiscardRequested += OnDiscardRequested;
+        DownloadQueueView.ReorderRequested += OnReorderRequested;
+        DownloadQueueView.ActiveJobLimitChanged += OnActiveJobLimitChanged;
+
+        DownloadQueueView.SetActiveJobLimitDisplay((int)_eventService.Core.GetActiveJobLimit());
 
         // Wire up probe sheet
         ProbeSheetView.ResolveDestinationPreview = json => _eventService.PreviewProbeDestination(json);
@@ -203,6 +207,31 @@ public sealed partial class MainWindow : Window
         {
             DownloadQueueView.RemoveJob(args.JobId);
         });
+    }
+
+    private void OnReorderRequested(object? sender, (int FromIndex, int ToIndex) args)
+    {
+        try
+        {
+            _eventService.ReorderJob(args.FromIndex, args.ToIndex);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Reorder failed: {ex.Message}";
+        }
+    }
+
+    private void OnActiveJobLimitChanged(object? sender, int limit)
+    {
+        try
+        {
+            _eventService.SetActiveJobLimit((uint)limit);
+            UrlStatusText.Text = $"Active Job Limit set to {limit}";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Active Job Limit failed: {ex.Message}";
+        }
     }
 
     private async void OnDiscardRequested(object? sender, DownloadItemViewModel item)

@@ -5265,3 +5265,261 @@ fn extractor_cleanup_and_byte_totals_ignore_siblings_in_shared_parent() {
         "job-owned .ytdl orphans must still be cleaned"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Acceptance: Active Job Limit + queue reorder (issue #50)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct SlowTrackingHttp {
+    responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    in_flight: Arc<std::sync::atomic::AtomicU32>,
+    max_concurrent: Arc<std::sync::atomic::AtomicU32>,
+    delay: std::time::Duration,
+    start_order: Arc<Mutex<Vec<String>>>,
+}
+
+impl HttpBackend for SlowTrackingHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        self.start_order.lock().unwrap().push(url.to_string());
+        let cur = self
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        loop {
+            let max = self
+                .max_concurrent
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if cur > max {
+                if self
+                    .max_concurrent
+                    .compare_exchange(
+                        max,
+                        cur,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        std::thread::sleep(self.delay);
+
+        let responses = self.responses.lock().unwrap();
+        let full_body = responses
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        let total = full_body.len() as u64;
+        let data = match range {
+            Some(r) => {
+                let start = r.start.min(total);
+                let end = r.end.min(total).max(start);
+                &full_body[start as usize..end as usize]
+            }
+            None => full_body.as_slice(),
+        };
+        let result = write_fetch_to_sink(sink, data, total);
+        self.in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        let responses = self.responses.lock().unwrap();
+        Ok(responses.get(url).map(|b| b.len() as u64).unwrap_or(0))
+    }
+}
+
+fn slow_tracking_http(urls: &[(&str, usize)]) -> SlowTrackingHttp {
+    slow_tracking_http_with_delay(urls, std::time::Duration::from_millis(80))
+}
+
+fn slow_tracking_http_with_delay(urls: &[(&str, usize)], delay: std::time::Duration) -> SlowTrackingHttp {
+    let mut map = std::collections::HashMap::new();
+    for (url, size) in urls {
+        map.insert((*url).to_string(), vec![b'x'; *size]);
+    }
+    SlowTrackingHttp {
+        responses: Arc::new(Mutex::new(map)),
+        in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        max_concurrent: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        delay,
+        start_order: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+#[test]
+fn active_job_limit_defaults_to_three() {
+    let (core, _rx) = make_core(Box::new(fake_http()));
+    assert_eq!(core.active_job_limit(), DEFAULT_ACTIVE_JOB_LIMIT);
+}
+
+#[test]
+fn set_active_job_limit_rejects_zero() {
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    let err = core.set_active_job_limit(0).unwrap_err();
+    assert!(
+        err.contains("at least 1"),
+        "expected validation error, got: {err}"
+    );
+}
+
+#[test]
+fn active_job_limit_caps_concurrent_transfers() {
+    let urls: Vec<_> = (1..=5)
+        .map(|n| {
+            (
+                format!("https://example.com/{n}.zip"),
+                64,
+            )
+        })
+        .collect();
+    let url_refs: Vec<(&str, usize)> = urls
+        .iter()
+        .map(|(u, s)| (u.as_str(), *s))
+        .collect();
+    let http = slow_tracking_http(&url_refs);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, rx) = Core::new(Box::new(http.clone()), Box::new(fake_toolchain()));
+    let core = Arc::new(Mutex::new(core));
+    core.lock().unwrap().set_library_root(tmp.path().join("library")).unwrap();
+
+    let mut job_ids = Vec::new();
+    for (url, _) in &urls {
+        let id = {
+            let mut guard = core.lock().unwrap();
+            match guard.enqueue(url, None).unwrap() {
+                EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
+                _ => panic!("expected enqueue_direct"),
+            }
+        };
+        job_ids.push(id);
+    }
+
+    {
+        let mut guard = core.lock().unwrap();
+        guard.set_active_job_limit(3).unwrap();
+    }
+
+    Core::dispatch_pending(Arc::clone(&core)).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert!(
+        http.max_concurrent.load(std::sync::atomic::Ordering::SeqCst) <= 3,
+        "at most 3 jobs should transfer concurrently"
+    );
+
+    let mut done = std::collections::HashSet::new();
+    for _ in 0..40 {
+        for ev in collect_events(&rx) {
+            if let CoreEvent::JobCompleted { job_id, .. } = ev {
+                done.insert(job_id);
+            }
+        }
+        if done.len() == job_ids.len() {
+            break;
+        }
+        Core::dispatch_pending(Arc::clone(&core)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(done.len(), job_ids.len(), "all jobs should complete");
+}
+
+#[test]
+fn reorder_moves_job_in_queue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let id_a = enqueue_direct_job_id(&mut core, "https://example.com/a.zip");
+    let id_b = enqueue_direct_job_id(&mut core, "https://example.com/b.zip");
+    let id_c = enqueue_direct_job_id(&mut core, "https://example.com/c.zip");
+
+    core.reorder_job(2, 0).unwrap();
+
+    let ids: Vec<String> = core
+        .list_job_snapshots()
+        .into_iter()
+        .map(|j| j.job_id)
+        .collect();
+    assert_eq!(ids, vec![id_c, id_a, id_b]);
+}
+
+#[test]
+fn reorder_does_not_preempt_active_transfer() {
+    let urls: Vec<String> = (1..=3)
+        .map(|n| format!("https://example.com/job{n}.zip"))
+        .collect();
+    let url_refs: Vec<(&str, usize)> = urls
+        .iter()
+        .map(|u| (u.as_str(), 256))
+        .collect();
+    let http = slow_tracking_http_with_delay(
+        &url_refs,
+        std::time::Duration::from_millis(400),
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, _rx) = Core::new(Box::new(http), Box::new(fake_toolchain()));
+    let core = Arc::new(Mutex::new(core));
+    core.lock().unwrap().set_library_root(tmp.path().join("library")).unwrap();
+
+    let mut job_ids = Vec::new();
+    for url in &urls {
+        let id = {
+            let mut guard = core.lock().unwrap();
+            match guard.enqueue(url, None).unwrap() {
+                EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
+                _ => panic!("expected enqueue_direct"),
+            }
+        };
+        job_ids.push(id);
+    }
+
+    {
+        let mut guard = core.lock().unwrap();
+        guard.set_active_job_limit(1).unwrap();
+    }
+
+    Core::dispatch_pending(Arc::clone(&core)).unwrap();
+
+    for _ in 0..40 {
+        if core
+            .lock()
+            .unwrap()
+            .job_signals()
+            .is_transfer_active(&job_ids[0])
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Core::dispatch_pending(Arc::clone(&core)).unwrap();
+    }
+
+    {
+        let mut guard = core.lock().unwrap();
+        assert!(
+            guard.job_signals().is_transfer_active(&job_ids[0]),
+            "job1 should be actively transferring"
+        );
+        guard.reorder_job(2, 0).unwrap();
+        assert!(
+            guard.job_signals().is_transfer_active(&job_ids[0]),
+            "reorder must not preempt an active transfer"
+        );
+    }
+}

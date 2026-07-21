@@ -16,11 +16,20 @@ pub const JOBS_FILENAME: &str = "jobs.json";
 
 const QUEUE_VERSION: u32 = 1;
 
+/// Default maximum concurrent transferring jobs.
+pub const DEFAULT_ACTIVE_JOB_LIMIT: u32 = 3;
+
+fn default_active_job_limit() -> u32 {
+    DEFAULT_ACTIVE_JOB_LIMIT
+}
+
 /// On-disk representation of the job queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedQueue {
     pub version: u32,
     pub global_bandwidth_cap: Option<u64>,
+    #[serde(default = "default_active_job_limit")]
+    pub active_job_limit: u32,
     pub jobs: Vec<PersistedJob>,
 }
 
@@ -108,11 +117,29 @@ pub fn load_global_bandwidth_cap(library_root: &Path) -> Result<Option<u64>, Str
     Ok(queue.global_bandwidth_cap)
 }
 
+/// Load the Active Job Limit from the queue file, if present.
+pub fn load_active_job_limit(library_root: &Path) -> Result<u32, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(DEFAULT_ACTIVE_JOB_LIMIT);
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    Ok(queue.active_job_limit)
+}
+
 /// Build a persisted queue snapshot from live jobs.
-pub fn build_queue(jobs: &[Job], global_bandwidth_cap: Option<u64>) -> PersistedQueue {
+pub fn build_queue(
+    jobs: &[Job],
+    global_bandwidth_cap: Option<u64>,
+    active_job_limit: u32,
+) -> PersistedQueue {
     PersistedQueue {
         version: QUEUE_VERSION,
         global_bandwidth_cap,
+        active_job_limit,
         jobs: jobs.iter().map(Job::to_persisted).collect(),
     }
 }
@@ -219,7 +246,7 @@ mod tests {
 
         let job = Job::new("https://example.com/file.zip".into(), root.clone());
 
-        let queue = build_queue(&[job], Some(1024));
+        let queue = build_queue(&[job], Some(1024), DEFAULT_ACTIVE_JOB_LIMIT);
         save_queue(&root, &queue).unwrap();
 
         let loaded = load_jobs(&root).unwrap();
@@ -300,7 +327,7 @@ mod tests {
         job.set_bytes_received(512);
         assert_eq!(job.persisted_state(), PersistedJobState::Downloading);
 
-        let queue = build_queue(&[job], None);
+        let queue = build_queue(&[job], None, DEFAULT_ACTIVE_JOB_LIMIT);
         save_queue(&root, &queue).unwrap();
 
         let loaded = load_jobs(&root).unwrap();
