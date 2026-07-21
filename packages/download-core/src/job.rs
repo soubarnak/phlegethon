@@ -204,13 +204,24 @@ impl Job {
         Ok(job)
     }
 
+    /// On-disk queue state for this job.
+    pub fn persisted_state(&self) -> PersistedJobState {
+        match self.state {
+            JobState::Pending if self.bytes_received > 0 => PersistedJobState::Downloading,
+            JobState::Pending => PersistedJobState::Pending,
+            JobState::Paused => PersistedJobState::Paused,
+            JobState::Failed => PersistedJobState::Failed,
+            JobState::Completed => PersistedJobState::Completed,
+        }
+    }
+
     /// Snapshot this job for queue persistence.
     pub fn to_persisted(&self) -> PersistedJob {
         PersistedJob {
             id: self.id.clone(),
             mirror_urls: self.mirror_urls().to_vec(),
             mirror_index: self.mirrors.current_index(),
-            state: PersistedJobState::from(self.state),
+            state: self.persisted_state(),
             destination: self.destination.clone(),
             bytes_received: self.bytes_received,
             bandwidth_cap: self.bandwidth_cap,

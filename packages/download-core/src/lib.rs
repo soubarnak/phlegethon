@@ -904,6 +904,19 @@ impl Core {
             };
 
             if let Some(format) = extractor_format {
+                let on_disk = storage::destination_byte_total(&dest);
+                if on_disk > 0 && !self.extractor.supports_extractor_resume() {
+                    self.jobs[i].mark_failed();
+                    self.event_tx
+                        .send(CoreEvent::JobFailed {
+                            job_id: job_id.clone(),
+                            error: "extractor cannot resume partial download; use Retry".into(),
+                        })
+                        .map_err(|_| "event channel closed".to_string())?;
+                    self.persist_queue_now()?;
+                    continue;
+                }
+
                 let live_bytes = self.jobs[i].live_downloaded();
                 live_bytes.store(0, Ordering::Release);
                 let total_for_progress = self.jobs[i].total_bytes();
@@ -1275,25 +1288,7 @@ impl Core {
     /// Used when the Extractor Toolchain is silent mid-transfer so Core can
     /// still emit [`CoreEvent::JobProgress`] from on-disk growth.
     fn destination_byte_total(dest: &Path) -> u64 {
-        fn walk(path: &Path) -> u64 {
-            let mut total = 0u64;
-            let Ok(entries) = std::fs::read_dir(path) else {
-                return 0;
-            };
-            for entry in entries.flatten() {
-                let child = entry.path();
-                let Ok(meta) = entry.metadata() else {
-                    continue;
-                };
-                if meta.is_dir() {
-                    total = total.saturating_add(walk(&child));
-                } else if meta.is_file() {
-                    total = total.saturating_add(meta.len());
-                }
-            }
-            total
-        }
-        walk(dest)
+        storage::destination_byte_total(dest)
     }
 
     /// Remove Extractor Toolchain temp/partial siblings under a Job Destination.

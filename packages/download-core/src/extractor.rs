@@ -91,6 +91,14 @@ pub trait ExtractorToolchain: Send + Sync {
     /// Core's process loop blocks until this method returns. Ignoring `stop`
     /// leaves Pause/Discard hanging. See module-level stop-signal contract.
     ///
+    /// Whether this toolchain can resume a partial download after relaunch.
+    ///
+    /// When `false`, Core marks interrupted extractor jobs Failed on relaunch
+    /// instead of silently restarting from zero.
+    fn supports_extractor_resume(&self) -> bool {
+        false
+    }
+
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
     fn download(
         &self,

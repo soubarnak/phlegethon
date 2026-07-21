@@ -44,26 +44,17 @@ pub struct PersistedJob {
 #[serde(rename_all = "lowercase")]
 pub enum PersistedJobState {
     Pending,
+    /// In-flight download interrupted before completion (relaunch auto-resumes).
+    Downloading,
     Paused,
     Failed,
     Completed,
 }
 
-impl From<JobState> for PersistedJobState {
-    fn from(state: JobState) -> Self {
-        match state {
-            JobState::Pending => Self::Pending,
-            JobState::Paused => Self::Paused,
-            JobState::Failed => Self::Failed,
-            JobState::Completed => Self::Completed,
-        }
-    }
-}
-
 impl From<PersistedJobState> for JobState {
     fn from(state: PersistedJobState) -> Self {
         match state {
-            PersistedJobState::Pending => Self::Pending,
+            PersistedJobState::Pending | PersistedJobState::Downloading => Self::Pending,
             PersistedJobState::Paused => Self::Paused,
             PersistedJobState::Failed => Self::Failed,
             PersistedJobState::Completed => Self::Completed,
@@ -147,12 +138,44 @@ pub fn save_queue(library_root: &Path, queue: &PersistedQueue) -> Result<(), Str
     Ok(())
 }
 
-/// Reconcile stored progress with the on-disk `.part` file length.
+/// Sum sizes of regular files under a Job Destination (recursive).
+pub fn destination_byte_total(dest: &Path) -> u64 {
+    fn walk(path: &Path) -> u64 {
+        let mut total = 0u64;
+        let Ok(entries) = fs::read_dir(path) else {
+            return 0;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                total = total.saturating_add(walk(&child));
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+        total
+    }
+    walk(dest)
+}
+
+/// Reconcile stored progress with on-disk partial data.
 ///
-/// - When a `.part` exists, its length is authoritative.
-/// - When `.part` is missing but stored progress > 0 (and job not completed),
+/// - HTTP jobs: `.part` length is authoritative when present.
+/// - Extractor jobs: sum of files under the Job Destination.
+/// - When partial data is missing but stored progress > 0 (and job not completed),
 ///   the job is marked Failed.
 pub fn reconcile_job(job: &mut Job) -> Result<(), String> {
+    if job.extractor_format().is_some() {
+        let on_disk = destination_byte_total(job.destination());
+        if on_disk > 0 {
+            job.set_bytes_received(on_disk);
+        }
+        return Ok(());
+    }
+
     let part_path = part_path_for_job(job);
     let stored = job.bytes_received();
 
@@ -247,5 +270,42 @@ mod tests {
 
         reconcile_job(&mut job).unwrap();
         assert_eq!(job.state(), JobState::Failed);
+    }
+
+    #[test]
+    fn reconcile_syncs_extractor_destination_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let mut job = Job::new("https://example.com/video".into(), root);
+        job.set_extractor_format("720p");
+        let dest = job.destination().clone();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("partial.bin"), b"partial extractor data").unwrap();
+
+        reconcile_job(&mut job).unwrap();
+        assert_eq!(job.bytes_received(), 22);
+    }
+
+    #[test]
+    fn downloading_state_round_trips_as_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut job = Job::new("https://example.com/a.zip".into(), root.clone());
+        let dest = job.destination().clone();
+        fs::create_dir_all(&dest).unwrap();
+        let part_path = part_path_for(&dest.join("a.zip"));
+        fs::write(&part_path, vec![0u8; 512]).unwrap();
+        job.set_bytes_received(512);
+        assert_eq!(job.persisted_state(), PersistedJobState::Downloading);
+
+        let queue = build_queue(&[job], None);
+        save_queue(&root, &queue).unwrap();
+
+        let loaded = load_jobs(&root).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].state(), JobState::Pending);
+        assert_eq!(loaded[0].bytes_received(), 512);
     }
 }

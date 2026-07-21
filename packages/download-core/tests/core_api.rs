@@ -1243,6 +1243,253 @@ fn restart_restores_jobs_and_resumes_from_part() {
     assert_eq!(on_disk, content);
 }
 
+// ---------------------------------------------------------------------------
+// Relaunch rules (issue #49)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn relaunch_in_progress_http_job_auto_resumes() {
+    let content =
+        b"relaunch downloading test file with enough bytes to split cleanly".to_vec();
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "https://example.com/relaunch-downloading.zip".into(),
+        content.clone(),
+    );
+    let http = StagedFakeHttp::new(map);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+
+    {
+        let (mut core, rx) = make_core(Box::new(http.clone()));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = enqueue_direct_job_id(&mut core, "https://example.com/relaunch-downloading.zip");
+        core.process_pending().unwrap();
+        collect_events(&rx);
+    }
+
+    let queue_raw = std::fs::read_to_string(root.join(".phlegethon").join("jobs.json")).unwrap();
+    assert!(
+        queue_raw.contains("\"downloading\""),
+        "in-progress HTTP job should persist as downloading, got: {queue_raw}"
+    );
+
+    let (mut core2, rx2) = make_core(Box::new(http));
+    core2.set_library_root(root.clone()).unwrap();
+
+    let snap = core2
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job restored after relaunch");
+    assert_eq!(snap.status, "pending");
+
+    core2.process_pending().unwrap();
+    let events = collect_events(&rx2);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "downloading job should auto-resume and complete after relaunch, got {events:?}"
+    );
+}
+
+#[test]
+fn relaunch_paused_job_stays_paused() {
+    let content =
+        b"relaunch paused test file with enough bytes to split cleanly".to_vec();
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "https://example.com/relaunch-paused.zip".into(),
+        content,
+    );
+    let http = StagedFakeHttp::new(map);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+
+    {
+        let (mut core, rx) = make_core(Box::new(http.clone()));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = enqueue_direct_job_id(&mut core, "https://example.com/relaunch-paused.zip");
+        core.process_pending().unwrap();
+        collect_events(&rx);
+        core.pause_job(&job_id).unwrap();
+        collect_events(&rx);
+    }
+
+    let (mut core2, rx2) = make_core(Box::new(http));
+    core2.set_library_root(root).unwrap();
+
+    let snap = core2
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job restored after relaunch");
+    assert_eq!(snap.status, "paused");
+
+    core2.process_pending().unwrap();
+    let events = collect_events(&rx2);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "paused job must not complete after relaunch, got {events:?}"
+    );
+    assert_eq!(
+        core2
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .expect("job still queued")
+            .status,
+        "paused"
+    );
+}
+
+#[test]
+fn relaunch_failed_job_stays_failed_until_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+
+    {
+        let (mut core, rx) = make_core(Box::new(FailingHttp));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = enqueue_direct_job_id(&mut core, "https://example.com/relaunch-failed.zip");
+        core.process_pending().unwrap();
+        collect_events(&rx);
+    }
+
+    let (mut core2, rx2) = make_core(Box::new(FailingHttp));
+    core2.set_library_root(root).unwrap();
+
+    let snap = core2
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job restored after relaunch");
+    assert_eq!(snap.status, "failed");
+
+    core2.process_pending().unwrap();
+    let events = collect_events(&rx2);
+    assert!(
+        events.is_empty(),
+        "failed job must not be processed until retry, got {events:?}"
+    );
+    assert_eq!(
+        core2
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .expect("job still queued")
+            .status,
+        "failed"
+    );
+
+    core2.retry_job(&job_id).unwrap();
+    core2.process_pending().unwrap();
+    let retry_events = collect_events(&rx2);
+    assert!(
+        retry_events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "explicit retry should process the job again"
+    );
+}
+
+#[test]
+fn relaunch_extractor_partial_without_resume_marks_failed() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=relaunch-ext",
+        "Relaunch Extractor",
+        "https://cdn.example.com/relaunch-ext.mp4",
+        vec![("720p", "720p")],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+    let job_dir;
+
+    {
+        let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+        core.set_library_root(root.clone()).unwrap();
+        core.probe("https://www.youtube.com/watch?v=relaunch-ext")
+            .unwrap();
+        collect_events(&rx);
+
+        let selection = ProbeSelection {
+            url: "https://www.youtube.com/watch?v=relaunch-ext".to_string(),
+            items: vec![ItemSelection {
+                item_id: "item-1".to_string(),
+                quality_id: "720p".to_string(),
+            }],
+        };
+        let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+        job_id = job_ids[0].clone();
+        job_dir = core
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .map(|j| PathBuf::from(j.destination))
+            .expect("job destination");
+    }
+
+    std::fs::create_dir_all(&job_dir).unwrap();
+    std::fs::write(
+        job_dir.join("extractor-partial.bin"),
+        b"partial extractor bytes from interrupted transfer",
+    )
+    .unwrap();
+
+    let (mut core2, rx2) = Core::new(Box::new(fake_http()), Box::new(fake_toolchain()));
+    core2.set_library_root(root).unwrap();
+
+    let snap = core2
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job restored after relaunch");
+    assert_eq!(snap.status, "pending");
+    assert!(
+        snap.bytes_downloaded > 0,
+        "reconcile should sync extractor partial bytes on load"
+    );
+
+    core2.process_pending().unwrap();
+    let events = collect_events(&rx2);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CoreEvent::JobFailed {
+                job_id: id,
+                error,
+            } if id == &job_id && error.contains("cannot resume")
+        )),
+        "extractor partial without resume support must surface Failed, got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "must not silently restart extractor download from zero"
+    );
+    assert_eq!(
+        core2
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .expect("job still queued")
+            .status,
+        "failed"
+    );
+}
+
 #[test]
 fn resume_starts_from_last_byte_not_zero() {
     // This test verifies that restart-from-zero is NOT the default path
