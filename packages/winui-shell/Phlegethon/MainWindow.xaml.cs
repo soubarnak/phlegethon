@@ -41,7 +41,9 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.SetActiveJobLimitDisplay((int)_eventService.Core.GetActiveJobLimit());
         DownloadQueueView.SetAudioOnlyModeDisplay(_eventService.GetAudioOnlyMode());
         DownloadQueueView.SetMediaExtrasDefaultsDisplay(_eventService.GetDefaultMediaExtras());
+        DownloadQueueView.SetCookieChannelDisplay(_eventService.GetCookieChannel());
         DownloadQueueView.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
+        DownloadQueueView.CookieChannelChanged += OnCookieChannelChanged;
 
         // Wire up probe sheet
         ProbeSheetView.ResolveDestinationPreview = json => _eventService.PreviewProbeDestination(json);
@@ -272,6 +274,19 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             UrlStatusText.Text = $"Media extras defaults failed: {ex.Message}";
+        }
+    }
+
+    private void OnCookieChannelChanged(object? sender, CookieChannel channel)
+    {
+        try
+        {
+            _eventService.SetCookieChannel(channel);
+            UrlStatusText.Text = "Cookie auth channel updated";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Cookie channel failed: {ex.Message}";
         }
     }
 

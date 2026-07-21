@@ -199,6 +199,19 @@ internal static class CoreBridge
         IntPtr outJsonBuf,
         int outBufLen);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_get_cookie_channel_json(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_set_cookie_channel_json(
+        IntPtr handle,
+        string channelJson,
+        IntPtr errorBuf,
+        int errorBufLen);
+
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
@@ -448,6 +461,19 @@ public class CoreHandle : IDisposable
         return CallWithJsonResult(
             (h, o, ol, e, el) => CoreBridge.core_get_media_extras_capabilities_json(h, o, ol),
             _handle);
+    }
+
+    public string GetCookieChannelJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_get_cookie_channel_json(h, o, ol),
+            _handle);
+    }
+
+    public void SetCookieChannelJson(string channelJson)
+    {
+        ThrowOnError(
+            CoreBridge.core_set_cookie_channel_json(_handle, channelJson, IntPtr.Zero, 0));
     }
 
     public string DrainEvents()

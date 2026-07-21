@@ -834,6 +834,55 @@ pub unsafe extern "C" fn core_get_media_extras_capabilities_json(
     })
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn core_get_cookie_channel_json(
+    handle: *mut Core,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        let json = serde_json::to_string(&core_guard.cookie_channel()).unwrap();
+        write_str_to_buf(&json, out_json_buf, out_buf_len);
+        0
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_set_cookie_channel_json(
+    handle: *mut Core,
+    channel_json: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let json_str = cstr_to_str(channel_json);
+        let channel: crate::cookie_channel::CookieChannel = match serde_json::from_str(json_str) {
+            Ok(c) => c,
+            Err(e) => {
+                write_str_to_buf(
+                    &format!("parse cookie channel JSON: {e}"),
+                    error_buf,
+                    error_buf_len,
+                );
+                return -1;
+            }
+        };
+
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = &mut *core_guard;
+        match core.set_cookie_channel(channel) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Bandwidth caps
 // ---------------------------------------------------------------------------

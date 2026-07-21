@@ -278,6 +278,19 @@ public class EventChannelService : IDisposable
             ?? new MediaExtrasCapabilities();
     }
 
+    public CookieChannel GetCookieChannel()
+    {
+        var json = _core.GetCookieChannelJson();
+        return System.Text.Json.JsonSerializer.Deserialize<CookieChannel>(json)
+            ?? new CookieChannel();
+    }
+
+    public void SetCookieChannel(CookieChannel channel)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(channel);
+        _core.SetCookieChannelJson(json);
+    }
+
     public string? SelectDefaultQuality(IReadOnlyList<Quality> qualities)
     {
         var payload = System.Text.Json.JsonSerializer.Serialize(

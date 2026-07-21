@@ -6,6 +6,7 @@
 mod bandwidth;
 mod cabi;
 mod classification;
+mod cookie_channel;
 mod disk_space;
 mod download_archive;
 mod media_extras;
@@ -27,6 +28,7 @@ pub use plugin_sidecar::{
 };
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
+pub use cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
 pub use bandwidth::{Clock, ManualClock, SystemClock, TransferProgress};
 pub use event::CoreEvent;
 pub use extractor::{
@@ -115,6 +117,7 @@ pub struct Core {
     default_quality_policy: DefaultQualityPolicy,
     audio_only_mode: bool,
     default_media_extras: MediaExtrasOptions,
+    cookie_channel: CookieChannel,
     clock: Arc<dyn bandwidth::Clock>,
     /// Pending probe results, keyed by URL.
     /// Stored until confirm or replaced by a new probe for the same URL.
@@ -276,6 +279,7 @@ impl Core {
             default_quality_policy: DefaultQualityPolicy::default(),
             audio_only_mode: false,
             default_media_extras: MediaExtrasOptions::default(),
+            cookie_channel: CookieChannel::default(),
             clock,
             pending_probes: HashMap::new(),
             last_progress_flush: Instant::now(),
@@ -384,6 +388,7 @@ impl Core {
         self.audio_only_mode = quality_settings.audio_only_mode;
         let media_settings = storage::load_media_extras_settings(&root)?;
         self.default_media_extras = media_settings.defaults;
+        self.cookie_channel = storage::load_cookie_channel(&root)?;
         self.download_archive = download_archive::DownloadArchive::load(&root)?;
         self.library_root = Some(root);
         self.last_progress_flush = Instant::now();
@@ -417,6 +422,7 @@ impl Core {
                 &self.default_quality_policy,
                 self.audio_only_mode,
                 &self.default_media_extras,
+                &self.cookie_channel,
             );
             storage::save_queue(root, &queue)?;
         }
@@ -919,6 +925,25 @@ impl Core {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Cookie auth channel
+    // -----------------------------------------------------------------------
+
+    /// Current cookie auth channel (settings + future Companion hand-off).
+    pub fn cookie_channel(&self) -> CookieChannel {
+        self.cookie_channel.clone()
+    }
+
+    /// Update the cookie auth channel and persist it.
+    ///
+    /// Companion and desktop settings both use this single channel.
+    pub fn set_cookie_channel(&mut self, channel: CookieChannel) -> Result<(), String> {
+        let channel = channel.normalized();
+        channel.validate()?;
+        self.cookie_channel = channel;
+        self.persist_queue_now()
+    }
+
     /// Effective media extras for a probe confirm (defaults + optional override).
     pub fn resolve_media_extras(
         &self,
@@ -1043,7 +1068,7 @@ impl Core {
     /// Errors (unknown URL, toolchain failure) produce a `ProbeFailed` event
     /// instead and return the error.
     pub fn probe(&mut self, url: &str) -> Result<ProbeResult, String> {
-        match self.extractor.probe(url) {
+        match self.extractor.probe(url, &self.cookie_channel) {
             Ok(mut result) => {
                 self.mark_archived_probe_items(&mut result.items);
 
@@ -1619,9 +1644,16 @@ impl Core {
                     let url_ref = url.as_str();
                     let format_ref = format.as_str();
                     let extras = media_extras;
+                    let cookies = self.cookie_channel.clone();
                     s.spawn(move || {
-                        let outcome =
-                            extractor.download(url_ref, format_ref, dest_ref, stop, &extras);
+                        let outcome = extractor.download(
+                            url_ref,
+                            format_ref,
+                            dest_ref,
+                            stop,
+                            &extras,
+                            &cookies,
+                        );
                         let _ = result_tx.send(outcome);
                     });
 

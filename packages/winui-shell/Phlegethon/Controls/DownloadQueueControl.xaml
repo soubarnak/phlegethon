@@ -248,6 +248,40 @@
                     Padding="8,0"
                     Margin="8,0,0,0"
                     Click="OnMediaExtrasDefaultsApply" />
+                <TextBlock
+                    Text="Cookies browser"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    VerticalAlignment="Center"
+                    Margin="16,0,0,0" />
+                <TextBox
+                    x:Name="CookiesFromBrowserBox"
+                    PlaceholderText="chrome, firefox, edge…"
+                    Width="120"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <TextBlock
+                    Text="Cookie file"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    VerticalAlignment="Center"
+                    Margin="8,0,0,0" />
+                <TextBox
+                    x:Name="CookieFileBox"
+                    PlaceholderText="Absolute path (optional)"
+                    Width="180"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <Button
+                    Content="Apply cookies"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="8,0,0,0"
+                    Click="OnCookieChannelApply" />
             </StackPanel>
         </Border>
     </Grid>

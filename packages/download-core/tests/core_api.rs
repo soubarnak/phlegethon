@@ -6314,3 +6314,42 @@ fn confirm_reselect_archived_item_creates_job() {
     );
 }
 
+#[test]
+fn cookie_channel_defaults_empty() {
+    let (core, _rx) = make_core(Box::new(fake_http()));
+    assert!(!core.cookie_channel().is_configured());
+}
+
+#[test]
+fn cookie_channel_persists_across_library_root_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(root.clone()).unwrap();
+
+    let channel = CookieChannel {
+        cookies_from_browser: Some("firefox".to_string()),
+        cookie_file: Some(root.join("cookies.txt")),
+    };
+    core.set_cookie_channel(channel.clone()).unwrap();
+
+    let (mut core2, _rx2) = make_core(Box::new(fake_http()));
+    core2.set_library_root(root).unwrap();
+    assert_eq!(core2.cookie_channel(), channel);
+}
+
+#[test]
+fn cookie_channel_rejects_relative_cookie_file() {
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    let tmp = tempfile::tempdir().unwrap();
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let err = core
+        .set_cookie_channel(CookieChannel {
+            cookies_from_browser: None,
+            cookie_file: Some(PathBuf::from("cookies.txt")),
+        })
+        .unwrap_err();
+    assert!(err.contains("absolute path"), "got: {err}");
+}
+

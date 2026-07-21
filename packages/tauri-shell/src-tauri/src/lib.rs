@@ -455,6 +455,21 @@ fn get_media_extras_capabilities(
 }
 
 #[tauri::command]
+fn get_cookie_channel(state: State<AppState>) -> Result<download_core::CookieChannel, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.cookie_channel())
+}
+
+#[tauri::command]
+fn set_cookie_channel(
+    state: State<AppState>,
+    channel: download_core::CookieChannel,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_cookie_channel(channel)
+}
+
+#[tauri::command]
 fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
     let rx = state.event_rx.lock().map_err(|e| e.to_string())?;
     let mut events = Vec::new();
@@ -565,6 +580,8 @@ pub fn run() {
             get_default_media_extras,
             set_default_media_extras,
             get_media_extras_capabilities,
+            get_cookie_channel,
+            set_cookie_channel,
             select_default_quality,
             reorder_job,
             poll_events,

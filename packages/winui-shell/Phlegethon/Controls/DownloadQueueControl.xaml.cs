@@ -132,12 +132,29 @@ public sealed partial class DownloadQueueControl : UserControl
         WriteThumbnailDefaultBox.IsChecked = options.WriteThumbnail;
     }
 
+    public void SetCookieChannelDisplay(CookieChannel channel)
+    {
+        CookiesFromBrowserBox.Text = channel.CookiesFromBrowser ?? string.Empty;
+        CookieFileBox.Text = channel.CookieFile ?? string.Empty;
+    }
+
     private void OnMediaExtrasDefaultsApply(object sender, RoutedEventArgs e)
     {
         MediaExtrasDefaultsChanged?.Invoke(this, new MediaExtrasOptions
         {
             WriteSubs = WriteSubsDefaultBox.IsChecked == true,
             WriteThumbnail = WriteThumbnailDefaultBox.IsChecked == true,
+        });
+    }
+
+    private void OnCookieChannelApply(object sender, RoutedEventArgs e)
+    {
+        var browser = CookiesFromBrowserBox.Text.Trim();
+        var file = CookieFileBox.Text.Trim();
+        CookieChannelChanged?.Invoke(this, new CookieChannel
+        {
+            CookiesFromBrowser = string.IsNullOrEmpty(browser) ? null : browser,
+            CookieFile = string.IsNullOrEmpty(file) ? null : file,
         });
     }
 
@@ -354,6 +371,9 @@ public sealed partial class DownloadQueueControl : UserControl
 
     /// <summary>Raised when the user applies media extras defaults.</summary>
     public event EventHandler<MediaExtrasOptions>? MediaExtrasDefaultsChanged;
+
+    /// <summary>Raised when the user applies cookie auth channel settings.</summary>
+    public event EventHandler<CookieChannel>? CookieChannelChanged;
 
     // -----------------------------------------------------------------------
     // Helpers

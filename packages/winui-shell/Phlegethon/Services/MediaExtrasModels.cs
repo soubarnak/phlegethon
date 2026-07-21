@@ -41,3 +41,13 @@ public sealed class MediaExtrasCapabilities
     [JsonPropertyName("embed_disabled_reason")]
     public string? EmbedDisabledReason { get; set; }
 }
+
+/// <summary>Single Core cookie auth channel for extractor probe/download.</summary>
+public sealed class CookieChannel
+{
+    [JsonPropertyName("cookies_from_browser")]
+    public string? CookiesFromBrowser { get; set; }
+
+    [JsonPropertyName("cookie_file")]
+    public string? CookieFile { get; set; }
+}

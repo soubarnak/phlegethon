@@ -78,6 +78,9 @@ const writeThumbnailDefault = $("writeThumbnailDefault");
 const embedSubsDefault = $("embedSubsDefault");
 const remuxDefault = $("remuxDefault");
 const mediaExtrasApply = $("mediaExtrasApply");
+const cookiesFromBrowserInput = $("cookiesFromBrowserInput");
+const cookieFileInput = $("cookieFileInput");
+const cookieChannelApply = $("cookieChannelApply");
 const discardConfirmOverlay = $("discardConfirmOverlay");
 const discardConfirmTitle = $("discardConfirmTitle");
 const discardConfirmBody = $("discardConfirmBody");
@@ -1074,6 +1077,7 @@ async function openSettings() {
     const limit = await invoke("get_active_job_limit");
     const audioOnly = await invoke("get_audio_only_mode");
     const mediaDefaults = await invoke("get_default_media_extras");
+    const cookieChannel = await invoke("get_cookie_channel");
     const caps = await loadMediaExtrasCapabilities();
     state.pendingLibraryRoot = root;
     libraryRootPath.value = root || "";
@@ -1083,6 +1087,8 @@ async function openSettings() {
     writeThumbnailDefault.checked = Boolean(mediaDefaults.write_thumbnail);
     embedSubsDefault.checked = Boolean(mediaDefaults.embed_subs);
     remuxDefault.checked = Boolean(mediaDefaults.remux);
+    cookiesFromBrowserInput.value = cookieChannel.cookies_from_browser || "";
+    cookieFileInput.value = cookieChannel.cookie_file || "";
     applyEmbedAvailability(settingsOverlay, caps);
     if (!caps.ffmpeg_available && caps.embed_disabled_reason) {
       mediaExtrasFfmpegNote.textContent = caps.embed_disabled_reason;
@@ -1177,6 +1183,22 @@ mediaExtrasApply.addEventListener("click", async () => {
     closeSettings();
   } catch (err) {
     showError(`Apply media defaults failed: ${err}`);
+  }
+});
+
+cookieChannelApply.addEventListener("click", async () => {
+  try {
+    const browser = cookiesFromBrowserInput.value.trim();
+    const cookieFile = cookieFileInput.value.trim();
+    await getInvoke()("set_cookie_channel", {
+      channel: {
+        cookies_from_browser: browser || null,
+        cookie_file: cookieFile || null,
+      },
+    });
+    closeSettings();
+  } catch (err) {
+    showError(`Apply cookie channel failed: ${err}`);
   }
 });
 

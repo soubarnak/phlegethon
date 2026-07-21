@@ -16,6 +16,7 @@
 //! [`FakeYtDlpExtractor`] returns canned yt-dlp JSON through the same parser.
 //! This module's unit tests use canned JSON strings.
 
+use crate::cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
 use crate::extractor::{
     ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
 };
@@ -215,17 +216,18 @@ impl YtDlpExtractorToolchain {
     /// extracting each video. Per-item qualities are resolved afterward via
     /// `enrich_playlist_item_qualities`.
     /// `--plugin-dirs` is included when configured (Launch Site Extractor Plugins).
-    pub(crate) fn probe_args(&self, url: &str) -> Vec<String> {
-        self.probe_args_for(url, true)
+    pub(crate) fn probe_args(&self, url: &str, cookies: &CookieChannel) -> Vec<String> {
+        self.probe_args_for(url, true, cookies)
     }
 
-    fn probe_args_for(&self, url: &str, flat_playlist: bool) -> Vec<String> {
+    fn probe_args_for(&self, url: &str, flat_playlist: bool, cookies: &CookieChannel) -> Vec<String> {
         let mut args = vec!["-J".to_string(), "--no-warnings".to_string()];
         if flat_playlist {
             args.push("--flat-playlist".to_string());
         } else {
             args.push("--no-playlist".to_string());
         }
+        args.extend(ytdlp_cookie_args(cookies));
         for dir in &self.config.plugin_dirs {
             args.push("--plugin-dirs".to_string());
             args.push(dir.display().to_string());
@@ -235,13 +237,18 @@ impl YtDlpExtractorToolchain {
     }
 
     /// Run yt-dlp with `-J` and return the raw JSON stdout.
-    fn run_probe(&self, url: &str) -> Result<String, String> {
-        self.run_probe_json(url, true)
+    fn run_probe(&self, url: &str, cookies: &CookieChannel) -> Result<String, String> {
+        self.run_probe_json(url, true, cookies)
     }
 
-    fn run_probe_json(&self, url: &str, flat_playlist: bool) -> Result<String, String> {
+    fn run_probe_json(
+        &self,
+        url: &str,
+        flat_playlist: bool,
+        cookies: &CookieChannel,
+    ) -> Result<String, String> {
         let mut cmd = Command::new(&self.config.binary_path);
-        for arg in self.probe_args_for(url, flat_playlist) {
+        for arg in self.probe_args_for(url, flat_playlist, cookies) {
             cmd.arg(arg);
         }
 
@@ -280,8 +287,8 @@ impl YtDlpExtractorToolchain {
     }
 
     /// Probe a single video URL and return selectable qualities.
-    fn probe_item_qualities(&self, item_url: &str) -> Vec<Quality> {
-        match self.run_probe_json(item_url, false) {
+    fn probe_item_qualities(&self, item_url: &str, cookies: &CookieChannel) -> Vec<Quality> {
+        match self.run_probe_json(item_url, false, cookies) {
             Ok(json) => match serde_json::from_str::<YtDlpVideoInfo>(&json) {
                 Ok(info) => {
                     let qualities = self.formats_to_qualities(&info.formats.unwrap_or_default());
@@ -298,7 +305,7 @@ impl YtDlpExtractorToolchain {
     }
 
     /// Resolve real per-video qualities for flat playlist entries (parallel).
-    fn enrich_playlist_item_qualities(&self, items: &mut [MediaItem]) {
+    fn enrich_playlist_item_qualities(&self, items: &mut [MediaItem], cookies: &CookieChannel) {
         use std::sync::Mutex;
 
         if items.is_empty() {
@@ -323,7 +330,7 @@ impl YtDlpExtractorToolchain {
                 scope.spawn(|| {
                     let mut local = Vec::with_capacity(batch.len());
                     for (idx, item_url) in batch {
-                        local.push((idx, self.probe_item_qualities(&item_url)));
+                        local.push((idx, self.probe_item_qualities(&item_url, cookies)));
                     }
                     results.lock().unwrap().extend(local);
                 });
@@ -582,18 +589,18 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         self.config.ffmpeg_dir.as_deref()
     }
 
-    fn probe(&self, url: &str) -> Result<ProbeResult, String> {
+    fn probe(&self, url: &str, cookies: &CookieChannel) -> Result<ProbeResult, String> {
         // Validate URL first
         url::Url::parse(url)
             .map_err(|e| format!("invalid URL '{url}': {e}"))?;
 
         // Run yt-dlp
-        let json = self.run_probe(url)?;
+        let json = self.run_probe(url, cookies)?;
 
         // Parse into ProbeResult
         let mut result = self.parse_probe_result(&json, url)?;
         if result.items.len() > 1 {
-            self.enrich_playlist_item_qualities(&mut result.items);
+            self.enrich_playlist_item_qualities(&mut result.items, cookies);
         }
 
         Ok(result)
@@ -606,6 +613,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         dest_dir: &std::path::Path,
         stop: &AtomicBool,
         media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
     ) -> Result<ExtractorDownloadOutcome, String> {
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
@@ -628,6 +636,8 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         for arg in ytdlp_media_extras_args(media_extras, ffmpeg_present) {
             cmd.arg(arg);
         }
+
+        append_ytdlp_cookie_args(&mut cmd, cookies);
 
         for dir in &self.config.plugin_dirs {
             cmd.arg("--plugin-dirs").arg(dir);
@@ -1496,7 +1506,7 @@ impl FakeYtDlpExtractor {
 }
 
 impl ExtractorToolchain for FakeYtDlpExtractor {
-    fn probe(&self, url: &str) -> Result<ProbeResult, String> {
+    fn probe(&self, url: &str, _cookies: &CookieChannel) -> Result<ProbeResult, String> {
         // Simulate subprocess failure
         if self.failing_urls.iter().any(|f| f == url) {
             return Err(format!("yt-dlp process error for {url}"));
@@ -2077,7 +2087,10 @@ mod tests {
             ..YtDlpConfig::default()
         };
         let extractor = YtDlpExtractorToolchain::new(config);
-        let args = extractor.probe_args("https://www.luxuretv.com/videos/x-1.html");
+        let args = extractor.probe_args(
+            "https://www.luxuretv.com/videos/x-1.html",
+            &CookieChannel::default(),
+        );
         assert!(args.contains(&"--plugin-dirs".to_string()));
         assert!(args.contains(&"/app/sidecar/yt-dlp-plugins".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("https://www.luxuretv.com/videos/x-1.html"));
@@ -2086,8 +2099,33 @@ mod tests {
     #[test]
     fn probe_args_omit_plugin_dirs_when_empty() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        let args = extractor.probe_args("https://www.youtube.com/watch?v=abc");
+        let args = extractor.probe_args(
+            "https://www.youtube.com/watch?v=abc",
+            &CookieChannel::default(),
+        );
         assert!(!args.iter().any(|a| a == "--plugin-dirs"));
+    }
+
+    #[test]
+    fn probe_args_include_cookies_from_browser() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let channel = CookieChannel {
+            cookies_from_browser: Some("chrome".to_string()),
+            cookie_file: None,
+        };
+        let args = extractor.probe_args("https://www.youtube.com/watch?v=abc", &channel);
+        assert!(args.windows(2).any(|w| w == ["--cookies-from-browser", "chrome"]));
+    }
+
+    #[test]
+    fn probe_args_include_cookie_file() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let channel = CookieChannel {
+            cookies_from_browser: None,
+            cookie_file: Some(PathBuf::from("C:\\cookies.txt")),
+        };
+        let args = extractor.probe_args("https://www.youtube.com/watch?v=abc", &channel);
+        assert!(args.windows(2).any(|w| w == ["--cookies", "C:\\cookies.txt"]));
     }
 
     // ---- FakeYtDlpExtractor ----
@@ -2101,7 +2139,7 @@ mod tests {
         );
 
         let result = fake
-            .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+            .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &CookieChannel::default())
             .unwrap();
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].qualities.len(), 5);
@@ -2111,7 +2149,7 @@ mod tests {
     fn fake_ytdlp_extractor_fails_for_unknown_url() {
         let fake = FakeYtDlpExtractor::new();
         let err = fake
-            .probe("https://www.youtube.com/watch?v=unknown")
+            .probe("https://www.youtube.com/watch?v=unknown", &CookieChannel::default())
             .unwrap_err();
         assert!(err.contains("no canned response"), "got: {err}");
     }
@@ -2122,7 +2160,7 @@ mod tests {
         fake.insert_failure("https://www.youtube.com/watch?v=fail");
 
         let err = fake
-            .probe("https://www.youtube.com/watch?v=fail")
+            .probe("https://www.youtube.com/watch?v=fail", &CookieChannel::default())
             .unwrap_err();
         assert!(
             err.contains("process error"),
@@ -2423,7 +2461,9 @@ mod tests {
     #[test]
     fn invalid_url_returns_error() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        let err = extractor.probe("not-a-valid-url").unwrap_err();
+        let err = extractor
+            .probe("not-a-valid-url", &CookieChannel::default())
+            .unwrap_err();
         assert!(
             err.contains("invalid URL"),
             "should mention invalid URL, got: {err}"

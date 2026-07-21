@@ -3,6 +3,7 @@
 //! Queue state lives at `{library_root}/.phlegethon/jobs.json`.
 //! Writes are atomic (temp file + rename).
 
+use crate::cookie_channel::CookieChannel;
 use crate::integrity::ExpectedHash;
 use crate::job::{Job, JobState};
 use crate::media_extras::MediaExtrasOptions;
@@ -51,6 +52,10 @@ pub struct MediaExtrasSettings {
     pub defaults: MediaExtrasOptions,
 }
 
+fn default_cookie_channel() -> CookieChannel {
+    CookieChannel::default()
+}
+
 /// On-disk representation of the job queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedQueue {
@@ -64,6 +69,8 @@ pub struct PersistedQueue {
     pub audio_only_mode: bool,
     #[serde(default = "default_media_extras")]
     pub default_media_extras: MediaExtrasOptions,
+    #[serde(default = "default_cookie_channel")]
+    pub cookie_channel: CookieChannel,
     pub jobs: Vec<PersistedJob>,
 }
 
@@ -208,6 +215,19 @@ pub fn load_media_extras_settings(library_root: &Path) -> Result<MediaExtrasSett
     })
 }
 
+/// Load cookie auth channel settings from the queue file, if present.
+pub fn load_cookie_channel(library_root: &Path) -> Result<CookieChannel, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(CookieChannel::default());
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    Ok(queue.cookie_channel.normalized())
+}
+
 /// Build a persisted queue snapshot from live jobs.
 pub fn build_queue(
     jobs: &[Job],
@@ -216,6 +236,7 @@ pub fn build_queue(
     default_quality_policy: &DefaultQualityPolicy,
     audio_only_mode: bool,
     default_media_extras: &MediaExtrasOptions,
+    cookie_channel: &CookieChannel,
 ) -> PersistedQueue {
     PersistedQueue {
         version: QUEUE_VERSION,
@@ -224,6 +245,7 @@ pub fn build_queue(
         default_quality_policy: *default_quality_policy,
         audio_only_mode,
         default_media_extras: *default_media_extras,
+        cookie_channel: cookie_channel.clone(),
         jobs: jobs.iter().map(Job::to_persisted).collect(),
     }
 }
@@ -337,6 +359,7 @@ mod tests {
             &DefaultQualityPolicy::default(),
             false,
             &MediaExtrasOptions::default(),
+            &CookieChannel::default(),
         );
         save_queue(&root, &queue).unwrap();
 
@@ -425,6 +448,7 @@ mod tests {
             &DefaultQualityPolicy::default(),
             false,
             &MediaExtrasOptions::default(),
+            &CookieChannel::default(),
         );
         save_queue(&root, &queue).unwrap();
 
