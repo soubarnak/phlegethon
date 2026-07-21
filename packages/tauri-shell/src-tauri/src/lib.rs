@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
+use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_dialog::DialogExt;
 
 // ---------------------------------------------------------------------------
@@ -501,6 +502,46 @@ fn set_filename_template(state: State<AppState>, template: String) -> Result<(),
 }
 
 #[tauri::command]
+fn reveal_output(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("output path not found: {path}"));
+    }
+    app.opener()
+        .reveal_item_in_dir(path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_output(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let path_ref = std::path::Path::new(&path);
+    if !path_ref.is_file() {
+        return Err(format!("output file not found: {path}"));
+    }
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn is_main_window_focused(app: tauri::AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    window.is_focused().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    window
+        .set_focus()
+        .map_err(|e| e.to_string())
+        .and_then(|_| window.show().map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
 fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
     let rx = state.event_rx.lock().map_err(|e| e.to_string())?;
     let mut events = Vec::new();
@@ -566,6 +607,8 @@ fn persist_library_root_preference(root: &Path) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState::new())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -620,6 +663,10 @@ pub fn run() {
             set_filename_template,
             select_default_quality,
             reorder_job,
+            reveal_output,
+            open_output,
+            is_main_window_focused,
+            focus_main_window,
             poll_events,
         ])
         .run(tauri::generate_context!())

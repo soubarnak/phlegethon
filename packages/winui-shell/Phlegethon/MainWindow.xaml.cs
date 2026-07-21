@@ -12,9 +12,14 @@ namespace Phlegethon;
 
 public sealed partial class MainWindow : Window
 {
+    private const string DesktopNotificationsSettingKey = "DesktopNotificationsEnabled";
+
     private readonly EventChannelService _eventService;
+    private readonly DesktopNotificationService _notificationService;
     private readonly Microsoft.UI.Dispatching.DispatcherTimer _clipboardTimer;
     private string? _lastClipboardUrl;
+    private bool _windowActive;
+    private bool _desktopNotificationsEnabled = true;
 
     private enum DuplicateResolution
     {
@@ -27,6 +32,10 @@ public sealed partial class MainWindow : Window
     {
         this.InitializeComponent();
         _eventService = new EventChannelService();
+        _notificationService = new DesktopNotificationService(
+            DispatcherQueue,
+            jobId => DownloadQueueView.FocusJob(jobId));
+        _notificationService.EnsureRegistered();
         _eventService.OnProbeResult += OnProbeResult;
         _eventService.OnJobProgress += OnJobProgress;
         _eventService.OnJobCompleted += OnJobCompleted;
@@ -49,6 +58,8 @@ public sealed partial class MainWindow : Window
         this.Content.PrePaste += OnPaste;
 
         DownloadQueueView.DiscardRequested += OnDiscardRequested;
+        DownloadQueueView.RevealRequested += OnRevealRequested;
+        DownloadQueueView.OpenRequested += OnOpenRequested;
         DownloadQueueView.ReorderRequested += OnReorderRequested;
         DownloadQueueView.ActiveJobLimitChanged += OnActiveJobLimitChanged;
         DownloadQueueView.AudioOnlyModeChanged += OnAudioOnlyModeChanged;
@@ -61,6 +72,12 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
         DownloadQueueView.CookieChannelChanged += OnCookieChannelChanged;
         DownloadQueueView.FilenameTemplateChanged += OnFilenameTemplateChanged;
+
+        Activated += OnWindowActivated;
+        Closed += (_, _) => Activated -= OnWindowActivated;
+
+        LoadDesktopNotificationsSetting();
+        DesktopNotificationsBox.IsChecked = _desktopNotificationsEnabled;
 
         // Wire up probe sheet
         ProbeSheetView.ResolveDestinationPreview = json => _eventService.PreviewProbeDestination(json);
@@ -221,6 +238,45 @@ public sealed partial class MainWindow : Window
             UrlStatusText.Text = "Clipboard watcher off.";
         }
     }
+
+    private void OnWindowActivated(object sender, WindowActivatedEventArgs args)
+    {
+        _windowActive = args.WindowActivationState != WindowActivationState.Deactivated;
+    }
+
+    private void LoadDesktopNotificationsSetting()
+    {
+        var settings = ApplicationData.Current.LocalSettings;
+        if (settings.Values.TryGetValue(DesktopNotificationsSettingKey, out var value)
+            && value is bool enabled)
+        {
+            _desktopNotificationsEnabled = enabled;
+        }
+    }
+
+    private void SaveDesktopNotificationsSetting(bool enabled)
+    {
+        _desktopNotificationsEnabled = enabled;
+        ApplicationData.Current.LocalSettings.Values[DesktopNotificationsSettingKey] = enabled;
+    }
+
+    private void OnDesktopNotificationsChanged(object sender, RoutedEventArgs e)
+    {
+        SaveDesktopNotificationsSetting(DesktopNotificationsBox.IsChecked == true);
+    }
+
+    private void MaybeNotifyJob(string jobId, string title, string headline, string detail)
+    {
+        if (!_desktopNotificationsEnabled || _windowActive)
+        {
+            return;
+        }
+
+        _notificationService.ShowJobNotification(jobId, headline, $"{title}: {detail}");
+    }
+
+    private string? FindJobTitle(string jobId) =>
+        DownloadQueueView.FindJobTitle(jobId);
 
     private async void OnClipboardTimerTick(object? sender, object e)
     {
@@ -400,6 +456,8 @@ public sealed partial class MainWindow : Window
         _ = DispatcherQueue.TryEnqueue(() =>
         {
             DownloadQueueView.MarkJobCompleted(args.JobId, args.Path);
+            var title = FindJobTitle(args.JobId) ?? "Download";
+            MaybeNotifyJob(args.JobId, title, "Download completed", args.Path);
         });
     }
 
@@ -408,6 +466,8 @@ public sealed partial class MainWindow : Window
         _ = DispatcherQueue.TryEnqueue(() =>
         {
             DownloadQueueView.MarkJobFailed(args.JobId, args.Error);
+            var title = FindJobTitle(args.JobId) ?? "Download";
+            MaybeNotifyJob(args.JobId, title, "Download failed", args.Error);
         });
     }
 
@@ -495,6 +555,30 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             UrlStatusText.Text = $"Filename template failed: {ex.Message}";
+        }
+    }
+
+    private void OnRevealRequested(object? sender, DownloadItemViewModel item)
+    {
+        try
+        {
+            OutputFileActions.RevealInFolder(item.OutputPath);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Reveal failed: {ex.Message}";
+        }
+    }
+
+    private void OnOpenRequested(object? sender, DownloadItemViewModel item)
+    {
+        try
+        {
+            OutputFileActions.OpenFile(item.OutputPath);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Open failed: {ex.Message}";
         }
     }
 

@@ -8,6 +8,12 @@ import { buildDiscardConfirmCopy } from "./discardConfirm.js";
 import { displayProgressPercent } from "./progressPercent.js";
 import { createClipboardWatcher } from "./clipboardWatcher.js";
 import {
+  initNotificationActivation,
+  loadDesktopNotificationsEnabled,
+  maybeNotifyJob,
+  saveDesktopNotificationsEnabled,
+} from "./notifications.js";
+import {
   createUrlInputApi,
   processUrlInput,
   resolveDuplicateUrl,
@@ -42,6 +48,7 @@ const state = {
   probeMediaExtras: null,
   mediaExtrasCapabilities: null,
   clipboardWatcherEnabled: false,
+  desktopNotificationsEnabled: true,
 };
 
 const urlInputApi = createUrlInputApi(getInvoke);
@@ -104,6 +111,7 @@ const duplicateConfirmCancel = $("duplicateConfirmCancel");
 const duplicateConfirmFocus = $("duplicateConfirmFocus");
 const duplicateConfirmEnqueue = $("duplicateConfirmEnqueue");
 const clipboardWatcherInput = $("clipboardWatcherInput");
+const desktopNotificationsInput = $("desktopNotificationsInput");
 
 /** @type {{ resolve: (choice: "enqueue" | "focus" | "cancel") => void } | null} */
 let duplicateConfirmWaiter = null;
@@ -241,10 +249,7 @@ duplicateConfirmOverlay.addEventListener("click", (e) => {
 
 async function focusExistingJob(match) {
   if (match.job_id) {
-    state.selectedJobId = match.job_id;
-    renderQueue();
-    const row = queueList.querySelector(`[data-job-id="${match.job_id}"]`);
-    row?.scrollIntoView({ block: "nearest" });
+    focusJobRow(match.job_id);
     return;
   }
 
@@ -807,6 +812,8 @@ function renderQueue() {
           ${job.status === "pending" || job.status === "downloading" ? `<button class="btn-icon btn-sm" data-action="pause" data-job-id="${job.job_id}" title="Pause">⏸</button>` : ""}
           ${job.status === "paused" ? `<button class="btn-icon btn-sm" data-action="resume" data-job-id="${job.job_id}" title="Resume">▶</button>` : ""}
           ${job.status === "failed" ? `<button class="btn-icon btn-sm" data-action="retry" data-job-id="${job.job_id}" title="Retry">↻</button>` : ""}
+          ${job.status === "completed" && job.path ? `<button class="btn-icon btn-sm" data-action="reveal" data-job-id="${job.job_id}" title="Reveal in folder">Reveal</button>` : ""}
+          ${job.status === "completed" && job.path ? `<button class="btn-icon btn-sm" data-action="open" data-job-id="${job.job_id}" title="Open file">Open</button>` : ""}
           <button class="btn-icon btn-sm btn-danger" data-action="discard" data-job-id="${job.job_id}" title="Discard">✕</button>
         </div>
       </div>
@@ -927,6 +934,18 @@ async function handleJobAction(action, jobId) {
         renderQueue();
         return;
       }
+      case "reveal": {
+        const revealJob = state.jobs.find((j) => j.job_id === jobId);
+        if (!revealJob?.path) return;
+        await invoke("reveal_output", { path: revealJob.path });
+        return;
+      }
+      case "open": {
+        const openJob = state.jobs.find((j) => j.job_id === jobId);
+        if (!openJob?.path) return;
+        await invoke("open_output", { path: openJob.path });
+        return;
+      }
     }
     // Refresh state
     await refreshJobs();
@@ -1026,9 +1045,21 @@ function handleCoreEvent(evt) {
       if (evt.path) {
         job.path = evt.path;
       }
+      void notifyJobOutcome(
+        job.job_id,
+        job.title || "Download",
+        "Download completed",
+        evt.path || "",
+      );
       break;
     case "JobFailed":
       job.status = "failed";
+      void notifyJobOutcome(
+        job.job_id,
+        job.title || "Download",
+        "Download failed",
+        evt.error || "Unknown error",
+      );
       break;
     case "JobPaused":
       job.status = "paused";
@@ -1041,6 +1072,28 @@ function handleCoreEvent(evt) {
       break;
   }
   renderQueue();
+}
+
+async function notifyJobOutcome(jobId, title, headline, detail) {
+  try {
+    await maybeNotifyJob({
+      invoke: getInvoke(),
+      settingsEnabled: state.desktopNotificationsEnabled,
+      jobId,
+      title,
+      headline,
+      detail,
+    });
+  } catch {
+    /* silent */
+  }
+}
+
+function focusJobRow(jobId) {
+  state.selectedJobId = jobId;
+  renderQueue();
+  const row = queueList.querySelector(`[data-job-id="${jobId}"]`);
+  row?.scrollIntoView({ block: "nearest" });
 }
 
 // ---- Error display ----
@@ -1192,6 +1245,8 @@ async function openSettings() {
     filenameTemplateInput.value = filenameTemplate || "";
     const watcherPref = localStorage.getItem("phlegethon-clipboard-watcher") === "1";
     clipboardWatcherInput.checked = watcherPref;
+    state.desktopNotificationsEnabled = loadDesktopNotificationsEnabled();
+    desktopNotificationsInput.checked = state.desktopNotificationsEnabled;
     applyEmbedAvailability(settingsOverlay, caps);
     if (!caps.ffmpeg_available && caps.embed_disabled_reason) {
       mediaExtrasFfmpegNote.textContent = caps.embed_disabled_reason;
@@ -1354,6 +1409,11 @@ clipboardWatcherInput?.addEventListener("change", () => {
   applyClipboardWatcherPreference(clipboardWatcherInput.checked);
 });
 
+desktopNotificationsInput?.addEventListener("change", () => {
+  state.desktopNotificationsEnabled = desktopNotificationsInput.checked;
+  saveDesktopNotificationsEnabled(state.desktopNotificationsEnabled);
+});
+
 // ---- Init ----
 document.addEventListener("DOMContentLoaded", async () => {
   urlInput.focus();
@@ -1369,9 +1429,17 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   pollEvents();
   startProcessPendingLoop();
+  state.desktopNotificationsEnabled = loadDesktopNotificationsEnabled();
+  if (desktopNotificationsInput) {
+    desktopNotificationsInput.checked = state.desktopNotificationsEnabled;
+  }
   applyClipboardWatcherPreference(
     localStorage.getItem("phlegethon-clipboard-watcher") === "1",
   );
+  await initNotificationActivation({
+    invoke: getInvoke(),
+    onJobFocus: focusJobRow,
+  });
   await refreshJobs();
 });
 

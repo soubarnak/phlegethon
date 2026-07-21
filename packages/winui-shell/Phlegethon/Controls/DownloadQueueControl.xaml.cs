@@ -18,6 +18,7 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     private string _url = "";
     private string _subtitle = "Queued";
     private string _destination = "";
+    private string _outputPath = "";
     private string _statusIcon = "⋯";
     private string _actionLabel = "Pause";
     private Visibility _primaryActionVisible = Visibility.Visible;
@@ -76,6 +77,31 @@ public class DownloadItemViewModel : INotifyPropertyChanged
         set => SetField(ref _primaryActionVisible, value);
     }
 
+    /// <summary>Absolute path to the completed output file, when known.</summary>
+    public string OutputPath
+    {
+        get => _outputPath;
+        set
+        {
+            if (SetField(ref _outputPath, value))
+            {
+                CompletedActionsVisible = _status == DownloadStatus.Completed
+                    && !string.IsNullOrWhiteSpace(_outputPath)
+                        ? Visibility.Visible
+                        : Visibility.Collapsed;
+            }
+        }
+    }
+
+    private Visibility _completedActionsVisible = Visibility.Collapsed;
+
+    /// <summary>Reveal / Open actions for completed outputs.</summary>
+    public Visibility CompletedActionsVisible
+    {
+        get => _completedActionsVisible;
+        private set => SetField(ref _completedActionsVisible, value);
+    }
+
     public double ProgressPercent
     {
         get => _progressPercent;
@@ -88,14 +114,15 @@ public class DownloadItemViewModel : INotifyPropertyChanged
         set => SetField(ref _status, value);
     }
 
-    private void SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
+    private bool SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {
         if (Equals(field, value))
         {
-            return;
+            return false;
         }
         field = value;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        return true;
     }
 }
 
@@ -182,6 +209,12 @@ public sealed partial class DownloadQueueControl : UserControl
     /// <summary>Raised when the user clicks Discard on a row (before confirmation).</summary>
     public event EventHandler<DownloadItemViewModel>? DiscardRequested;
 
+    /// <summary>Raised when the user clicks Reveal on a completed row.</summary>
+    public event EventHandler<DownloadItemViewModel>? RevealRequested;
+
+    /// <summary>Raised when the user clicks Open on a completed row.</summary>
+    public event EventHandler<DownloadItemViewModel>? OpenRequested;
+
     /// <summary>Raised when the user reorders a row (fromIndex, toIndex).</summary>
     public event EventHandler<(int FromIndex, int ToIndex)>? ReorderRequested;
 
@@ -260,6 +293,7 @@ public sealed partial class DownloadQueueControl : UserControl
             if (item.JobId == jobId)
             {
                 item.Status = DownloadStatus.Completed;
+                item.OutputPath = path;
                 var dest = string.IsNullOrEmpty(item.Destination)
                     ? (System.IO.Path.GetDirectoryName(path) ?? "")
                     : item.Destination;
@@ -283,6 +317,14 @@ public sealed partial class DownloadQueueControl : UserControl
             DownloadStatus.Completed,
             100,
             folder);
+        foreach (var item in _items)
+        {
+            if (item.JobId == jobId)
+            {
+                item.OutputPath = path;
+                break;
+            }
+        }
     }
 
     /// <summary>
@@ -318,6 +360,20 @@ public sealed partial class DownloadQueueControl : UserControl
         }
 
         return false;
+    }
+
+    /// <summary>Find a row title by job id.</summary>
+    public string? FindJobTitle(string jobId)
+    {
+        foreach (var item in _items)
+        {
+            if (item.JobId == jobId)
+            {
+                return item.Title;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Find a row by normalized URL match.</summary>
@@ -391,6 +447,26 @@ public sealed partial class DownloadQueueControl : UserControl
         var button = (Button)sender;
         var item = (DownloadItemViewModel)button.DataContext;
         DiscardRequested?.Invoke(this, item);
+    }
+
+    private void OnRevealClick(object sender, RoutedEventArgs e)
+    {
+        var button = (Button)sender;
+        var item = (DownloadItemViewModel)button.DataContext;
+        if (!string.IsNullOrWhiteSpace(item.OutputPath))
+        {
+            RevealRequested?.Invoke(this, item);
+        }
+    }
+
+    private void OnOpenClick(object sender, RoutedEventArgs e)
+    {
+        var button = (Button)sender;
+        var item = (DownloadItemViewModel)button.DataContext;
+        if (!string.IsNullOrWhiteSpace(item.OutputPath))
+        {
+            OpenRequested?.Invoke(this, item);
+        }
     }
 
     private void OnMoveUpClick(object sender, RoutedEventArgs e)
@@ -487,6 +563,9 @@ public sealed partial class DownloadQueueControl : UserControl
                 item.StatusIcon = "✓";
                 item.ActionLabel = "Discard";
                 item.PrimaryActionVisible = Visibility.Collapsed;
+                item.CompletedActionsVisible = !string.IsNullOrWhiteSpace(item.OutputPath)
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
                 break;
             case DownloadStatus.Failed:
                 item.StatusIcon = "✗";

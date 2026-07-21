@@ -44,7 +44,7 @@
             x:Name="DownloadList"
             Background="Transparent"
             BorderThickness="0"
-            SelectionMode="None"
+            SelectionMode="Single"
             ItemContainerStyle="{StaticResource GeistListViewItemStyle}">
             <ListView.ItemTemplate>
                 <DataTemplate>
@@ -162,6 +162,26 @@
                                     MinWidth="64"
                                     Padding="8,0"
                                     Click="OnDiscardClick" />
+                                <Button
+                                    Content="Reveal"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="{ThemeResource GeistTypeSize12}"
+                                    Height="28"
+                                    MinWidth="64"
+                                    Padding="8,0"
+                                    Click="OnRevealClick"
+                                    Visibility="{Binding CompletedActionsVisible}"
+                                    ToolTipService.ToolTip="Reveal in folder" />
+                                <Button
+                                    Content="Open"
+                                    FontFamily="{ThemeResource GeistSansFont}"
+                                    FontSize="{ThemeResource GeistTypeSize12}"
+                                    Height="28"
+                                    MinWidth="64"
+                                    Padding="8,0"
+                                    Click="OnOpenClick"
+                                    Visibility="{Binding CompletedActionsVisible}"
+                                    ToolTipService.ToolTip="Open file" />
                             </StackPanel>
                         </Grid>
                     </Border>

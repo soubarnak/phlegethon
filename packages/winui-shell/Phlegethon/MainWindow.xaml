@@ -93,14 +93,26 @@
                         Foreground="{ThemeResource GeistTextSecondaryBrush}"
                         TextTrimming="CharacterEllipsis" />
 
-                    <CheckBox
+                    <StackPanel
                         Grid.Column="1"
-                        x:Name="ClipboardWatcherBox"
-                        Content="Watch clipboard"
-                        FontFamily="{ThemeResource GeistSansFont}"
-                        FontSize="{ThemeResource GeistTypeSize12}"
-                        Checked="OnClipboardWatcherChanged"
-                        Unchecked="OnClipboardWatcherChanged" />
+                        Orientation="Horizontal"
+                        Spacing="16">
+                        <CheckBox
+                            x:Name="ClipboardWatcherBox"
+                            Content="Watch clipboard"
+                            FontFamily="{ThemeResource GeistSansFont}"
+                            FontSize="{ThemeResource GeistTypeSize12}"
+                            Checked="OnClipboardWatcherChanged"
+                            Unchecked="OnClipboardWatcherChanged" />
+
+                        <CheckBox
+                            x:Name="DesktopNotificationsBox"
+                            Content="Desktop notifications"
+                            FontFamily="{ThemeResource GeistSansFont}"
+                            FontSize="{ThemeResource GeistTypeSize12}"
+                            Checked="OnDesktopNotificationsChanged"
+                            Unchecked="OnDesktopNotificationsChanged" />
+                    </StackPanel>
                 </Grid>
             </StackPanel>
         </Border>
