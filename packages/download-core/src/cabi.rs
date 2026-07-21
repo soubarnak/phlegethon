@@ -979,11 +979,12 @@ impl Serialize for crate::extractor::ProbeResult {
 impl Serialize for crate::extractor::MediaItem {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("MediaItem", 4)?;
+        let mut st = s.serialize_struct("MediaItem", 5)?;
         st.serialize_field("id", &self.id)?;
         st.serialize_field("title", &self.title)?;
         st.serialize_field("url", &self.url)?;
         st.serialize_field("qualities", &self.qualities)?;
+        st.serialize_field("archived", &self.archived)?;
         st.end()
     }
 }

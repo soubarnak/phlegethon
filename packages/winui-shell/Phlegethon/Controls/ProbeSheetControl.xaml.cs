@@ -29,6 +29,7 @@ public class MediaGroupViewModel
     public string Url { get; set; } = "";
     public List<QualityViewModel> Qualities { get; set; } = new();
     public bool IsSelected { get; set; }
+    public bool IsArchived { get; set; }
     public QualityViewModel? SelectedQuality { get; set; }
 }
 
@@ -100,7 +101,8 @@ public sealed partial class ProbeSheetControl : UserControl
                 Id = item.Id,
                 Title = item.Title,
                 Url = item.Url,
-                IsSelected = false,
+                IsArchived = item.Archived,
+                IsSelected = !item.Archived,
             };
 
             foreach (var q in item.Qualities)
@@ -262,7 +264,34 @@ public sealed partial class ProbeSheetControl : UserControl
             MaxLines = 1,
         };
         Grid.SetColumn(titleBlock, 1);
-        grid.Children.Add(titleBlock);
+
+        var titlePanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        titlePanel.Children.Add(titleBlock);
+        if (group.IsArchived)
+        {
+            titlePanel.Children.Add(new Border
+            {
+                Background = (Brush)Application.Current.Resources["GeistSurfaceBrush"],
+                BorderBrush = (Brush)Application.Current.Resources["GeistBorderBrush"],
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(6, 2),
+                Child = new TextBlock
+                {
+                    Text = "Downloaded",
+                    FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
+                    FontSize = 11,
+                    Foreground = (Brush)Application.Current.Resources["GeistTextSecondaryBrush"],
+                },
+            });
+        }
+        Grid.SetColumn(titlePanel, 1);
+        grid.Children.Add(titlePanel);
 
         if (group.Qualities.Count > 1)
         {

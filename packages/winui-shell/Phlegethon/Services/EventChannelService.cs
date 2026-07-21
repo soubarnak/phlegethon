@@ -60,6 +60,7 @@ public class MediaItem
     public string Title { get; init; } = "";
     public string Url { get; init; } = "";
     public List<Quality> Qualities { get; init; } = new();
+    public bool Archived { get; init; }
 }
 
 public class Quality
@@ -434,6 +435,8 @@ public class EventChannelService : IDisposable
                 Title = item.GetProperty("title").GetString() ?? "",
                 Url = item.GetProperty("url").GetString() ?? "",
                 Qualities = DeserializeQualities(item.GetProperty("qualities")),
+                Archived = item.TryGetProperty("archived", out var archivedEl)
+                    && archivedEl.GetBoolean(),
             };
             items.Add(mediaItem);
         }

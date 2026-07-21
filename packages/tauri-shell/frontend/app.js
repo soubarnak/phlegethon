@@ -349,12 +349,15 @@ async function showProbeResults(url, result) {
     const dur = item.duration ? formatDuration(item.duration) : "";
     const row = document.createElement("div");
     row.className = "probe-item";
+    if (item.archived) {
+      row.classList.add("probe-item-archived");
+    }
     row.dataset.itemIndex = idx;
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.className = "probe-item-checkbox";
-    checkbox.checked = true;
+    checkbox.checked = !item.archived;
     checkbox.dataset.itemIndex = idx;
 
     const info = document.createElement("div");
@@ -364,6 +367,13 @@ async function showProbeResults(url, result) {
     title.className = "probe-item-title";
     title.textContent = item.title;
     info.appendChild(title);
+
+    if (item.archived) {
+      const badge = document.createElement("div");
+      badge.className = "probe-item-archived-badge";
+      badge.textContent = "Downloaded";
+      info.appendChild(badge);
+    }
 
     if (dur) {
       const duration = document.createElement("div");

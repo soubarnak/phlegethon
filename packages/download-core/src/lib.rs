@@ -7,6 +7,7 @@ mod bandwidth;
 mod cabi;
 mod classification;
 mod disk_space;
+mod download_archive;
 mod media_extras;
 mod quality_policy;
 mod event;
@@ -36,6 +37,7 @@ pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
 pub use disk_space::{
     disk_space_margin_bytes, required_free_bytes, FreeSpaceLookup, SystemFreeSpace,
 };
+pub use download_archive::{ArchiveEntry, DownloadArchive};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
@@ -125,6 +127,7 @@ pub struct Core {
     progress_flush_pending: bool,
     job_signals: Arc<job_signals::JobSignals>,
     free_space: Arc<dyn disk_space::FreeSpaceLookup>,
+    download_archive: DownloadArchive,
 }
 
 enum UnlockedTransferPlan {
@@ -280,6 +283,7 @@ impl Core {
             progress_flush_pending: false,
             job_signals,
             free_space,
+            download_archive: DownloadArchive::default(),
         };
         (core, rx)
     }
@@ -380,6 +384,7 @@ impl Core {
         self.audio_only_mode = quality_settings.audio_only_mode;
         let media_settings = storage::load_media_extras_settings(&root)?;
         self.default_media_extras = media_settings.defaults;
+        self.download_archive = download_archive::DownloadArchive::load(&root)?;
         self.library_root = Some(root);
         self.last_progress_flush = Instant::now();
         self.bytes_since_progress_flush = 0;
@@ -1039,7 +1044,9 @@ impl Core {
     /// instead and return the error.
     pub fn probe(&mut self, url: &str) -> Result<ProbeResult, String> {
         match self.extractor.probe(url) {
-            Ok(result) => {
+            Ok(mut result) => {
+                self.mark_archived_probe_items(&mut result.items);
+
                 // Store for subsequent confirm
                 self.pending_probes
                     .insert(url.to_string(), result.clone());
@@ -1229,6 +1236,7 @@ impl Core {
             // Launch Site media is fetched by yt-dlp, not plain HTTP of the page URL.
             job.set_extractor_format(&sel.quality_id);
             job.set_media_extras(media_extras);
+            job.set_media_identity(item.id.clone(), item.title.clone());
             if let Some(size) = quality.size_bytes {
                 job.set_total_bytes(Some(size));
             }
@@ -2053,7 +2061,41 @@ impl Core {
             .map_err(|_| "event channel closed".to_string())?;
 
         self.jobs[job_index].mark_completed();
+        self.record_completed_media_identity(job_id, job_index)?;
         self.persist_queue_now()
+    }
+
+    fn mark_archived_probe_items(&self, items: &mut [MediaItem]) {
+        for item in items {
+            item.archived = self.download_archive.contains(&item.id);
+        }
+    }
+
+    fn record_completed_media_identity(
+        &mut self,
+        job_id: &str,
+        job_index: usize,
+    ) -> Result<(), String> {
+        let Some(media_id) = self.jobs[job_index].media_id().map(str::to_string) else {
+            return Ok(());
+        };
+        let title = self.jobs[job_index]
+            .media_title()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.jobs[job_index].filename().to_string());
+        let entry = download_archive::ArchiveEntry {
+            media_id,
+            title,
+            url: self.jobs[job_index].url().to_string(),
+            completed_at_unix_secs: download_archive::unix_now_secs(),
+            destination: self.jobs[job_index].destination().clone(),
+            job_id: job_id.to_string(),
+        };
+        self.download_archive.record(entry);
+        if let Some(root) = &self.library_root {
+            self.download_archive.save(root)?;
+        }
+        Ok(())
     }
 
     fn segmented_fetch(

@@ -50,6 +50,8 @@ pub struct MediaItem {
     pub url: String,
     /// Available qualities for this item.
     pub qualities: Vec<Quality>,
+    /// True when this media identity is already in the Download Archive.
+    pub archived: bool,
 }
 
 /// Result of probing a URL via the Extractor Toolchain.
@@ -217,6 +219,7 @@ impl FakeExtractorToolchain {
                     container: None,
                 })
                 .collect(),
+            archived: false,
         };
         self.responses.insert(
             url.to_string(),
@@ -251,6 +254,7 @@ impl FakeExtractorToolchain {
                     container: None,
                 })
                 .collect(),
+            archived: false,
         };
         self.responses.insert(
             url.to_string(),
@@ -285,6 +289,7 @@ impl FakeExtractorToolchain {
                         container: None,
                     })
                     .collect(),
+                archived: false,
             })
             .collect();
         self.responses.insert(

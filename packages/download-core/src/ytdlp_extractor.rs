@@ -373,6 +373,7 @@ impl YtDlpExtractorToolchain {
             title: info.title.clone(),
             url: info.original_url.unwrap_or_else(|| url.to_string()),
             qualities,
+            archived: false,
         };
 
         Ok(ProbeResult {
@@ -428,6 +429,7 @@ impl YtDlpExtractorToolchain {
                 title,
                 url: item_url,
                 qualities,
+                archived: false,
             });
         }
 

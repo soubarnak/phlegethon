@@ -110,6 +110,10 @@ pub struct Job {
     expected_hash: Option<ExpectedHash>,
     /// Media extras (subs, chapters, thumbnail, metadata, remux) for extractor jobs.
     media_extras: MediaExtrasOptions,
+    /// Stable media identity from probe (Download Archive key), when known.
+    media_id: Option<String>,
+    /// Human title for the media identity (archive / History).
+    media_title: Option<String>,
 }
 
 impl Job {
@@ -184,6 +188,8 @@ impl Job {
             filename,
             expected_hash: None,
             media_extras: MediaExtrasOptions::default(),
+            media_id: None,
+            media_title: None,
         }
     }
 
@@ -207,6 +213,8 @@ impl Job {
             filename: persisted.filename,
             expected_hash: persisted.expected_hash,
             media_extras: persisted.media_extras,
+            media_id: persisted.media_id,
+            media_title: persisted.media_title,
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -240,6 +248,8 @@ impl Job {
             filename: self.filename.clone(),
             expected_hash: self.expected_hash.clone(),
             media_extras: self.media_extras,
+            media_id: self.media_id.clone(),
+            media_title: self.media_title.clone(),
         }
     }
 
@@ -259,6 +269,20 @@ impl Job {
 
     pub fn set_media_extras(&mut self, options: MediaExtrasOptions) {
         self.media_extras = options;
+    }
+
+    /// Attach probe media identity for Download Archive recording on completion.
+    pub fn set_media_identity(&mut self, media_id: String, media_title: String) {
+        self.media_id = Some(media_id);
+        self.media_title = Some(media_title);
+    }
+
+    pub fn media_id(&self) -> Option<&str> {
+        self.media_id.as_deref()
+    }
+
+    pub fn media_title(&self) -> Option<&str> {
+        self.media_title.as_deref()
     }
 
     pub fn id(&self) -> &str {

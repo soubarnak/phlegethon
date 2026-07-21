@@ -356,6 +356,22 @@ body {
 
 .probe-item:hover { background: var(--bg-hover); }
 
+.probe-item-archived .probe-item-title {
+  color: var(--text-secondary);
+}
+
+.probe-item-archived-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-top: var(--space-1);
+  padding: 1px var(--space-2);
+  font-size: var(--text-xs);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
 .probe-item-checkbox {
   width: 16px;
   height: 16px;

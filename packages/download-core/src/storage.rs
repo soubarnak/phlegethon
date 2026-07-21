@@ -85,6 +85,10 @@ pub struct PersistedJob {
     pub expected_hash: Option<ExpectedHash>,
     #[serde(default = "default_media_extras")]
     pub media_extras: MediaExtrasOptions,
+    #[serde(default)]
+    pub media_id: Option<String>,
+    #[serde(default)]
+    pub media_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

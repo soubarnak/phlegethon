@@ -6080,3 +6080,237 @@ fn default_media_extras_settings_persist_across_library_root_reload() {
     assert_eq!(core2.default_media_extras(), opts);
 }
 
+// ---------------------------------------------------------------------------
+// Download Archive (issue #55)
+// ---------------------------------------------------------------------------
+
+fn archive_path_for(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(".phlegethon").join("archive.json")
+}
+
+fn complete_probe_job(
+    core: &mut Core,
+    rx: &crossbeam_channel::Receiver<CoreEvent>,
+    probe_url: &str,
+    item_id: &str,
+    quality_id: &str,
+) -> String {
+    core.probe(probe_url).unwrap();
+    collect_events(rx);
+
+    let selection = ProbeSelection {
+        url: probe_url.to_string(),
+        items: vec![ItemSelection {
+            item_id: item_id.to_string(),
+            quality_id: quality_id.to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(job_ids.len(), 1);
+    core.process_pending().unwrap();
+    let events = collect_events(rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got: {events:?}"
+    );
+    job_ids[0].clone()
+}
+
+#[test]
+fn completed_media_job_records_identity_in_download_archive() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=archive1",
+        "Archived Video",
+        "https://cdn.youtube.com/archive1.mp4",
+        vec![("1080p", "1080p")],
+    );
+    let http = fake_http_with_responses(vec![(
+        "https://cdn.youtube.com/archive1.mp4",
+        b"archive video content",
+    )]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root.clone()).unwrap();
+
+    let job_id = complete_probe_job(
+        &mut core,
+        &rx,
+        "https://www.youtube.com/watch?v=archive1",
+        "item-1",
+        "1080p",
+    );
+
+    let raw = std::fs::read_to_string(archive_path_for(&root)).unwrap();
+    assert!(
+        raw.contains("item-1"),
+        "archive should contain media id, got: {raw}"
+    );
+    assert!(raw.contains("Archived Video"));
+    assert!(raw.contains(&job_id));
+}
+
+#[test]
+fn probe_marks_archived_items() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://youtube.com/playlist?list=ARCH",
+        "Archive Playlist",
+        vec![
+            (
+                "vid-done",
+                "Done Video",
+                "https://youtube.com/watch?v=done",
+                vec![("1080p", "1080p")],
+            ),
+            (
+                "vid-new",
+                "New Video",
+                "https://youtube.com/watch?v=new",
+                vec![("720p", "720p")],
+            ),
+        ],
+    );
+    let http = fake_http_with_responses(vec![(
+        "https://youtube.com/watch?v=done",
+        b"done video content",
+    )]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root).unwrap();
+
+    complete_probe_job(
+        &mut core,
+        &rx,
+        "https://youtube.com/playlist?list=ARCH",
+        "vid-done",
+        "1080p",
+    );
+
+    let result = core
+        .probe("https://youtube.com/playlist?list=ARCH")
+        .unwrap();
+    let done = result
+        .items
+        .iter()
+        .find(|item| item.id == "vid-done")
+        .expect("vid-done in probe");
+    let fresh = result
+        .items
+        .iter()
+        .find(|item| item.id == "vid-new")
+        .expect("vid-new in probe");
+
+    assert!(done.archived, "completed item should be marked archived");
+    assert!(!fresh.archived, "new item should not be archived");
+}
+
+#[test]
+fn confirm_skips_archived_items_when_shell_omits_them() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://youtube.com/playlist?list=SKIP",
+        "Skip Playlist",
+        vec![
+            (
+                "vid-archived",
+                "Archived",
+                "https://youtube.com/watch?v=archived",
+                vec![("1080p", "1080p")],
+            ),
+            (
+                "vid-fresh",
+                "Fresh",
+                "https://youtube.com/watch?v=fresh",
+                vec![("720p", "720p")],
+            ),
+        ],
+    );
+    let http = fake_http_with_responses(vec![
+        ("https://youtube.com/watch?v=archived", b"archived content"),
+        ("https://youtube.com/watch?v=fresh", b"fresh content"),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root).unwrap();
+
+    complete_probe_job(
+        &mut core,
+        &rx,
+        "https://youtube.com/playlist?list=SKIP",
+        "vid-archived",
+        "1080p",
+    );
+
+    core.probe("https://youtube.com/playlist?list=SKIP")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://youtube.com/playlist?list=SKIP".to_string(),
+        items: vec![ItemSelection {
+            item_id: "vid-fresh".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(job_ids.len(), 1, "only non-archived selection should enqueue");
+}
+
+#[test]
+fn confirm_reselect_archived_item_creates_job() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=reselect",
+        "Reselect Video",
+        "https://cdn.youtube.com/reselect.mp4",
+        vec![("1080p", "1080p")],
+    );
+    let http = fake_http_with_responses(vec![(
+        "https://cdn.youtube.com/reselect.mp4",
+        b"reselect video content",
+    )]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root).unwrap();
+
+    complete_probe_job(
+        &mut core,
+        &rx,
+        "https://www.youtube.com/watch?v=reselect",
+        "item-1",
+        "1080p",
+    );
+
+    core.probe("https://www.youtube.com/watch?v=reselect")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=reselect".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(
+        job_ids.len(),
+        1,
+        "explicit re-select of archived item should create a job"
+    );
+}
+
