@@ -5682,3 +5682,128 @@ fn set_job_expected_hash_from_sidecar_loads_checksum_file() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Acceptance: Disk-space pre-check (issue #52)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct FakeFreeSpace {
+    free_bytes: u64,
+}
+
+impl FreeSpaceLookup for FakeFreeSpace {
+    fn free_bytes(&self, _path: &std::path::Path) -> Result<u64, String> {
+        Ok(self.free_bytes)
+    }
+}
+
+fn make_core_with_free_space(
+    http: Box<dyn HttpBackend>,
+    free_bytes: u64,
+) -> (Core, crossbeam_channel::Receiver<CoreEvent>) {
+    Core::new_with_free_space(
+        http,
+        Box::new(fake_toolchain()),
+        Arc::new(FakeFreeSpace { free_bytes }),
+    )
+}
+
+#[test]
+fn disk_precheck_refuses_when_known_size_insufficient() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core_with_free_space(Box::new(NoRangeFakeHttp(fake_http())), 1_000);
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events.iter().any(|e| match e {
+            CoreEvent::JobFailed { job_id: id, error } => {
+                id == &job_id && error.contains("insufficient disk space")
+            }
+            _ => false,
+        }),
+        "known size with too little free space should fail clearly, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "insufficient disk must not complete"
+    );
+
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job still queued");
+    assert_eq!(snap.status, "failed");
+}
+
+#[test]
+fn disk_precheck_allows_when_known_size_fits_with_margin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let body_len = b"hello world this is a test file".len() as u64;
+    let free = required_free_bytes(body_len);
+    let (mut core, rx) =
+        make_core_with_free_space(Box::new(NoRangeFakeHttp(fake_http())), free);
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "known size with enough free space should complete, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "sufficient disk must not fail"
+    );
+
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job still queued");
+    assert_eq!(snap.status, "completed");
+}
+
+#[test]
+fn disk_precheck_allows_when_size_unknown() {
+    let body = vec![b'U'; 64];
+    let http = SlowUnknownSizeHttp {
+        body: Arc::new(body.clone()),
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core_with_free_space(Box::new(http), 0);
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let url = "https://example.com/unknown.bin";
+    let job_id = {
+        let outcome = core
+            .enqueue(url, None)
+            .expect("enqueue should succeed");
+        match outcome {
+            EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
+            _ => panic!("expected direct enqueue"),
+        }
+    };
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "unknown size should start even with zero reported free space, got: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| match e {
+            CoreEvent::JobFailed { job_id: id, .. } => id == &job_id,
+            _ => false,
+        }),
+        "unknown size must not fail disk pre-check"
+    );
+}
+

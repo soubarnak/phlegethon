@@ -6,6 +6,7 @@
 mod bandwidth;
 mod cabi;
 mod classification;
+mod disk_space;
 mod event;
 mod extractor;
 mod http;
@@ -30,6 +31,9 @@ pub use extractor::{
     MediaItem, ProbeResult, ProbeSelection, Quality,
 };
 pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
+pub use disk_space::{
+    disk_space_margin_bytes, required_free_bytes, FreeSpaceLookup, SystemFreeSpace,
+};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
@@ -110,6 +114,7 @@ pub struct Core {
     /// Whether a debounced progress flush is pending.
     progress_flush_pending: bool,
     job_signals: Arc<job_signals::JobSignals>,
+    free_space: Arc<dyn disk_space::FreeSpaceLookup>,
 }
 
 enum UnlockedTransferPlan {
@@ -229,6 +234,23 @@ impl Core {
         clock: Arc<dyn bandwidth::Clock>,
         job_signals: Arc<job_signals::JobSignals>,
     ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
+        Self::new_with_clock_signals_and_free_space(
+            http,
+            extractor,
+            clock,
+            job_signals,
+            Arc::new(disk_space::SystemFreeSpace),
+        )
+    }
+
+    /// Create a Core with shared job signals and injectable free-space lookup (tests).
+    pub fn new_with_clock_signals_and_free_space(
+        http: Box<dyn HttpBackend>,
+        extractor: Box<dyn ExtractorToolchain>,
+        clock: Arc<dyn bandwidth::Clock>,
+        job_signals: Arc<job_signals::JobSignals>,
+        free_space: Arc<dyn disk_space::FreeSpaceLookup>,
+    ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let core = Self {
             http: Arc::from(http),
@@ -244,8 +266,24 @@ impl Core {
             bytes_since_progress_flush: 0,
             progress_flush_pending: false,
             job_signals,
+            free_space,
         };
         (core, rx)
+    }
+
+    /// Create a Core with injectable free-space lookup (acceptance tests).
+    pub fn new_with_free_space(
+        http: Box<dyn HttpBackend>,
+        extractor: Box<dyn ExtractorToolchain>,
+        free_space: Arc<dyn disk_space::FreeSpaceLookup>,
+    ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
+        Self::new_with_clock_signals_and_free_space(
+            http,
+            extractor,
+            Arc::new(SystemClock::new()),
+            Arc::new(job_signals::JobSignals::default()),
+            free_space,
+        )
     }
 
     pub fn job_signals(&self) -> Arc<job_signals::JobSignals> {
@@ -377,6 +415,69 @@ impl Core {
             self.persist_queue_now()?;
         }
         Ok(())
+    }
+
+    fn resolve_known_total(&self, job_index: usize, url: &str) -> Option<u64> {
+        self.jobs[job_index]
+            .total_bytes()
+            .or_else(|| self.http.file_size(url).ok().filter(|&n| n > 0))
+    }
+
+    fn check_disk_space_before_start(
+        &self,
+        destination: &Path,
+        total_bytes: u64,
+        bytes_received: u64,
+    ) -> Result<(), String> {
+        let remaining = total_bytes.saturating_sub(bytes_received);
+        if remaining == 0 {
+            return Ok(());
+        }
+        let free = self.free_space.free_bytes(destination)?;
+        if disk_space::has_sufficient_free_space(free, remaining) {
+            Ok(())
+        } else {
+            Err(disk_space::insufficient_disk_space_error(
+                destination,
+                free,
+                remaining,
+            ))
+        }
+    }
+
+    fn fail_job_for_disk_space(
+        &mut self,
+        job_index: usize,
+        job_id: &str,
+        error: String,
+    ) -> Result<(), String> {
+        self.jobs[job_index].mark_failed();
+        self.event_tx
+            .send(CoreEvent::JobFailed {
+                job_id: job_id.to_string(),
+                error,
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+        self.persist_queue_now()
+    }
+
+    fn guard_disk_space_for_transfer(
+        &mut self,
+        job_index: usize,
+        job_id: &str,
+        destination: &Path,
+        url: &str,
+        bytes_received: u64,
+    ) -> Result<bool, String> {
+        let Some(total) = self.resolve_known_total(job_index, url) else {
+            return Ok(true);
+        };
+        if let Err(err) = self.check_disk_space_before_start(destination, total, bytes_received) {
+            self.fail_job_for_disk_space(job_index, job_id, err)?;
+            return Ok(false);
+        }
+        self.jobs[job_index].set_total_bytes(Some(total));
+        Ok(true)
     }
 
     // -----------------------------------------------------------------------
@@ -1140,8 +1241,12 @@ impl Core {
 
         let url = self.jobs[i].url().to_string();
         let dest = self.jobs[i].destination().to_path_buf();
-        let filename = self.jobs[i].filename().to_string();
         let bytes_received = self.jobs[i].bytes_received();
+        if !self.guard_disk_space_for_transfer(i, job_id, &dest, &url, bytes_received)? {
+            return Ok(None);
+        }
+
+        let filename = self.jobs[i].filename().to_string();
         let job_cap = self.jobs[i].bandwidth_cap();
         let pause_requested = self.jobs[i].pause_requested().clone();
         let transfer_active = self.jobs[i].transfer_active().clone();
@@ -1339,6 +1444,10 @@ impl Core {
                     job.transfer_active().clone(),
                 )
             };
+
+            if !self.guard_disk_space_for_transfer(i, &job_id, &dest, &url, bytes_received)? {
+                return Ok(());
+            }
 
             if let Some(format) = extractor_format {
                 let on_disk = storage::destination_byte_total(&dest);
