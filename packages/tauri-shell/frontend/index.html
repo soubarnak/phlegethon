@@ -32,8 +32,14 @@
   <!-- Drop zone (invisible, activated on dragover) -->
   <div class="drag-overlay" id="dragOverlay">Drop URL to enqueue</div>
 
-  <!-- Queue -->
-  <main class="app-main" id="appMain">
+  <!-- Tab bar -->
+  <div class="tab-bar" id="tabBar">
+    <button class="tab-btn tab-active" data-tab="queue" type="button">Queue</button>
+    <button class="tab-btn" data-tab="history" type="button">History</button>
+  </div>
+
+  <!-- Queue tab -->
+  <main class="app-main" id="queueTab" role="tabpanel">
     <div class="queue-toolbar" id="queueToolbar">
       <input
         type="search"
@@ -71,6 +77,26 @@
     </div>
     <div class="shortcuts-hint">
       <kbd>Ctrl+V</kbd> paste multiple URLs &nbsp;·&nbsp; <kbd>Esc</kbd> close probe sheet
+    </div>
+  </main>
+
+  <!-- History tab -->
+  <main class="app-main" id="historyTab" role="tabpanel" hidden>
+    <div class="queue-toolbar" id="historyToolbar">
+      <label class="queue-toolbar-label">
+        <span class="visually-hidden">Filter history</span>
+        <select id="historyFilter" aria-label="Filter history">
+          <option value="all">All</option>
+          <option value="Completed">Completed</option>
+          <option value="Failed">Failed</option>
+        </select>
+      </label>
+    </div>
+    <div class="queue-container" id="historyContainer">
+      <div class="queue-empty" id="historyEmpty">
+        <span id="historyEmptyMessage">No completed downloads yet.</span>
+      </div>
+      <div id="historyList"></div>
     </div>
   </main>
 

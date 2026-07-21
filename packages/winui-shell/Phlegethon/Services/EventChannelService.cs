@@ -301,6 +301,15 @@ public class EventChannelService : IDisposable
 
     public void SetFilenameTemplate(string template) => _core.SetFilenameTemplate(template);
 
+    public IReadOnlyList<ArchiveEntry> ListHistory() => _core.ListHistory();
+
+    public IReadOnlyList<ArchiveEntry> ListHistoryByOutcome(string outcome) =>
+        _core.ListHistoryByOutcome(outcome);
+
+    public void RemoveHistoryEntry(string mediaId) => _core.RemoveHistoryEntry(mediaId);
+
+    public int HistoryLen() => _core.HistoryLen();
+
     public string? SelectDefaultQuality(IReadOnlyList<Quality> qualities)
     {
         var payload = System.Text.Json.JsonSerializer.Serialize(

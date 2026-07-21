@@ -6315,6 +6315,248 @@ fn confirm_reselect_archived_item_creates_job() {
 }
 
 #[test]
+fn list_history_returns_completed_entries_newest_first() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://youtube.com/playlist?list=hist",
+        "History Playlist",
+        vec![
+            (
+                "hist-first",
+                "First Video",
+                "https://cdn.youtube.com/hist1.mp4",
+                vec![("1080p", "1080p")],
+            ),
+            (
+                "hist-second",
+                "Second Video",
+                "https://cdn.youtube.com/hist2.mp4",
+                vec![("1080p", "1080p")],
+            ),
+        ],
+    );
+    let http = fake_http_with_responses(vec![
+        ("https://cdn.youtube.com/hist1.mp4", b"first"),
+        ("https://cdn.youtube.com/hist2.mp4", b"second"),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root).unwrap();
+
+    core.probe("https://youtube.com/playlist?list=hist").unwrap();
+    collect_events(&rx);
+    let selection = ProbeSelection {
+        url: "https://youtube.com/playlist?list=hist".to_string(),
+        items: vec![
+            ItemSelection {
+                item_id: "hist-first".to_string(),
+                quality_id: "1080p".to_string(),
+            },
+            ItemSelection {
+                item_id: "hist-second".to_string(),
+                quality_id: "1080p".to_string(),
+            },
+        ],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(job_ids.len(), 2);
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, CoreEvent::JobCompleted { .. }))
+            .count(),
+        2
+    );
+
+    let history = core.list_history();
+    assert_eq!(history.len(), 2);
+    let ids: std::collections::HashSet<_> = history.iter().map(|e| e.media_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["hist-first", "hist-second"].into_iter().collect::<std::collections::HashSet<_>>()
+    );
+    assert!(history.iter().all(|e| e.outcome == ArchiveOutcome::Completed));
+}
+
+#[test]
+fn list_history_by_outcome_filters_completed_and_failed() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://www.youtube.com/watch?v=ok",
+        "OK",
+        vec![(
+            "item-ok",
+            "OK Video",
+            "https://cdn.youtube.com/ok.mp4",
+            vec![("1080p", "1080p")],
+        )],
+    );
+    toolchain.insert_batch(
+        "https://www.youtube.com/watch?v=bad",
+        "Bad",
+        vec![(
+            "item-bad",
+            "Bad Video",
+            "https://cdn.youtube.com/bad.mp4",
+            vec![("1080p", "1080p")],
+        )],
+    );
+    let http = fake_http_with_responses(vec![
+        ("https://cdn.youtube.com/ok.mp4", b"ok"),
+        ("https://cdn.youtube.com/bad.mp4", b"bad content for hash test"),
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root).unwrap();
+
+    complete_probe_job(
+        &mut core,
+        &rx,
+        "https://www.youtube.com/watch?v=ok",
+        "item-ok",
+        "1080p",
+    );
+
+    core.probe("https://www.youtube.com/watch?v=bad").unwrap();
+    collect_events(&rx);
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=bad".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-bad".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(job_ids.len(), 1);
+    core.set_job_expected_hash(&job_ids[0], "sha-256", "0".repeat(64).as_str())
+        .unwrap();
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "integrity mismatch should fail job, got: {events:?}"
+    );
+
+    let completed = core.list_history_by_outcome(ArchiveOutcome::Completed);
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].media_id, "item-ok");
+
+    let failed = core.list_history_by_outcome(ArchiveOutcome::Failed);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].media_id, "item-bad");
+}
+
+#[test]
+fn probe_does_not_mark_failed_archive_entries_as_archived() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://www.youtube.com/watch?v=bad",
+        "Bad",
+        vec![(
+            "item-bad",
+            "Bad Video",
+            "https://cdn.youtube.com/bad.mp4",
+            vec![("1080p", "1080p")],
+        )],
+    );
+    let http = fake_http_with_responses(vec![(
+        "https://cdn.youtube.com/bad.mp4",
+        b"bad content for hash test",
+    )]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=bad").unwrap();
+    collect_events(&rx);
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=bad".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-bad".to_string(),
+            quality_id: "1080p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    core.set_job_expected_hash(&job_ids[0], "sha-256", "0".repeat(64).as_str())
+        .unwrap();
+    core.process_pending().unwrap();
+    collect_events(&rx);
+
+    let result = core.probe("https://www.youtube.com/watch?v=bad").unwrap();
+    let item = result
+        .items
+        .iter()
+        .find(|i| i.id == "item-bad")
+        .expect("item in probe");
+    assert!(
+        !item.archived,
+        "failed archive entry must not skip item on probe sheet"
+    );
+}
+
+#[test]
+fn remove_history_entry_removes_archive_only_and_keeps_files() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert_batch(
+        "https://www.youtube.com/watch?v=remove1",
+        "Remove",
+        vec![(
+            "item-remove",
+            "Remove Me",
+            "https://cdn.youtube.com/remove1.mp4",
+            vec![("1080p", "1080p")],
+        )],
+    );
+    let http = fake_http_with_responses(vec![(
+        "https://cdn.youtube.com/remove1.mp4",
+        b"keep this file",
+    )]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root.clone()).unwrap();
+
+    let _job_id = complete_probe_job(
+        &mut core,
+        &rx,
+        "https://www.youtube.com/watch?v=remove1",
+        "item-remove",
+        "1080p",
+    );
+
+    let entry = core
+        .list_history()
+        .into_iter()
+        .find(|e| e.media_id == "item-remove")
+        .expect("history entry");
+    let output_path = entry.destination.clone();
+    assert!(output_path.exists(), "completed output should exist on disk");
+
+    let removed = core.remove_history_entry("item-remove").expect("removed");
+    assert_eq!(removed.media_id, "item-remove");
+    assert!(core.list_history().is_empty());
+    assert!(output_path.exists(), "remove-from-history must not delete files");
+    assert!(
+        std::fs::metadata(&output_path).unwrap().len() > 0,
+        "output file should remain on disk with content"
+    );
+}
+
+#[test]
 fn cookie_channel_defaults_empty() {
     let (core, _rx) = make_core(Box::new(fake_http()));
     assert!(!core.cookie_channel().is_configured());

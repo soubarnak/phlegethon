@@ -73,6 +73,12 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.CookieChannelChanged += OnCookieChannelChanged;
         DownloadQueueView.FilenameTemplateChanged += OnFilenameTemplateChanged;
 
+        HistoryView.FilterChanged += (_, _) => RefreshHistory();
+        HistoryView.RevealRequested += OnHistoryRevealRequested;
+        HistoryView.OpenRequested += OnHistoryOpenRequested;
+        HistoryView.ReDownloadRequested += OnHistoryReDownloadRequested;
+        HistoryView.RemoveRequested += OnHistoryRemoveRequested;
+
         Activated += OnWindowActivated;
         Closed += (_, _) => Activated -= OnWindowActivated;
 
@@ -106,6 +112,98 @@ public sealed partial class MainWindow : Window
             });
             OnProbeConfirmed();
         };
+    }
+
+    private bool _historyTabActive;
+
+    private void OnQueueTabClick(object sender, RoutedEventArgs e) => ShowQueueTab();
+
+    private void OnHistoryTabClick(object sender, RoutedEventArgs e) => ShowHistoryTab();
+
+    private void ShowQueueTab()
+    {
+        _historyTabActive = false;
+        DownloadQueueView.Visibility = Visibility.Visible;
+        HistoryView.Visibility = Visibility.Collapsed;
+        ProbeSheetView.Visibility = Visibility.Collapsed;
+    }
+
+    private void ShowHistoryTab()
+    {
+        _historyTabActive = true;
+        DownloadQueueView.Visibility = Visibility.Collapsed;
+        HistoryView.Visibility = Visibility.Visible;
+        ProbeSheetView.Visibility = Visibility.Collapsed;
+        RefreshHistory();
+    }
+
+    private void RefreshHistory()
+    {
+        try
+        {
+            var filter = HistoryView.CurrentFilter();
+            var entries = filter == "all"
+                ? _eventService.ListHistory()
+                : _eventService.ListHistoryByOutcome(filter);
+            HistoryView.SetEntries(entries, filter);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Failed to load history: {ex.Message}";
+        }
+    }
+
+    private void OnHistoryRevealRequested(object? sender, Controls.HistoryItemViewModel item)
+    {
+        try
+        {
+            OutputFileActions.RevealInFolder(item.Destination);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Reveal failed: {ex.Message}";
+        }
+    }
+
+    private void OnHistoryOpenRequested(object? sender, Controls.HistoryItemViewModel item)
+    {
+        try
+        {
+            OutputFileActions.OpenFile(item.Destination);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Open failed: {ex.Message}";
+        }
+    }
+
+    private async void OnHistoryReDownloadRequested(object? sender, Controls.HistoryItemViewModel item)
+    {
+        ShowQueueTab();
+        UrlInput.Text = item.Url;
+        await ProcessUrlInputAsync(item.Url);
+        UrlInput.Text = string.Empty;
+    }
+
+    private void OnHistoryRemoveRequested(object? sender, Controls.HistoryItemViewModel item)
+    {
+        try
+        {
+            _eventService.RemoveHistoryEntry(item.MediaId);
+            RefreshHistory();
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Remove from History failed: {ex.Message}";
+        }
+    }
+
+    private void MaybeRefreshHistory()
+    {
+        if (_historyTabActive)
+        {
+            RefreshHistory();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -421,6 +519,7 @@ public sealed partial class MainWindow : Window
         {
             ProbeSheetView.ShowProbeResult(args.Url, args.Items, args.SourceName);
             DownloadQueueView.Visibility = Visibility.Collapsed;
+            HistoryView.Visibility = Visibility.Collapsed;
             ProbeSheetView.Visibility = Visibility.Visible;
         });
     }
@@ -458,6 +557,7 @@ public sealed partial class MainWindow : Window
             DownloadQueueView.MarkJobCompleted(args.JobId, args.Path);
             var title = FindJobTitle(args.JobId) ?? "Download";
             MaybeNotifyJob(args.JobId, title, "Download completed", args.Path);
+            MaybeRefreshHistory();
         });
     }
 
@@ -468,6 +568,7 @@ public sealed partial class MainWindow : Window
             DownloadQueueView.MarkJobFailed(args.JobId, args.Error);
             var title = FindJobTitle(args.JobId) ?? "Download";
             MaybeNotifyJob(args.JobId, title, "Download failed", args.Error);
+            MaybeRefreshHistory();
         });
     }
 
@@ -624,7 +725,16 @@ public sealed partial class MainWindow : Window
     /// </summary>
     public void OnProbeConfirmed()
     {
-        DownloadQueueView.Visibility = Visibility.Visible;
+        if (_historyTabActive)
+        {
+            HistoryView.Visibility = Visibility.Visible;
+            DownloadQueueView.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            DownloadQueueView.Visibility = Visibility.Visible;
+            HistoryView.Visibility = Visibility.Collapsed;
+        }
         ProbeSheetView.Visibility = Visibility.Collapsed;
     }
 }

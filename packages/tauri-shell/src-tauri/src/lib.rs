@@ -4,8 +4,8 @@
 
 use crossbeam_channel::TryRecvError;
 use download_core::{
-    Core, CoreEvent, EnqueueOutcome, JobSignals, ProbeDestinationPreview, ProbeSelection,
-    ProdHttpBackend,
+    ArchiveEntry, ArchiveOutcome, Core, CoreEvent, EnqueueOutcome, JobSignals,
+    ProbeDestinationPreview, ProbeSelection, ProdHttpBackend,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -560,6 +560,54 @@ fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// History (Download Archive query)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn list_history(state: State<AppState>) -> Result<Vec<ArchiveEntry>, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.list_history())
+}
+
+#[tauri::command]
+fn list_history_by_outcome(
+    state: State<AppState>,
+    outcome: String,
+) -> Result<Vec<ArchiveEntry>, String> {
+    match outcome.as_str() {
+        "Completed" => {
+            let core = state.core.lock().map_err(|e| e.to_string())?;
+            Ok(core.list_history_by_outcome(ArchiveOutcome::Completed))
+        }
+        "Failed" => {
+            let core = state.core.lock().map_err(|e| e.to_string())?;
+            Ok(core.list_history_by_outcome(ArchiveOutcome::Failed))
+        }
+        _ => Err(format!(
+            "unknown outcome '{outcome}', expected 'Completed' or 'Failed'"
+        )),
+    }
+}
+
+#[tauri::command]
+fn remove_history_entry(
+    state: State<AppState>,
+    media_id: String,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    match core.remove_history_entry(&media_id) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+#[tauri::command]
+fn history_len(state: State<AppState>) -> Result<usize, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.history_len())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -668,6 +716,10 @@ pub fn run() {
             is_main_window_focused,
             focus_main_window,
             poll_events,
+            list_history,
+            list_history_by_outcome,
+            remove_history_entry,
+            history_len,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

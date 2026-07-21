@@ -311,6 +311,35 @@ internal static class CoreBridge
         int outBufLen,
         IntPtr errorBuf,
         int errorBufLen);
+
+    // -----------------------------------------------------------------------
+    // Download Archive / History (#61)
+    // -----------------------------------------------------------------------
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_list_history(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_list_history_by_outcome(
+        IntPtr handle,
+        string outcome,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_remove_history_entry(
+        IntPtr handle,
+        string mediaId,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int core_history_len(IntPtr handle);
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +605,43 @@ public class CoreHandle : IDisposable
             url);
         return System.Text.Json.JsonSerializer.Deserialize<ActiveJobMatch?>(json);
     }
+
+    public IReadOnlyList<ArchiveEntry> ListHistory()
+    {
+        var json = CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_list_history(h, o, ol),
+            _handle);
+        return System.Text.Json.JsonSerializer.Deserialize<List<ArchiveEntry>>(json)
+            ?? new List<ArchiveEntry>();
+    }
+
+    public IReadOnlyList<ArchiveEntry> ListHistoryByOutcome(string outcome)
+    {
+        var json = CallWithJsonResult(
+            (h, arg, o, ol, e, el) =>
+                CoreBridge.core_list_history_by_outcome(h, arg, o, ol, e, el),
+            _handle,
+            outcome);
+        return System.Text.Json.JsonSerializer.Deserialize<List<ArchiveEntry>>(json)
+            ?? new List<ArchiveEntry>();
+    }
+
+    public void RemoveHistoryEntry(string mediaId)
+    {
+        unsafe
+        {
+            byte* errBuf = stackalloc byte[1024];
+            var errPtr = new IntPtr(errBuf);
+            int result = CoreBridge.core_remove_history_entry(_handle, mediaId, errPtr, 1024);
+            if (result != 0)
+            {
+                var errMsg = Marshal.PtrToStringAnsi(errPtr) ?? "unknown error";
+                throw new InvalidOperationException($"Failed to remove history entry: {errMsg}");
+            }
+        }
+    }
+
+    public int HistoryLen() => CoreBridge.core_history_len(_handle);
 
     private static void ThrowOnError(int result)
     {

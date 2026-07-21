@@ -1,7 +1,7 @@
 //! Download Archive — Library Root–scoped completed media identities.
 //!
 //! Persisted at `{library_root}/.phlegethon/archive.json`. Probe marks archived
-//! items; History (P3) reads the same store.
+//! items; History (P3) reads the same store.  No second History DB.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -14,7 +14,14 @@ use crate::storage::PHLEGETHON_DIR;
 /// Filename for the persisted Download Archive index.
 pub const ARCHIVE_FILENAME: &str = "archive.json";
 
-const ARCHIVE_VERSION: u32 = 1;
+const ARCHIVE_VERSION: u32 = 2;
+
+/// Outcome of a completed or failed media job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArchiveOutcome {
+    Completed,
+    Failed,
+}
 
 /// A completed media identity recorded in the Download Archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +32,13 @@ pub struct ArchiveEntry {
     pub completed_at_unix_secs: u64,
     pub destination: PathBuf,
     pub job_id: String,
+    #[serde(default = "default_outcome")]
+    pub outcome: ArchiveOutcome,
+}
+
+/// v1 compatibility: entries without `outcome` default to Completed.
+fn default_outcome() -> ArchiveOutcome {
+    ArchiveOutcome::Completed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,9 +65,9 @@ impl DownloadArchive {
         let persisted: PersistedArchive = serde_json::from_str(&raw)
             .map_err(|e| format!("parse archive {}: {e}", path.display()))?;
 
-        if persisted.version != ARCHIVE_VERSION {
+        if persisted.version > ARCHIVE_VERSION {
             return Err(format!(
-                "unsupported archive version {} (expected {ARCHIVE_VERSION})",
+                "unsupported archive version {} (expected ≤{ARCHIVE_VERSION})",
                 persisted.version
             ));
         }
@@ -91,8 +105,48 @@ impl DownloadArchive {
         self.entries.contains_key(media_id)
     }
 
+    /// True when a Completed entry exists for this media_id (probe archival skip).
+    pub fn contains_completed(&self, media_id: &str) -> bool {
+        self.entries
+            .get(media_id)
+            .is_some_and(|e| e.outcome == ArchiveOutcome::Completed)
+    }
+
     pub fn record(&mut self, entry: ArchiveEntry) {
         self.entries.insert(entry.media_id.clone(), entry);
+    }
+
+    /// Remove an entry from the archive by media_id.
+    /// Returns the removed entry if it existed.
+    pub fn remove(&mut self, media_id: &str) -> Option<ArchiveEntry> {
+        self.entries.remove(media_id)
+    }
+
+    /// Return all archive entries sorted by completion time (most recent first).
+    pub fn list(&self) -> Vec<&ArchiveEntry> {
+        let mut entries: Vec<&ArchiveEntry> = self.entries.values().collect();
+        entries.sort_by(|a, b| b.completed_at_unix_secs.cmp(&a.completed_at_unix_secs));
+        entries
+    }
+
+    /// Return archive entries matching a given outcome (Completed / Failed).
+    pub fn list_by_outcome(&self, outcome: ArchiveOutcome) -> Vec<&ArchiveEntry> {
+        let mut entries: Vec<&ArchiveEntry> = self
+            .entries
+            .values()
+            .filter(|e| e.outcome == outcome)
+            .collect();
+        entries.sort_by(|a, b| b.completed_at_unix_secs.cmp(&a.completed_at_unix_secs));
+        entries
+    }
+
+    /// Number of entries in the archive.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -126,11 +180,126 @@ mod tests {
             completed_at_unix_secs: 1_700_000_000,
             destination: root.join("jobs").join("job-1"),
             job_id: "job-1".to_string(),
+            outcome: ArchiveOutcome::Completed,
         });
         archive.save(&root).unwrap();
 
         let loaded = DownloadArchive::load(&root).unwrap();
         assert!(loaded.contains("yt-abc123"));
         assert_eq!(loaded.entries.get("yt-abc123").unwrap().title, "Example");
+    }
+
+    #[test]
+    fn list_returns_sorted_by_time_descending() {
+        let mut archive = DownloadArchive::default();
+        archive.record(ArchiveEntry {
+            media_id: "old".to_string(),
+            title: "Old".to_string(),
+            url: "https://example.com/old".to_string(),
+            completed_at_unix_secs: 100,
+            destination: PathBuf::from("/tmp/old"),
+            job_id: "job-old".to_string(),
+            outcome: ArchiveOutcome::Completed,
+        });
+        archive.record(ArchiveEntry {
+            media_id: "new".to_string(),
+            title: "New".to_string(),
+            url: "https://example.com/new".to_string(),
+            completed_at_unix_secs: 200,
+            destination: PathBuf::from("/tmp/new"),
+            job_id: "job-new".to_string(),
+            outcome: ArchiveOutcome::Completed,
+        });
+
+        let list = archive.list();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].media_id, "new");
+        assert_eq!(list[1].media_id, "old");
+    }
+
+    #[test]
+    fn list_by_outcome_filters_correctly() {
+        let mut archive = DownloadArchive::default();
+        archive.record(ArchiveEntry {
+            media_id: "completed-1".to_string(),
+            title: "C1".to_string(),
+            url: "https://example.com/c1".to_string(),
+            completed_at_unix_secs: 100,
+            destination: PathBuf::from("/tmp/c1"),
+            job_id: "jc1".to_string(),
+            outcome: ArchiveOutcome::Completed,
+        });
+        archive.record(ArchiveEntry {
+            media_id: "failed-1".to_string(),
+            title: "F1".to_string(),
+            url: "https://example.com/f1".to_string(),
+            completed_at_unix_secs: 200,
+            destination: PathBuf::from("/tmp/f1"),
+            job_id: "jf1".to_string(),
+            outcome: ArchiveOutcome::Failed,
+        });
+
+        let completed = archive.list_by_outcome(ArchiveOutcome::Completed);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].media_id, "completed-1");
+
+        let failed = archive.list_by_outcome(ArchiveOutcome::Failed);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].media_id, "failed-1");
+    }
+
+    #[test]
+    fn remove_removes_entry_and_returns_it() {
+        let mut archive = DownloadArchive::default();
+        archive.record(ArchiveEntry {
+            media_id: "yt-abc".to_string(),
+            title: "Test".to_string(),
+            url: "https://youtube.com/watch?v=abc".to_string(),
+            completed_at_unix_secs: 100,
+            destination: PathBuf::from("/tmp/test"),
+            job_id: "job-test".to_string(),
+            outcome: ArchiveOutcome::Completed,
+        });
+
+        let removed = archive.remove("yt-abc");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().title, "Test");
+        assert!(!archive.contains("yt-abc"));
+        assert!(archive.is_empty());
+    }
+
+    #[test]
+    fn remove_nonexistent_returns_none() {
+        let mut archive = DownloadArchive::default();
+        assert!(archive.remove("nonexistent").is_none());
+    }
+
+    #[test]
+    fn loaded_version_1_is_backward_compatible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        fs::create_dir_all(root.join(".phlegethon")).unwrap();
+
+        // Write a v1 archive (no outcome field)
+        let v1 = r#"{
+            "version": 1,
+            "entries": {
+                "yt-abc": {
+                    "media_id": "yt-abc",
+                    "title": "Legacy",
+                    "url": "https://youtube.com/watch?v=abc",
+                    "completed_at_unix_secs": 100,
+                    "destination": "/tmp/legacy",
+                    "job_id": "job-legacy"
+                }
+            }
+        }"#;
+        fs::write(root.join(".phlegethon").join("archive.json"), v1).unwrap();
+
+        let loaded = DownloadArchive::load(&root).unwrap();
+        assert!(loaded.contains("yt-abc"));
+        // v1 entries should get default outcome (Completed via serde default)
+        let entry = loaded.entries.get("yt-abc").unwrap();
+        assert_eq!(entry.outcome, ArchiveOutcome::Completed);
     }
 }

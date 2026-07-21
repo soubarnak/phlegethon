@@ -1107,6 +1107,99 @@ pub unsafe extern "C" fn core_find_active_job_for_url(
 }
 
 // ---------------------------------------------------------------------------
+// History (Download Archive query)
+// ---------------------------------------------------------------------------
+
+/// List all archive entries (Completed + Failed), most recent first.
+///
+/// Returns a JSON array of `ArchiveEntry` objects.
+#[no_mangle]
+pub unsafe extern "C" fn core_list_history(
+    handle: *mut Core,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        let core = &*core_guard;
+        let entries = core.list_history();
+        let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
+        write_str_to_buf(&json, out_json_buf, out_buf_len);
+        0
+    })
+}
+
+/// List archive entries filtered by outcome ("Completed" or "Failed").
+#[no_mangle]
+pub unsafe extern "C" fn core_list_history_by_outcome(
+    handle: *mut Core,
+    outcome: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let outcome_str = cstr_to_str(outcome);
+        let parsed = match outcome_str {
+            "Completed" => crate::ArchiveOutcome::Completed,
+            "Failed" => crate::ArchiveOutcome::Failed,
+            _ => {
+                let err = format!("unknown outcome '{outcome_str}', expected 'Completed' or 'Failed'");
+                write_str_to_buf(&err, error_buf, error_buf_len);
+                return -1;
+            }
+        };
+        let core_guard = ctx.core.lock().unwrap();
+        let core = &*core_guard;
+        let entries = core.list_history_by_outcome(parsed);
+        let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
+        write_str_to_buf(&json, out_json_buf, out_buf_len);
+        0
+    })
+}
+
+/// Remove an entry from the Download Archive by media_id.
+///
+/// Files on disk are NOT touched — only the archive entry is deleted.
+/// Returns 0 on success, -1 if the media_id was not found.
+#[no_mangle]
+pub unsafe extern "C" fn core_remove_history_entry(
+    handle: *mut Core,
+    media_id: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let mid = cstr_to_str(media_id);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = &mut *core_guard;
+        match core.remove_history_entry(mid) {
+            Ok(_) => 0,
+            Err(err) => {
+                write_str_to_buf(&err, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+/// Return the number of entries in the Download Archive.
+#[no_mangle]
+pub unsafe extern "C" fn core_history_len(
+    handle: *mut Core,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        core_guard.history_len() as i32
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Serialisation support for C ABI types
 // ---------------------------------------------------------------------------
 

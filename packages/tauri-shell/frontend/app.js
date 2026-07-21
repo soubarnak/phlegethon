@@ -23,6 +23,10 @@ import {
   QUEUE_SORT_QUEUE,
   applyQueueView,
 } from "./queueView.js";
+import {
+  createHistoryApi,
+  renderHistory,
+} from "./historyView.js";
 
 // Resolve Tauri APIs lazily — withGlobalTauri must be enabled in tauri.conf.json.
 function getInvoke() {
@@ -1462,6 +1466,78 @@ desktopNotificationsInput?.addEventListener("change", () => {
   state.desktopNotificationsEnabled = desktopNotificationsInput.checked;
   saveDesktopNotificationsEnabled(state.desktopNotificationsEnabled);
 });
+
+// ---- Tab switching ----
+const tabBar = document.getElementById("tabBar");
+const queueTab = document.getElementById("queueTab");
+const historyTab = document.getElementById("historyTab");
+
+tabBar?.addEventListener("click", (e) => {
+  const btn = e.target.closest(".tab-btn");
+  if (!btn) return;
+  const tab = btn.dataset.tab;
+
+  tabBar.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("tab-active"));
+  btn.classList.add("tab-active");
+
+  queueTab.hidden = tab !== "queue";
+  historyTab.hidden = tab !== "history";
+
+  if (tab === "history") {
+    void loadAndRenderHistory();
+  }
+});
+
+// ---- History integration ----
+const historyList = document.getElementById("historyList");
+const historyFilter = document.getElementById("historyFilter");
+const historyEmpty = document.getElementById("historyEmpty");
+const historyApi = createHistoryApi(getInvoke, {
+  onReDownload(url) {
+    // Switch to queue tab, fill URL input, enqueue
+    document.querySelector('[data-tab="queue"]').click();
+    urlInput.value = url;
+    void enqueueUrlInput(url);
+  },
+});
+
+async function loadAndRenderHistory() {
+  try {
+    const filter = historyFilter?.value || "all";
+    const entries = await (filter === "all"
+      ? historyApi.list()
+      : historyApi.listByOutcome(filter));
+    renderHistory(historyList, historyApi, entries, {
+      filter,
+      getInvoke,
+      onEntriesChanged: () => void loadAndRenderHistory(),
+    });
+    if (historyEmpty) {
+      historyEmpty.hidden = entries.length > 0;
+    }
+  } catch (err) {
+    console.warn("Failed to load history:", err);
+    historyList.innerHTML = `<div class="queue-empty"><span>Failed to load history: ${err}</span></div>`;
+  }
+}
+
+historyFilter?.addEventListener("change", () => {
+  void loadAndRenderHistory();
+});
+
+// Refresh history when events suggest a job completed or failed
+// Hook into handleCoreEvent to trigger history refresh
+const _origHandleCoreEvent = handleCoreEvent;
+handleCoreEvent = function (evt) {
+  _origHandleCoreEvent(evt);
+  // Refresh history view if it's visible and a job completed or failed
+  if (
+    !historyTab.hidden &&
+    (evt.type === "JobCompleted" || evt.type === "JobFailed")
+  ) {
+    void loadAndRenderHistory();
+  }
+};
 
 // ---- Init ----
 document.addEventListener("DOMContentLoaded", async () => {

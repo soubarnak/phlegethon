@@ -45,7 +45,7 @@ pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
 pub use disk_space::{
     disk_space_margin_bytes, required_free_bytes, FreeSpaceLookup, SystemFreeSpace,
 };
-pub use download_archive::{ArchiveEntry, DownloadArchive};
+pub use download_archive::{ArchiveEntry, ArchiveOutcome, DownloadArchive};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
@@ -507,6 +507,16 @@ impl Core {
         job_id: &str,
         error: String,
     ) -> Result<(), String> {
+        self.finalize_failed_job(job_id, job_index, error)
+    }
+
+    /// Mark a job Failed, emit `JobFailed`, and record media identity in the archive.
+    fn finalize_failed_job(
+        &mut self,
+        job_id: &str,
+        job_index: usize,
+        error: String,
+    ) -> Result<(), String> {
         self.jobs[job_index].mark_failed();
         self.event_tx
             .send(CoreEvent::JobFailed {
@@ -514,6 +524,7 @@ impl Core {
                 error,
             })
             .map_err(|_| "event channel closed".to_string())?;
+        self.record_media_identity(job_id, job_index)?;
         self.persist_queue_now()
     }
 
@@ -1694,14 +1705,7 @@ impl Core {
                             self.persist_queue_now()?;
                             Ok(true)
                         } else {
-                            self.jobs[job_index].mark_failed();
-                            self.event_tx
-                                .send(CoreEvent::JobFailed {
-                                    job_id: job_id.to_string(),
-                                    error: err,
-                                })
-                                .map_err(|_| "event channel closed".to_string())?;
-                            self.persist_queue_now()?;
+                            self.finalize_failed_job(&job_id, job_index, err)?;
                             Ok(false)
                         }
                     }
@@ -1759,14 +1763,11 @@ impl Core {
                     .unwrap_or_else(|| self.filename_template.clone());
                 let on_disk = storage::destination_byte_total(&dest);
                 if on_disk > 0 && !self.extractor.supports_extractor_resume() {
-                    self.jobs[i].mark_failed();
-                    self.event_tx
-                        .send(CoreEvent::JobFailed {
-                            job_id: job_id.clone(),
-                            error: "extractor cannot resume partial download; use Retry".into(),
-                        })
-                        .map_err(|_| "event channel closed".to_string())?;
-                    self.persist_queue_now()?;
+                    self.finalize_failed_job(
+                        &job_id,
+                        i,
+                        "extractor cannot resume partial download; use Retry".into(),
+                    )?;
                     return Ok(());
                 }
 
@@ -1860,14 +1861,7 @@ impl Core {
                                 pre_remux_path,
                             } => {
                                 let _ = pre_remux_path;
-                                self.jobs[i].mark_failed();
-                                self.event_tx
-                                    .send(CoreEvent::JobFailed {
-                                        job_id: job_id.clone(),
-                                        error,
-                                    })
-                                    .map_err(|_| "event channel closed".to_string())?;
-                                self.persist_queue_now()?;
+                                self.finalize_failed_job(&job_id, i, error)?;
                                 return Ok(());
                             }
                         };
@@ -1888,14 +1882,7 @@ impl Core {
                         if pause_requested.load(Ordering::Acquire) {
                             self.finalize_stop_after_transfer(&job_id)?;
                         } else {
-                            self.jobs[i].mark_failed();
-                            self.event_tx
-                                .send(CoreEvent::JobFailed {
-                                    job_id: job_id.clone(),
-                                    error: err,
-                                })
-                                .map_err(|_| "event channel closed".to_string())?;
-                            self.persist_queue_now()?;
+                            self.finalize_failed_job(&job_id, i, err)?;
                         }
                     }
                 }
@@ -1960,14 +1947,7 @@ impl Core {
                                     self.persist_queue_now()?;
                                     continue 'seg_loop;
                                 }
-                                self.jobs[i].mark_failed();
-                                self.event_tx
-                                    .send(CoreEvent::JobFailed {
-                                        job_id: job_id.clone(),
-                                        error: err,
-                                    })
-                                    .map_err(|_| "event channel closed".to_string())?;
-                                self.persist_queue_now()?;
+                                self.finalize_failed_job(&job_id, i, err)?;
                                 break 'seg_loop None;
                             }
                         }
@@ -2082,14 +2062,7 @@ impl Core {
                             self.persist_queue_now()?;
                             continue 'fetch_loop;
                         }
-                        self.jobs[i].mark_failed();
-                        self.event_tx
-                            .send(CoreEvent::JobFailed {
-                                job_id: job_id.clone(),
-                                error: err,
-                            })
-                            .map_err(|_| "event channel closed".to_string())?;
-                        self.persist_queue_now()?;
+                        self.finalize_failed_job(&job_id, i, err)?;
                         break 'fetch_loop None;
                     }
                 }
@@ -2227,14 +2200,7 @@ impl Core {
     ) -> Result<(), String> {
         if let Some(expected) = self.jobs[job_index].expected_hash().cloned() {
             if let Err(err) = expected.verify_file(file_path) {
-                self.jobs[job_index].mark_failed();
-                self.event_tx
-                    .send(CoreEvent::JobFailed {
-                        job_id: job_id.to_string(),
-                        error: err,
-                    })
-                    .map_err(|_| "event channel closed".to_string())?;
-                return self.persist_queue_now();
+                return self.finalize_failed_job(job_id, job_index, err);
             }
         }
 
@@ -2250,17 +2216,17 @@ impl Core {
         if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
             self.jobs[job_index].set_filename(name);
         }
-        self.record_completed_media_identity(job_id, job_index)?;
+        self.record_media_identity(job_id, job_index)?;
         self.persist_queue_now()
     }
 
     fn mark_archived_probe_items(&self, items: &mut [MediaItem]) {
         for item in items {
-            item.archived = self.download_archive.contains(&item.id);
+            item.archived = self.download_archive.contains_completed(&item.id);
         }
     }
 
-    fn record_completed_media_identity(
+    fn record_media_identity(
         &mut self,
         job_id: &str,
         job_index: usize,
@@ -2268,17 +2234,28 @@ impl Core {
         let Some(media_id) = self.jobs[job_index].media_id().map(str::to_string) else {
             return Ok(());
         };
+        let is_completed = self.jobs[job_index].is_completed();
         let title = self.jobs[job_index]
             .media_title()
             .map(str::to_string)
             .unwrap_or_else(|| self.jobs[job_index].filename().to_string());
+        let reveal_path = if is_completed {
+            self.jobs[job_index].final_path()
+        } else {
+            self.jobs[job_index].destination().clone()
+        };
         let entry = download_archive::ArchiveEntry {
             media_id,
             title,
             url: self.jobs[job_index].url().to_string(),
             completed_at_unix_secs: download_archive::unix_now_secs(),
-            destination: self.jobs[job_index].destination().clone(),
+            destination: reveal_path,
             job_id: job_id.to_string(),
+            outcome: if is_completed {
+                download_archive::ArchiveOutcome::Completed
+            } else {
+                download_archive::ArchiveOutcome::Failed
+            },
         };
         self.download_archive.record(entry);
         if let Some(root) = &self.library_root {
@@ -2383,6 +2360,56 @@ impl Core {
 
         let paused = pause_requested.load(Ordering::Acquire);
         Ok((total_size, bytes_written, paused))
+    }
+
+    // -----------------------------------------------------------------------
+    // History (Download Archive query)
+    // -----------------------------------------------------------------------
+
+    /// Return all archive entries (Completed + Failed), most recent first.
+    ///
+    /// This is the single source of truth for History views — there is no
+    /// second History DB.  The archive only records media identities; plain
+    /// HTTP jobs without media_id are not archived.
+    pub fn list_history(&self) -> Vec<ArchiveEntry> {
+        self.download_archive
+            .list()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Return archive entries matching the given outcome, most recent first.
+    pub fn list_history_by_outcome(&self, outcome: ArchiveOutcome) -> Vec<ArchiveEntry> {
+        self.download_archive
+            .list_by_outcome(outcome)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Remove an entry from the Download Archive by media_id.
+    ///
+    /// Files on disk are NOT touched — only the archive entry is deleted.
+    pub fn remove_history_entry(&mut self, media_id: &str) -> Result<ArchiveEntry, String> {
+        let removed = self
+            .download_archive
+            .remove(media_id)
+            .ok_or_else(|| format!("no history entry for media_id '{media_id}'"))?;
+        if let Some(root) = &self.library_root {
+            self.download_archive.save(root)?;
+        }
+        Ok(removed)
+    }
+
+    /// Number of entries in the Download Archive.
+    pub fn history_len(&self) -> usize {
+        self.download_archive.len()
+    }
+
+    /// Whether the archive is empty.
+    pub fn is_history_empty(&self) -> bool {
+        self.download_archive.is_empty()
     }
 
     // -----------------------------------------------------------------------
