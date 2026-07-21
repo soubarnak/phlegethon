@@ -187,6 +187,12 @@
           <input type="text" class="url-input" id="cookieFileInput" placeholder="Cookie file (absolute path)" />
           <button class="btn btn-primary" id="cookieChannelApply" type="button">Apply cookies</button>
         </div>
+        <label class="settings-label" for="proxyUrlInput">Global proxy</label>
+        <p class="settings-help">Optional HTTP(S) or SOCKS proxy for HTTP downloads and yt-dlp. Leave blank for direct connectivity.</p>
+        <div class="settings-row">
+          <input type="text" class="url-input" id="proxyUrlInput" placeholder="http://host:port or socks5://host:port" />
+          <button class="btn btn-primary" id="proxySettingsApply" type="button">Apply proxy</button>
+        </div>
         <label class="settings-label" for="clipboardWatcherInput">Clipboard watcher</label>
         <p class="settings-help">When enabled, detected URLs fill the input bar. Downloads never start automatically.</p>
         <div class="settings-row">

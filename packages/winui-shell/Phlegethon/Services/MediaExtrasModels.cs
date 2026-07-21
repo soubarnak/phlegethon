@@ -51,3 +51,10 @@ public sealed class CookieChannel
     [JsonPropertyName("cookie_file")]
     public string? CookieFile { get; set; }
 }
+
+/// <summary>Global HTTP(S)/SOCKS proxy for HTTP transfers and extractor toolchain.</summary>
+public sealed class ProxySettings
+{
+    [JsonPropertyName("url")]
+    public string? Url { get; set; }
+}

@@ -68,9 +68,11 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.SetAudioOnlyModeDisplay(_eventService.GetAudioOnlyMode());
         DownloadQueueView.SetMediaExtrasDefaultsDisplay(_eventService.GetDefaultMediaExtras());
         DownloadQueueView.SetCookieChannelDisplay(_eventService.GetCookieChannel());
+        DownloadQueueView.SetProxySettingsDisplay(_eventService.GetProxySettings());
         DownloadQueueView.SetFilenameTemplateDisplay(_eventService.GetFilenameTemplate());
         DownloadQueueView.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
         DownloadQueueView.CookieChannelChanged += OnCookieChannelChanged;
+        DownloadQueueView.ProxySettingsChanged += OnProxySettingsChanged;
         DownloadQueueView.FilenameTemplateChanged += OnFilenameTemplateChanged;
 
         HistoryView.FilterChanged += (_, _) => RefreshHistory();
@@ -643,6 +645,19 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             UrlStatusText.Text = $"Cookie channel failed: {ex.Message}";
+        }
+    }
+
+    private void OnProxySettingsChanged(object? sender, ProxySettings settings)
+    {
+        try
+        {
+            _eventService.SetProxySettings(settings);
+            UrlStatusText.Text = "Proxy settings updated";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Proxy settings failed: {ex.Message}";
         }
     }
 

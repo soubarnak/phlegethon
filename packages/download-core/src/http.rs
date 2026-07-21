@@ -1,7 +1,9 @@
 //! HTTP backend trait — primary test seam for the Core.
 
+use crate::proxy_settings::ProxySettings;
 use std::io::{Read, Write};
 use std::ops::Range;
+use std::sync::RwLock;
 
 /// Metadata returned after a successful HTTP fetch into a sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +44,11 @@ pub trait HttpBackend: Send + Sync {
     /// In production this sends a HEAD request and reads `Content-Length`.
     /// In tests it returns the length of canned data.
     fn file_size(&self, url: &str) -> Result<u64, String>;
+
+    /// Apply global proxy settings to this backend when supported.
+    ///
+    /// Test fakes ignore this; production HTTP honors proxy changes.
+    fn apply_proxy_settings(&self, _proxy: &ProxySettings) {}
 }
 // Production HTTP backend (ureq-based)
 // ---------------------------------------------------------------------------
@@ -52,17 +59,40 @@ pub trait HttpBackend: Send + Sync {
 /// - `supports_range`: sends HEAD and inspects `Accept-Ranges`.
 /// - `file_size`: sends HEAD and reads `Content-Length`.
 pub struct ProdHttpBackend {
-    client: ureq::Agent,
+    client: RwLock<ureq::Agent>,
+}
+
+fn build_ureq_agent(proxy: &ProxySettings) -> Result<ureq::Agent, String> {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(30));
+    if let Some(url) = proxy.url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let proxy_cfg = ureq::Proxy::new(url).map_err(|e| format!("proxy {url}: {e}"))?;
+        builder = builder.proxy(proxy_cfg);
+    }
+    Ok(builder.build())
 }
 
 impl ProdHttpBackend {
     pub fn new() -> Self {
+        Self::with_proxy(&ProxySettings::default())
+    }
+
+    pub fn with_proxy(proxy: &ProxySettings) -> Self {
         Self {
-            client: ureq::AgentBuilder::new()
-                .timeout_connect(std::time::Duration::from_secs(10))
-                .timeout_read(std::time::Duration::from_secs(30))
-                .build(),
+            client: RwLock::new(
+                build_ureq_agent(proxy).unwrap_or_else(|_| {
+                    ureq::AgentBuilder::new()
+                        .timeout_connect(std::time::Duration::from_secs(10))
+                        .timeout_read(std::time::Duration::from_secs(30))
+                        .build()
+                }),
+            ),
         }
+    }
+
+    fn client(&self) -> std::sync::RwLockReadGuard<'_, ureq::Agent> {
+        self.client.read().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -73,13 +103,21 @@ impl Default for ProdHttpBackend {
 }
 
 impl HttpBackend for ProdHttpBackend {
+    fn apply_proxy_settings(&self, proxy: &ProxySettings) {
+        if let Ok(mut guard) = self.client.write() {
+            if let Ok(agent) = build_ureq_agent(proxy) {
+                *guard = agent;
+            }
+        }
+    }
+
     fn fetch(
         &self,
         url: &str,
         range: Option<Range<u64>>,
         sink: &mut dyn Write,
     ) -> Result<FetchResult, String> {
-        let mut req = self.client.get(url);
+        let mut req = self.client().get(url);
         if let Some(r) = range {
             let header_val = format!("bytes={}-{}", r.start, r.end.saturating_sub(1));
             req = req.set("Range", &header_val);
@@ -127,7 +165,7 @@ impl HttpBackend for ProdHttpBackend {
 
     fn supports_range(&self, url: &str) -> Result<bool, String> {
         let resp = self
-            .client
+            .client()
             .head(url)
             .call()
             .map_err(|e| format!("HEAD {url}: {e}"))?;
@@ -140,7 +178,7 @@ impl HttpBackend for ProdHttpBackend {
 
     fn file_size(&self, url: &str) -> Result<u64, String> {
         let resp = self
-            .client
+            .client()
             .head(url)
             .call()
             .map_err(|e| format!("HEAD {url}: {e}"))?;

@@ -213,6 +213,19 @@ internal static class CoreBridge
         int errorBufLen);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_get_proxy_settings_json(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_set_proxy_settings_json(
+        IntPtr handle,
+        string settingsJson,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     public static extern int core_get_filename_template(
         IntPtr handle,
         IntPtr outBuf,
@@ -541,6 +554,19 @@ public class CoreHandle : IDisposable
     {
         ThrowOnError(
             CoreBridge.core_set_cookie_channel_json(_handle, channelJson, IntPtr.Zero, 0));
+    }
+
+    public string GetProxySettingsJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_get_proxy_settings_json(h, o, ol),
+            _handle);
+    }
+
+    public void SetProxySettingsJson(string settingsJson)
+    {
+        ThrowOnError(
+            CoreBridge.core_set_proxy_settings_json(_handle, settingsJson, IntPtr.Zero, 0));
     }
 
     public string GetFilenameTemplate()

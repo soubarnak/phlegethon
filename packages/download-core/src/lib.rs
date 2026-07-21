@@ -21,6 +21,7 @@ mod job_signals;
 mod mirror_set;
 mod transfer;
 mod url_input;
+mod proxy_settings;
 pub mod plugin_sidecar;
 mod storage;
 pub mod ytdlp_extractor;
@@ -31,6 +32,7 @@ pub use plugin_sidecar::{
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
 pub use cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
+pub use proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
 pub use bandwidth::{Clock, ManualClock, SystemClock, TransferProgress};
 pub use event::CoreEvent;
 pub use extractor::{
@@ -134,6 +136,7 @@ pub struct Core {
     audio_only_mode: bool,
     default_media_extras: MediaExtrasOptions,
     cookie_channel: CookieChannel,
+    proxy_settings: ProxySettings,
     filename_template: String,
     clock: Arc<dyn bandwidth::Clock>,
     /// Pending probe results, keyed by URL.
@@ -297,6 +300,7 @@ impl Core {
             audio_only_mode: false,
             default_media_extras: MediaExtrasOptions::default(),
             cookie_channel: CookieChannel::default(),
+            proxy_settings: ProxySettings::default(),
             filename_template: DEFAULT_FILENAME_TEMPLATE.to_string(),
             clock,
             pending_probes: HashMap::new(),
@@ -407,6 +411,8 @@ impl Core {
         let media_settings = storage::load_media_extras_settings(&root)?;
         self.default_media_extras = media_settings.defaults;
         self.cookie_channel = storage::load_cookie_channel(&root)?;
+        self.proxy_settings = storage::load_proxy_settings(&root)?;
+        self.http.apply_proxy_settings(&self.proxy_settings);
         self.filename_template = storage::load_filename_template(&root)?;
         self.download_archive = download_archive::DownloadArchive::load(&root)?;
         self.library_root = Some(root);
@@ -442,6 +448,7 @@ impl Core {
                 self.audio_only_mode,
                 &self.default_media_extras,
                 &self.cookie_channel,
+                &self.proxy_settings,
                 &self.filename_template,
             );
             storage::save_queue(root, &queue)?;
@@ -1016,6 +1023,23 @@ impl Core {
         self.persist_queue_now()
     }
 
+    /// Current global proxy settings.
+    pub fn proxy_settings(&self) -> ProxySettings {
+        self.proxy_settings.clone()
+    }
+
+    /// Update global proxy settings and persist them.
+    ///
+    /// HTTP transfers and future Extractor Toolchain invocations honor the proxy.
+    /// Clearing the URL restores direct connectivity.
+    pub fn set_proxy_settings(&mut self, settings: ProxySettings) -> Result<(), String> {
+        let settings = settings.normalized();
+        settings.validate()?;
+        self.proxy_settings = settings.clone();
+        self.http.apply_proxy_settings(&settings);
+        self.persist_queue_now()
+    }
+
     /// Current Filename Template for extractor job outputs.
     pub fn filename_template(&self) -> &str {
         &self.filename_template
@@ -1216,7 +1240,7 @@ impl Core {
     /// instead and return the error.
     pub fn probe(&mut self, url: &str) -> Result<ProbeResult, String> {
         let url = normalize_url(url).ok_or_else(|| "invalid URL".to_string())?;
-        match self.extractor.probe(&url, &self.cookie_channel) {
+        match self.extractor.probe(&url, &self.cookie_channel, &self.proxy_settings) {
             Ok(mut result) => {
                 self.mark_archived_probe_items(&mut result.items);
 
@@ -1799,6 +1823,7 @@ impl Core {
                     let output_spec = output_spec_owned.as_str();
                     let extras = media_extras;
                     let cookies = self.cookie_channel.clone();
+                    let proxy = self.proxy_settings.clone();
                     s.spawn(move || {
                         let outcome = extractor.download(
                             url_ref,
@@ -1807,6 +1832,7 @@ impl Core {
                             stop,
                             &extras,
                             &cookies,
+                            &proxy,
                             output_spec,
                         );
                         let _ = result_tx.send(outcome);

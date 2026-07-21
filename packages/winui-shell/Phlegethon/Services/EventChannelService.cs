@@ -297,6 +297,19 @@ public class EventChannelService : IDisposable
         _core.SetCookieChannelJson(json);
     }
 
+    public ProxySettings GetProxySettings()
+    {
+        var json = _core.GetProxySettingsJson();
+        return System.Text.Json.JsonSerializer.Deserialize<ProxySettings>(json)
+            ?? new ProxySettings();
+    }
+
+    public void SetProxySettings(ProxySettings settings)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(settings);
+        _core.SetProxySettingsJson(json);
+    }
+
     public string GetFilenameTemplate() => _core.GetFilenameTemplate();
 
     public void SetFilenameTemplate(string template) => _core.SetFilenameTemplate(template);

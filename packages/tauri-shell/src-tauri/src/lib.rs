@@ -490,6 +490,21 @@ fn set_cookie_channel(
 }
 
 #[tauri::command]
+fn get_proxy_settings(state: State<AppState>) -> Result<download_core::ProxySettings, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.proxy_settings())
+}
+
+#[tauri::command]
+fn set_proxy_settings(
+    state: State<AppState>,
+    settings: download_core::ProxySettings,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_proxy_settings(settings)
+}
+
+#[tauri::command]
 fn get_filename_template(state: State<AppState>) -> Result<String, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.filename_template().to_string())
@@ -707,6 +722,8 @@ pub fn run() {
             get_media_extras_capabilities,
             get_cookie_channel,
             set_cookie_channel,
+            get_proxy_settings,
+            set_proxy_settings,
             get_filename_template,
             set_filename_template,
             select_default_quality,

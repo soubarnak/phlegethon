@@ -6595,6 +6595,58 @@ fn cookie_channel_rejects_relative_cookie_file() {
     assert!(err.contains("absolute path"), "got: {err}");
 }
 
+#[test]
+fn proxy_settings_defaults_empty() {
+    let (core, _rx) = make_core(Box::new(fake_http()));
+    assert!(!core.proxy_settings().is_configured());
+}
+
+#[test]
+fn proxy_settings_persist_across_library_root_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(root.clone()).unwrap();
+
+    let settings = ProxySettings {
+        url: Some("socks5://127.0.0.1:1080".to_string()),
+    };
+    core.set_proxy_settings(settings.clone()).unwrap();
+
+    let (mut core2, _rx2) = make_core(Box::new(fake_http()));
+    core2.set_library_root(root).unwrap();
+    assert_eq!(core2.proxy_settings(), settings);
+}
+
+#[test]
+fn proxy_settings_clearing_restores_direct_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = make_core(Box::new(ProdHttpBackend::new()));
+    core.set_library_root(root).unwrap();
+
+    core.set_proxy_settings(ProxySettings {
+        url: Some("http://127.0.0.1:8080".to_string()),
+    })
+    .unwrap();
+    core.set_proxy_settings(ProxySettings::default()).unwrap();
+    assert!(!core.proxy_settings().is_configured());
+}
+
+#[test]
+fn proxy_settings_rejects_invalid_scheme() {
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    let tmp = tempfile::tempdir().unwrap();
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let err = core
+        .set_proxy_settings(ProxySettings {
+            url: Some("ftp://proxy.example.com".to_string()),
+        })
+        .unwrap_err();
+    assert!(err.contains("scheme"), "got: {err}");
+}
+
 // ---------------------------------------------------------------------------
 // URL input: normalization, multi-paste, duplicate detection (#57)
 // ---------------------------------------------------------------------------

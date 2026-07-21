@@ -22,6 +22,7 @@
 
 use crate::cookie_channel::CookieChannel;
 use crate::media_extras::MediaExtrasOptions;
+use crate::proxy_settings::ProxySettings;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -83,7 +84,12 @@ pub enum ExtractorDownloadOutcome {
 /// The Extractor Toolchain — wraps yt-dlp (or a fake in tests).
 pub trait ExtractorToolchain: Send + Sync {
     /// Probe a URL and return discovered items with available qualities.
-    fn probe(&self, url: &str, cookies: &CookieChannel) -> Result<ProbeResult, String>;
+    fn probe(
+        &self,
+        url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Result<ProbeResult, String>;
 
     /// Download media for a Launch Site URL into `dest_dir` via the toolchain.
     ///
@@ -124,6 +130,7 @@ pub trait ExtractorToolchain: Send + Sync {
         _stop: &AtomicBool,
         _media_extras: &MediaExtrasOptions,
         _cookies: &CookieChannel,
+        _proxy: &ProxySettings,
         _output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
         Err("extractor download not supported for this toolchain".into())
@@ -320,7 +327,12 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         self.ffmpeg_dir.as_deref()
     }
 
-    fn probe(&self, url: &str, _cookies: &CookieChannel) -> Result<ProbeResult, String> {
+    fn probe(
+        &self,
+        url: &str,
+        _cookies: &CookieChannel,
+        _proxy: &ProxySettings,
+    ) -> Result<ProbeResult, String> {
         let response = self
             .responses
             .get(url)
@@ -340,6 +352,7 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         stop: &AtomicBool,
         _media_extras: &MediaExtrasOptions,
         _cookies: &CookieChannel,
+        _proxy: &ProxySettings,
         output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
         if stop.load(Ordering::Acquire) {
@@ -444,7 +457,11 @@ mod tests {
         );
 
         let result = fake
-            .probe("https://example.com/video", &CookieChannel::default())
+            .probe(
+                "https://example.com/video",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
             .unwrap();
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].title, "Test Video");
@@ -466,7 +483,11 @@ mod tests {
         );
 
         let result = fake
-            .probe("https://youtube.com/playlist?list=ABC", &CookieChannel::default())
+            .probe(
+                "https://youtube.com/playlist?list=ABC",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
             .unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.source_name, Some("My Playlist".to_string()));
@@ -478,7 +499,11 @@ mod tests {
     fn fake_extractor_fails_for_unknown_url() {
         let fake = FakeExtractorToolchain::new();
         let err = fake
-            .probe("https://unknown.example.com/video", &CookieChannel::default())
+            .probe(
+                "https://unknown.example.com/video",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
             .unwrap_err();
         assert!(err.contains("no response configured"), "error should mention missing config, got: {err}");
     }
@@ -496,7 +521,11 @@ mod tests {
             vec![("best", "Best quality")],
         );
         let result = fake
-            .probe("https://cdn.example.com/video.mp4", &CookieChannel::default())
+            .probe(
+                "https://cdn.example.com/video.mp4",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
             .unwrap();
         assert_eq!(result.items[0].id, "item-1");
         assert_eq!(result.items[0].qualities[0].id, "best");

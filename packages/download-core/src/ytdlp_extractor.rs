@@ -17,6 +17,7 @@
 //! This module's unit tests use canned JSON strings.
 
 use crate::cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
+use crate::proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
 use crate::extractor::{
     ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
 };
@@ -216,11 +217,17 @@ impl YtDlpExtractorToolchain {
     /// extracting each video. Per-item qualities are resolved afterward via
     /// `enrich_playlist_item_qualities`.
     /// `--plugin-dirs` is included when configured (Launch Site Extractor Plugins).
-    pub(crate) fn probe_args(&self, url: &str, cookies: &CookieChannel) -> Vec<String> {
-        self.probe_args_for(url, true, cookies)
+    pub(crate) fn probe_args(&self, url: &str, cookies: &CookieChannel, proxy: &ProxySettings) -> Vec<String> {
+        self.probe_args_for(url, true, cookies, proxy)
     }
 
-    fn probe_args_for(&self, url: &str, flat_playlist: bool, cookies: &CookieChannel) -> Vec<String> {
+    fn probe_args_for(
+        &self,
+        url: &str,
+        flat_playlist: bool,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Vec<String> {
         let mut args = vec!["-J".to_string(), "--no-warnings".to_string()];
         if flat_playlist {
             args.push("--flat-playlist".to_string());
@@ -228,6 +235,7 @@ impl YtDlpExtractorToolchain {
             args.push("--no-playlist".to_string());
         }
         args.extend(ytdlp_cookie_args(cookies));
+        args.extend(ytdlp_proxy_args(proxy));
         for dir in &self.config.plugin_dirs {
             args.push("--plugin-dirs".to_string());
             args.push(dir.display().to_string());
@@ -237,8 +245,8 @@ impl YtDlpExtractorToolchain {
     }
 
     /// Run yt-dlp with `-J` and return the raw JSON stdout.
-    fn run_probe(&self, url: &str, cookies: &CookieChannel) -> Result<String, String> {
-        self.run_probe_json(url, true, cookies)
+    fn run_probe(&self, url: &str, cookies: &CookieChannel, proxy: &ProxySettings) -> Result<String, String> {
+        self.run_probe_json(url, true, cookies, proxy)
     }
 
     fn run_probe_json(
@@ -246,9 +254,10 @@ impl YtDlpExtractorToolchain {
         url: &str,
         flat_playlist: bool,
         cookies: &CookieChannel,
+        proxy: &ProxySettings,
     ) -> Result<String, String> {
         let mut cmd = Command::new(&self.config.binary_path);
-        for arg in self.probe_args_for(url, flat_playlist, cookies) {
+        for arg in self.probe_args_for(url, flat_playlist, cookies, proxy) {
             cmd.arg(arg);
         }
 
@@ -287,8 +296,13 @@ impl YtDlpExtractorToolchain {
     }
 
     /// Probe a single video URL and return selectable qualities.
-    fn probe_item_qualities(&self, item_url: &str, cookies: &CookieChannel) -> Vec<Quality> {
-        match self.run_probe_json(item_url, false, cookies) {
+    fn probe_item_qualities(
+        &self,
+        item_url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Vec<Quality> {
+        match self.run_probe_json(item_url, false, cookies, proxy) {
             Ok(json) => match serde_json::from_str::<YtDlpVideoInfo>(&json) {
                 Ok(info) => {
                     let qualities = self.formats_to_qualities(&info.formats.unwrap_or_default());
@@ -305,7 +319,12 @@ impl YtDlpExtractorToolchain {
     }
 
     /// Resolve real per-video qualities for flat playlist entries (parallel).
-    fn enrich_playlist_item_qualities(&self, items: &mut [MediaItem], cookies: &CookieChannel) {
+    fn enrich_playlist_item_qualities(
+        &self,
+        items: &mut [MediaItem],
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) {
         use std::sync::Mutex;
 
         if items.is_empty() {
@@ -330,7 +349,7 @@ impl YtDlpExtractorToolchain {
                 scope.spawn(|| {
                     let mut local = Vec::with_capacity(batch.len());
                     for (idx, item_url) in batch {
-                        local.push((idx, self.probe_item_qualities(&item_url, cookies)));
+                        local.push((idx, self.probe_item_qualities(&item_url, cookies, proxy)));
                     }
                     results.lock().unwrap().extend(local);
                 });
@@ -593,18 +612,23 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         self.config.ffmpeg_dir.as_deref()
     }
 
-    fn probe(&self, url: &str, cookies: &CookieChannel) -> Result<ProbeResult, String> {
+    fn probe(
+        &self,
+        url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Result<ProbeResult, String> {
         // Validate URL first
         url::Url::parse(url)
             .map_err(|e| format!("invalid URL '{url}': {e}"))?;
 
         // Run yt-dlp
-        let json = self.run_probe(url, cookies)?;
+        let json = self.run_probe(url, cookies, proxy)?;
 
         // Parse into ProbeResult
         let mut result = self.parse_probe_result(&json, url)?;
         if result.items.len() > 1 {
-            self.enrich_playlist_item_qualities(&mut result.items, cookies);
+            self.enrich_playlist_item_qualities(&mut result.items, cookies, proxy);
         }
 
         Ok(result)
@@ -618,6 +642,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         stop: &AtomicBool,
         media_extras: &MediaExtrasOptions,
         cookies: &CookieChannel,
+        proxy: &ProxySettings,
         output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
         std::fs::create_dir_all(dest_dir)
@@ -644,6 +669,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         }
 
         append_ytdlp_cookie_args(&mut cmd, cookies);
+        append_ytdlp_proxy_args(&mut cmd, proxy);
 
         for dir in &self.config.plugin_dirs {
             cmd.arg("--plugin-dirs").arg(dir);
@@ -1512,7 +1538,12 @@ impl FakeYtDlpExtractor {
 }
 
 impl ExtractorToolchain for FakeYtDlpExtractor {
-    fn probe(&self, url: &str, _cookies: &CookieChannel) -> Result<ProbeResult, String> {
+    fn probe(
+        &self,
+        url: &str,
+        _cookies: &CookieChannel,
+        _proxy: &ProxySettings,
+    ) -> Result<ProbeResult, String> {
         // Simulate subprocess failure
         if self.failing_urls.iter().any(|f| f == url) {
             return Err(format!("yt-dlp process error for {url}"));
@@ -2096,6 +2127,7 @@ mod tests {
         let args = extractor.probe_args(
             "https://www.luxuretv.com/videos/x-1.html",
             &CookieChannel::default(),
+            &ProxySettings::default(),
         );
         assert!(args.contains(&"--plugin-dirs".to_string()));
         assert!(args.contains(&"/app/sidecar/yt-dlp-plugins".to_string()));
@@ -2108,6 +2140,7 @@ mod tests {
         let args = extractor.probe_args(
             "https://www.youtube.com/watch?v=abc",
             &CookieChannel::default(),
+            &ProxySettings::default(),
         );
         assert!(!args.iter().any(|a| a == "--plugin-dirs"));
     }
@@ -2119,7 +2152,11 @@ mod tests {
             cookies_from_browser: Some("chrome".to_string()),
             cookie_file: None,
         };
-        let args = extractor.probe_args("https://www.youtube.com/watch?v=abc", &channel);
+        let args = extractor.probe_args(
+            "https://www.youtube.com/watch?v=abc",
+            &channel,
+            &ProxySettings::default(),
+        );
         assert!(args.windows(2).any(|w| w == ["--cookies-from-browser", "chrome"]));
     }
 
@@ -2130,8 +2167,26 @@ mod tests {
             cookies_from_browser: None,
             cookie_file: Some(PathBuf::from("C:\\cookies.txt")),
         };
-        let args = extractor.probe_args("https://www.youtube.com/watch?v=abc", &channel);
+        let args = extractor.probe_args(
+            "https://www.youtube.com/watch?v=abc",
+            &channel,
+            &ProxySettings::default(),
+        );
         assert!(args.windows(2).any(|w| w == ["--cookies", "C:\\cookies.txt"]));
+    }
+
+    #[test]
+    fn probe_args_include_proxy() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let proxy = ProxySettings {
+            url: Some("http://127.0.0.1:8080".to_string()),
+        };
+        let args = extractor.probe_args(
+            "https://www.youtube.com/watch?v=abc",
+            &CookieChannel::default(),
+            &proxy,
+        );
+        assert!(args.windows(2).any(|w| w == ["--proxy", "http://127.0.0.1:8080"]));
     }
 
     // ---- FakeYtDlpExtractor ----
@@ -2145,7 +2200,7 @@ mod tests {
         );
 
         let result = fake
-            .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &CookieChannel::default())
+            .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &CookieChannel::default(), &ProxySettings::default())
             .unwrap();
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].qualities.len(), 5);
@@ -2155,7 +2210,7 @@ mod tests {
     fn fake_ytdlp_extractor_fails_for_unknown_url() {
         let fake = FakeYtDlpExtractor::new();
         let err = fake
-            .probe("https://www.youtube.com/watch?v=unknown", &CookieChannel::default())
+            .probe("https://www.youtube.com/watch?v=unknown", &CookieChannel::default(), &ProxySettings::default())
             .unwrap_err();
         assert!(err.contains("no canned response"), "got: {err}");
     }
@@ -2166,7 +2221,7 @@ mod tests {
         fake.insert_failure("https://www.youtube.com/watch?v=fail");
 
         let err = fake
-            .probe("https://www.youtube.com/watch?v=fail", &CookieChannel::default())
+            .probe("https://www.youtube.com/watch?v=fail", &CookieChannel::default(), &ProxySettings::default())
             .unwrap_err();
         assert!(
             err.contains("process error"),
@@ -2468,7 +2523,7 @@ mod tests {
     fn invalid_url_returns_error() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .probe("not-a-valid-url", &CookieChannel::default())
+            .probe("not-a-valid-url", &CookieChannel::default(), &ProxySettings::default())
             .unwrap_err();
         assert!(
             err.contains("invalid URL"),

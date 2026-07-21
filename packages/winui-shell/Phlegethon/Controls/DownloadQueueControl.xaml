@@ -375,6 +375,27 @@
                     Padding="8,0"
                     Margin="8,0,0,0"
                     Click="OnCookieChannelApply" />
+                <TextBlock
+                    Text="Proxy URL"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    VerticalAlignment="Center"
+                    Margin="16,0,0,0" />
+                <TextBox
+                    x:Name="ProxyUrlBox"
+                    PlaceholderText="http://host:port or socks5://host:port"
+                    Width="220"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <Button
+                    Content="Apply proxy"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="8,0,0,0"
+                    Click="OnProxySettingsApply" />
             </StackPanel>
         </Border>
     </Grid>

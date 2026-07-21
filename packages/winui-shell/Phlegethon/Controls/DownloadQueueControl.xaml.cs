@@ -187,6 +187,11 @@ public sealed partial class DownloadQueueControl : UserControl
         CookieFileBox.Text = channel.CookieFile ?? string.Empty;
     }
 
+    public void SetProxySettingsDisplay(ProxySettings settings)
+    {
+        ProxyUrlBox.Text = settings.Url ?? string.Empty;
+    }
+
     public void SetFilenameTemplateDisplay(string template)
     {
         FilenameTemplateBox.Text = template;
@@ -216,6 +221,15 @@ public sealed partial class DownloadQueueControl : UserControl
         {
             CookiesFromBrowser = string.IsNullOrEmpty(browser) ? null : browser,
             CookieFile = string.IsNullOrEmpty(file) ? null : file,
+        });
+    }
+
+    private void OnProxySettingsApply(object sender, RoutedEventArgs e)
+    {
+        var url = ProxyUrlBox.Text.Trim();
+        ProxySettingsChanged?.Invoke(this, new ProxySettings
+        {
+            Url = string.IsNullOrEmpty(url) ? null : url,
         });
     }
 
@@ -552,6 +566,9 @@ public sealed partial class DownloadQueueControl : UserControl
 
     /// <summary>Raised when the user applies cookie auth channel settings.</summary>
     public event EventHandler<CookieChannel>? CookieChannelChanged;
+
+    /// <summary>Raised when the user applies global proxy settings.</summary>
+    public event EventHandler<ProxySettings>? ProxySettingsChanged;
 
     public event EventHandler<string>? FilenameTemplateChanged;
 

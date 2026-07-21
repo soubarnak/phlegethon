@@ -113,6 +113,8 @@ const mediaExtrasApply = $("mediaExtrasApply");
 const cookiesFromBrowserInput = $("cookiesFromBrowserInput");
 const cookieFileInput = $("cookieFileInput");
 const cookieChannelApply = $("cookieChannelApply");
+const proxyUrlInput = $("proxyUrlInput");
+const proxySettingsApply = $("proxySettingsApply");
 const filenameTemplateInput = $("filenameTemplateInput");
 const filenameTemplateApply = $("filenameTemplateApply");
 const discardConfirmOverlay = $("discardConfirmOverlay");
@@ -1268,6 +1270,7 @@ async function openSettings() {
     const audioOnly = await invoke("get_audio_only_mode");
     const mediaDefaults = await invoke("get_default_media_extras");
     const cookieChannel = await invoke("get_cookie_channel");
+    const proxySettings = await invoke("get_proxy_settings");
     const filenameTemplate = await invoke("get_filename_template");
     const caps = await loadMediaExtrasCapabilities();
     state.pendingLibraryRoot = root;
@@ -1280,6 +1283,7 @@ async function openSettings() {
     remuxDefault.checked = Boolean(mediaDefaults.remux);
     cookiesFromBrowserInput.value = cookieChannel.cookies_from_browser || "";
     cookieFileInput.value = cookieChannel.cookie_file || "";
+    proxyUrlInput.value = proxySettings.url || "";
     filenameTemplateInput.value = filenameTemplate || "";
     const watcherPref = localStorage.getItem("phlegethon-clipboard-watcher") === "1";
     clipboardWatcherInput.checked = watcherPref;
@@ -1395,6 +1399,20 @@ cookieChannelApply.addEventListener("click", async () => {
     closeSettings();
   } catch (err) {
     showError(`Apply cookie channel failed: ${err}`);
+  }
+});
+
+proxySettingsApply.addEventListener("click", async () => {
+  try {
+    const url = proxyUrlInput.value.trim();
+    await getInvoke()("set_proxy_settings", {
+      settings: {
+        url: url || null,
+      },
+    });
+    closeSettings();
+  } catch (err) {
+    showError(`Apply proxy settings failed: ${err}`);
   }
 });
 
