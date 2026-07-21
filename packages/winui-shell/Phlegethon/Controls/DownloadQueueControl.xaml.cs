@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using Phlegethon;
 using Phlegethon.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -23,6 +25,7 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     private string _actionLabel = "Pause";
     private Visibility _primaryActionVisible = Visibility.Visible;
     private double _progressPercent;
+    private ulong? _totalBytes;
     private DownloadStatus _status = DownloadStatus.Queued;
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -108,6 +111,13 @@ public class DownloadItemViewModel : INotifyPropertyChanged
         set => SetField(ref _progressPercent, value);
     }
 
+    /// <summary>Known total size when Core reports it (sort by size).</summary>
+    public ulong? TotalBytes
+    {
+        get => _totalBytes;
+        set => SetField(ref _totalBytes, value);
+    }
+
     public DownloadStatus Status
     {
         get => _status;
@@ -140,13 +150,18 @@ public enum DownloadStatus
 /// </summary>
 public sealed partial class DownloadQueueControl : UserControl
 {
-    private readonly ObservableCollection<DownloadItemViewModel> _items = new();
+    private readonly List<DownloadItemViewModel> _items = new();
+    private readonly ObservableCollection<DownloadItemViewModel> _viewItems = new();
 
     public DownloadQueueControl()
     {
         this.InitializeComponent();
-        DownloadList.ItemsSource = _items;
+        if (DownloadList != null)
+        {
+            DownloadList.ItemsSource = _viewItems;
+        }
         ActiveJobLimitBox.Value = 3;
+        RefreshView();
     }
 
     /// <summary>Sync the Active Job Limit field from Core settings.</summary>
@@ -241,6 +256,7 @@ public sealed partial class DownloadQueueControl : UserControl
                     item.Url = url;
                 }
                 UpdateVisualStatus(item);
+                RefreshView();
                 return;
             }
         }
@@ -259,7 +275,7 @@ public sealed partial class DownloadQueueControl : UserControl
         UpdateVisualStatus(newItem);
         _items.Add(newItem);
 
-        UpdateEmptyState();
+        RefreshView();
     }
 
     /// <summary>
@@ -272,12 +288,14 @@ public sealed partial class DownloadQueueControl : UserControl
             if (item.JobId == jobId)
             {
                 item.Status = DownloadStatus.Downloading;
+                item.TotalBytes = totalBytes;
                 var progressText = FormatProgress(bytesDownloaded, totalBytes);
                 item.Subtitle = string.IsNullOrEmpty(item.Destination)
                     ? progressText
                     : $"{progressText} · {item.Destination}";
                 item.ProgressPercent = Phlegethon.ProgressDisplay.DisplayPercent(bytesDownloaded, totalBytes) ?? 0;
                 UpdateVisualStatus(item);
+                RefreshView();
                 return;
             }
         }
@@ -302,6 +320,7 @@ public sealed partial class DownloadQueueControl : UserControl
                     : $"Downloaded to {path} · Save to {dest}";
                 item.ProgressPercent = 100;
                 UpdateVisualStatus(item);
+                RefreshView();
                 return;
             }
         }
@@ -325,6 +344,7 @@ public sealed partial class DownloadQueueControl : UserControl
                 break;
             }
         }
+        RefreshView();
     }
 
     /// <summary>
@@ -339,6 +359,7 @@ public sealed partial class DownloadQueueControl : UserControl
                 item.Status = DownloadStatus.Failed;
                 item.Subtitle = $"Failed: {error}";
                 UpdateVisualStatus(item);
+                RefreshView();
                 return;
             }
         }
@@ -347,15 +368,20 @@ public sealed partial class DownloadQueueControl : UserControl
     /// <summary>Scroll to and highlight a queue row by job id.</summary>
     public bool FocusJob(string jobId)
     {
-        for (var i = 0; i < _items.Count; i++)
+        if (DownloadList == null)
         {
-            if (_items[i].JobId != jobId)
+            return false;
+        }
+
+        for (var i = 0; i < _viewItems.Count; i++)
+        {
+            if (_viewItems[i].JobId != jobId)
             {
                 continue;
             }
 
             DownloadList.SelectedIndex = i;
-            DownloadList.ScrollIntoView(_items[i]);
+            DownloadList.ScrollIntoView(_viewItems[i]);
             return true;
         }
 
@@ -404,7 +430,7 @@ public sealed partial class DownloadQueueControl : UserControl
             if (_items[i].JobId == jobId)
             {
                 _items.RemoveAt(i);
-                UpdateEmptyState();
+                RefreshView();
                 return;
             }
         }
@@ -413,6 +439,12 @@ public sealed partial class DownloadQueueControl : UserControl
     // -----------------------------------------------------------------------
     // Event handlers
     // -----------------------------------------------------------------------
+
+    private void OnQueueSearchChanged(object sender, TextChangedEventArgs e) => RefreshView();
+
+    private void OnQueueFilterChanged(object sender, SelectionChangedEventArgs e) => RefreshView();
+
+    private void OnQueueSortChanged(object sender, SelectionChangedEventArgs e) => RefreshView();
 
     private void OnItemAction(object sender, RoutedEventArgs e)
     {
@@ -440,6 +472,8 @@ public sealed partial class DownloadQueueControl : UserControl
                 // Completed uses Discard only (always-confirm flow).
                 break;
         }
+
+        RefreshView();
     }
 
     private void OnDiscardClick(object sender, RoutedEventArgs e)
@@ -476,6 +510,9 @@ public sealed partial class DownloadQueueControl : UserControl
         var index = _items.IndexOf(item);
         if (index > 0)
         {
+            _items.RemoveAt(index);
+            _items.Insert(index - 1, item);
+            RefreshView();
             ReorderRequested?.Invoke(this, (index, index - 1));
         }
     }
@@ -487,6 +524,9 @@ public sealed partial class DownloadQueueControl : UserControl
         var index = _items.IndexOf(item);
         if (index >= 0 && index < _items.Count - 1)
         {
+            _items.RemoveAt(index);
+            _items.Insert(index + 1, item);
+            RefreshView();
             ReorderRequested?.Invoke(this, (index, index + 1));
         }
     }
@@ -518,6 +558,26 @@ public sealed partial class DownloadQueueControl : UserControl
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    private string CurrentSearch => QueueSearchBox?.Text ?? "";
+
+    private string CurrentFilter =>
+        (QueueFilterBox?.SelectedItem as ComboBoxItem)?.Tag as string ?? QueueView.FilterAll;
+
+    private string CurrentSort =>
+        (QueueSortBox?.SelectedItem as ComboBoxItem)?.Tag as string ?? QueueView.SortQueue;
+
+    private void RefreshView()
+    {
+        var view = QueueView.Apply(_items, CurrentSearch, CurrentFilter, CurrentSort);
+        _viewItems.Clear();
+        foreach (var item in view)
+        {
+            _viewItems.Add(item);
+        }
+
+        UpdateEmptyState();
+    }
 
     private static string FormatProgress(ulong bytesDownloaded, ulong? totalBytes)
     {
@@ -577,6 +637,24 @@ public sealed partial class DownloadQueueControl : UserControl
 
     private void UpdateEmptyState()
     {
-        EmptyStateText.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (EmptyStateText == null)
+        {
+            return;
+        }
+
+        if (_items.Count == 0)
+        {
+            EmptyStateText.Text = "No downloads yet";
+            EmptyStateText.Visibility = Visibility.Visible;
+        }
+        else if (_viewItems.Count == 0)
+        {
+            EmptyStateText.Text = "No matching downloads";
+            EmptyStateText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            EmptyStateText.Visibility = Visibility.Collapsed;
+        }
     }
 }

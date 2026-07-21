@@ -9,6 +9,7 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -38,9 +39,60 @@
             </Grid>
         </Border>
 
+        <!-- Search / filter / sort toolbar -->
+        <Border
+            Grid.Row="1"
+            BorderBrush="{ThemeResource GeistBorderBrush}"
+            BorderThickness="0,0,0,1"
+            Padding="12,6"
+            Background="{ThemeResource GeistSurfaceBrush}">
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox
+                    Grid.Column="0"
+                    x:Name="QueueSearchBox"
+                    PlaceholderText="Search queue…"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    TextChanged="OnQueueSearchChanged" />
+                <ComboBox
+                    Grid.Column="1"
+                    x:Name="QueueFilterBox"
+                    Width="140"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    SelectionChanged="OnQueueFilterChanged"
+                    SelectedIndex="0">
+                    <ComboBoxItem Content="All" Tag="all" />
+                    <ComboBoxItem Content="Queued" Tag="queued" />
+                    <ComboBoxItem Content="Downloading" Tag="downloading" />
+                    <ComboBoxItem Content="Paused" Tag="paused" />
+                    <ComboBoxItem Content="Completed" Tag="completed" />
+                    <ComboBoxItem Content="Failed" Tag="failed" />
+                </ComboBox>
+                <ComboBox
+                    Grid.Column="2"
+                    x:Name="QueueSortBox"
+                    Width="140"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    SelectionChanged="OnQueueSortChanged"
+                    SelectedIndex="0">
+                    <ComboBoxItem Content="Queue order" Tag="queue" />
+                    <ComboBoxItem Content="Title" Tag="title" />
+                    <ComboBoxItem Content="Status" Tag="status" />
+                    <ComboBoxItem Content="Size" Tag="size" />
+                </ComboBox>
+            </Grid>
+        </Border>
+
         <!-- List of download items -->
         <ListView
-            Grid.Row="1"
+            Grid.Row="2"
             x:Name="DownloadList"
             Background="Transparent"
             BorderThickness="0"
@@ -191,9 +243,9 @@
 
         <!-- Empty state -->
         <TextBlock
-            Grid.Row="1"
+            Grid.Row="2"
             x:Name="EmptyStateText"
-            Text="No active downloads. Paste a URL or drop a file."
+            Text="No downloads yet"
             FontFamily="{ThemeResource GeistSansFont}"
             FontSize="{ThemeResource GeistTypeSize14}"
             Foreground="{ThemeResource GeistTextSecondaryBrush}"
@@ -203,7 +255,7 @@
 
         <!-- Footer status bar -->
         <Border
-            Grid.Row="2"
+            Grid.Row="3"
             BorderBrush="{ThemeResource GeistBorderBrush}"
             BorderThickness="0,1,0,0"
             Padding="12,6"

@@ -34,9 +34,38 @@
 
   <!-- Queue -->
   <main class="app-main" id="appMain">
+    <div class="queue-toolbar" id="queueToolbar">
+      <input
+        type="search"
+        class="queue-search"
+        id="queueSearch"
+        placeholder="Search queue…"
+        aria-label="Search queue"
+      />
+      <label class="queue-toolbar-label">
+        <span class="visually-hidden">Filter by state</span>
+        <select id="queueFilter" aria-label="Filter by state">
+          <option value="all">All</option>
+          <option value="queued">Queued</option>
+          <option value="downloading">Downloading</option>
+          <option value="paused">Paused</option>
+          <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
+        </select>
+      </label>
+      <label class="queue-toolbar-label">
+        <span class="visually-hidden">Sort queue</span>
+        <select id="queueSort" aria-label="Sort queue">
+          <option value="queue">Queue order</option>
+          <option value="title">Title</option>
+          <option value="status">Status</option>
+          <option value="size">Size</option>
+        </select>
+      </label>
+    </div>
     <div class="queue-container" id="queueContainer">
       <div class="queue-empty" id="queueEmpty">
-        <span>No downloads yet. Paste a URL above or drag one in.</span>
+        <span id="queueEmptyMessage">No downloads yet. Paste a URL above or drag one in.</span>
       </div>
       <div id="queueList"></div>
     </div>

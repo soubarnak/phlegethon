@@ -18,6 +18,11 @@ import {
   processUrlInput,
   resolveDuplicateUrl,
 } from "./urlInput.js";
+import {
+  QUEUE_FILTER_ALL,
+  QUEUE_SORT_QUEUE,
+  applyQueueView,
+} from "./queueView.js";
 
 // Resolve Tauri APIs lazily — withGlobalTauri must be enabled in tauri.conf.json.
 function getInvoke() {
@@ -49,6 +54,9 @@ const state = {
   mediaExtrasCapabilities: null,
   clipboardWatcherEnabled: false,
   desktopNotificationsEnabled: true,
+  queueSearch: "",
+  queueFilter: QUEUE_FILTER_ALL,
+  queueSort: QUEUE_SORT_QUEUE,
 };
 
 const urlInputApi = createUrlInputApi(getInvoke);
@@ -59,6 +67,10 @@ const urlInput = $("urlInput");
 const enqueueBtn = $("enqueueBtn");
 const queueList = $("queueList");
 const queueEmpty = $("queueEmpty");
+const queueEmptyMessage = $("queueEmptyMessage");
+const queueSearch = $("queueSearch");
+const queueFilter = $("queueFilter");
+const queueSort = $("queueSort");
 const probeOverlay = $("probeOverlay");
 const probeTitle = $("probeTitle");
 const probeUrlEl = $("probeUrl");
@@ -749,9 +761,27 @@ function extractTitleFromUrl(url) {
   }
 }
 
+function visibleJobs() {
+  return applyQueueView(state.jobs, {
+    search: state.queueSearch,
+    stateFilter: state.queueFilter,
+    sort: state.queueSort,
+  });
+}
+
+function coreIndexOfJob(jobId) {
+  return state.jobs.findIndex((j) => j.job_id === jobId);
+}
+
 function renderQueue() {
-  if (state.jobs.length === 0) {
+  const viewJobs = visibleJobs();
+  const hasJobs = state.jobs.length > 0;
+
+  if (viewJobs.length === 0) {
     queueEmpty.style.display = "flex";
+    queueEmptyMessage.textContent = hasJobs
+      ? "No matching downloads."
+      : "No downloads yet. Paste a URL above or drag one in.";
     queueList.innerHTML = "";
     return;
   }
@@ -759,7 +789,8 @@ function renderQueue() {
   queueEmpty.style.display = "none";
 
   let html = "";
-  state.jobs.forEach((job, index) => {
+  viewJobs.forEach((job) => {
+    const coreIndex = coreIndexOfJob(job.job_id);
     const pct = displayProgressPercent(job.bytes_downloaded, job.total_bytes);
     const hasTotal = pct != null;
 
@@ -807,8 +838,8 @@ function renderQueue() {
         </div>
         <div class="row-meta">${formatBytes(job.bytes_downloaded)}${sizeLabel ? ` / ${sizeLabel}` : ""}${hasTotal ? ` (${pct}%)` : ""}</div>
         <div class="row-actions">
-          ${index > 0 ? `<button class="btn-icon btn-sm" data-action="reorder-up" data-index="${index}" title="Move up">↑</button>` : ""}
-          ${index < state.jobs.length - 1 ? `<button class="btn-icon btn-sm" data-action="reorder-down" data-index="${index}" title="Move down">↓</button>` : ""}
+          ${coreIndex > 0 ? `<button class="btn-icon btn-sm" data-action="reorder-up" data-job-id="${job.job_id}" title="Move up in queue">↑</button>` : ""}
+          ${coreIndex >= 0 && coreIndex < state.jobs.length - 1 ? `<button class="btn-icon btn-sm" data-action="reorder-down" data-job-id="${job.job_id}" title="Move down in queue">↓</button>` : ""}
           ${job.status === "pending" || job.status === "downloading" ? `<button class="btn-icon btn-sm" data-action="pause" data-job-id="${job.job_id}" title="Pause">⏸</button>` : ""}
           ${job.status === "paused" ? `<button class="btn-icon btn-sm" data-action="resume" data-job-id="${job.job_id}" title="Resume">▶</button>` : ""}
           ${job.status === "failed" ? `<button class="btn-icon btn-sm" data-action="retry" data-job-id="${job.job_id}" title="Retry">↻</button>` : ""}
@@ -827,11 +858,11 @@ function renderQueue() {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const action = btn.dataset.action;
+      const jobId = btn.dataset.jobId;
       if (action === "reorder-up" || action === "reorder-down") {
-        handleReorder(action, Number(btn.dataset.index));
+        handleReorder(action, jobId);
         return;
       }
-      const jobId = btn.dataset.jobId;
       handleJobAction(action, jobId);
     });
   });
@@ -898,8 +929,11 @@ discardConfirmOverlay.addEventListener("click", (e) => {
   }
 });
 
-async function handleReorder(action, fromIndex) {
+async function handleReorder(action, jobId) {
+  const fromIndex = coreIndexOfJob(jobId);
+  if (fromIndex < 0) return;
   const toIndex = action === "reorder-up" ? fromIndex - 1 : fromIndex + 1;
+  if (toIndex < 0 || toIndex >= state.jobs.length) return;
   try {
     await getInvoke()("reorder_job", { fromIndex, toIndex });
     await refreshJobs();
@@ -1372,6 +1406,21 @@ filenameTemplateApply.addEventListener("click", async () => {
   } catch (err) {
     showError(`Apply filename template failed: ${err}`);
   }
+});
+
+queueSearch?.addEventListener("input", () => {
+  state.queueSearch = queueSearch.value;
+  renderQueue();
+});
+
+queueFilter?.addEventListener("change", () => {
+  state.queueFilter = queueFilter.value;
+  renderQueue();
+});
+
+queueSort?.addEventListener("change", () => {
+  state.queueSort = queueSort.value;
+  renderQueue();
 });
 
 const clipboardWatcher = createClipboardWatcher({
