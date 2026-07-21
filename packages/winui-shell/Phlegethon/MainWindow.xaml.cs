@@ -15,6 +15,7 @@ public sealed partial class MainWindow : Window
     private const string DesktopNotificationsSettingKey = "DesktopNotificationsEnabled";
 
     private readonly EventChannelService _eventService;
+    private readonly CompanionReceiverService _companionReceiver;
     private readonly DesktopNotificationService _notificationService;
     private readonly Microsoft.UI.Dispatching.DispatcherTimer _clipboardTimer;
     private string? _lastClipboardUrl;
@@ -32,6 +33,7 @@ public sealed partial class MainWindow : Window
     {
         this.InitializeComponent();
         _eventService = new EventChannelService();
+        _companionReceiver = new CompanionReceiverService(_eventService);
         _notificationService = new DesktopNotificationService(
             DispatcherQueue,
             jobId => DownloadQueueView.FocusJob(jobId));
@@ -42,6 +44,7 @@ public sealed partial class MainWindow : Window
         _eventService.OnJobFailed += OnJobFailed;
         _eventService.OnJobQueued += OnJobQueued;
         _eventService.OnJobDiscarded += OnJobDiscarded;
+        _companionReceiver.OnCompanionIntent += OnCompanionIntent;
 
         _clipboardTimer = new Microsoft.UI.Dispatching.DispatcherTimer
         {
@@ -51,6 +54,7 @@ public sealed partial class MainWindow : Window
 
         // Start the event loop background task
         _ = _eventService.StartEventLoopAsync();
+        _companionReceiver.Start();
 
         // Register paste/drop handlers
         this.Content.AllowDrop = true;
@@ -520,6 +524,16 @@ public sealed partial class MainWindow : Window
     // -----------------------------------------------------------------------
     // Event handlers
     // -----------------------------------------------------------------------
+
+    private void OnCompanionIntent(object? sender, CompanionIntentEventArgs args)
+    {
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            Activate();
+            ShowQueueTab();
+            UrlStatusText.Text = $"Companion hand-off: {args.Url}";
+        });
+    }
 
     private void OnProbeResult(object? sender, ProbeResultEventArgs args)
     {

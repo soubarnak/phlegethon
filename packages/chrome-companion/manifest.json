@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Phlegethon Companion",
+  "version": "0.1.0",
+  "description": "Send the current tab URL to Phlegethon Download Manager",
+  "permissions": [
+    "nativeMessaging",
+    "contextMenus",
+    "activeTab",
+    "cookies"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Send to Phlegethon"
+  }
+}

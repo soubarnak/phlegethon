@@ -1,5 +1,10 @@
 [workspace]
-members = ["packages/download-core", "packages/tauri-shell/src-tauri"]
+members = [
+    "packages/download-core",
+    "packages/companion-protocol",
+    "packages/native-messaging-host",
+    "packages/tauri-shell/src-tauri",
+]
 resolver = "2"
 
 [workspace.package]

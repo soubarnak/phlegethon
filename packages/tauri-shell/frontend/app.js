@@ -1694,7 +1694,38 @@ document.addEventListener("DOMContentLoaded", async () => {
     onJobFocus: focusJobRow,
   });
   await refreshJobs();
+  await initCompanionListener();
 });
+
+async function initCompanionListener() {
+  const listen = window.__TAURI__?.event?.listen;
+  if (typeof listen !== "function") return;
+
+  await listen("companion-intent", (event) => {
+    const { url, result } = event.payload ?? {};
+    if (!result) return;
+    const mapped = mapCompanionEnqueueResult(result);
+    if (!mapped) return;
+    handleEnqueueResult(url ?? mapped.url ?? "", mapped);
+  });
+}
+
+function mapCompanionEnqueueResult(result) {
+  if (result.type === "enqueue_direct") {
+    return {
+      type: "EnqueueDirect",
+      job_id: result.job_id,
+      destination: result.destination,
+    };
+  }
+  if (result.type === "probe_then_confirm") {
+    return {
+      type: "ProbeThenConfirm",
+      url: result.url,
+    };
+  }
+  return null;
+}
 
 window.addEventListener("error", (e) => {
   showError(`JS error: ${e.message}`);

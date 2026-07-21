@@ -1,0 +1,202 @@
+using System;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Phlegethon.Services;
+
+/// <summary>
+/// Named-pipe receiver for Chrome Companion hand-off (NMH → shell).
+/// Pipe name matches <c>companion-protocol::COMPANION_SOCKET_NAME</c>.
+/// </summary>
+public sealed class CompanionReceiverService : IDisposable
+{
+    public const string PipeName = "phlegethon-companion";
+
+    private readonly EventChannelService _events;
+    private CancellationTokenSource? _cts;
+    private Task? _listenTask;
+
+    public CompanionReceiverService(EventChannelService events)
+    {
+        _events = events;
+    }
+
+    public event EventHandler<CompanionIntentEventArgs>? OnCompanionIntent;
+
+    public void Start()
+    {
+        _cts = new CancellationTokenSource();
+        var token = _cts.Token;
+        _listenTask = Task.Run(() => ListenLoopAsync(token), token);
+    }
+
+    private async Task ListenLoopAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            await using var server = new NamedPipeServerStream(
+                PipeName,
+                PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous);
+
+            try
+            {
+                await server.WaitForConnectionAsync(token);
+                var requestJson = await ReadFrameAsync(server, token);
+                var responseJson = HandleRequestJson(requestJson);
+                await WriteFrameAsync(server, responseJson, token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Companion receiver error: {ex.Message}");
+            }
+        }
+    }
+
+    internal string HandleRequestJson(string requestJson)
+    {
+        CompanionRequest? request;
+        try
+        {
+            request = JsonSerializer.Deserialize<CompanionRequest>(requestJson);
+        }
+        catch (Exception ex)
+        {
+            return SerializeResponse(CompanionResponse.Err("", $"invalid request: {ex.Message}"));
+        }
+
+        if (request is null)
+        {
+            return SerializeResponse(CompanionResponse.Err("", "invalid request"));
+        }
+
+        var requestId = request.RequestId;
+        var validationError = ValidateRequest(request);
+        if (validationError is not null)
+        {
+            return SerializeResponse(CompanionResponse.Err(requestId, validationError));
+        }
+
+        try
+        {
+            if (request.Session is { Cookies.Count: > 0 })
+            {
+                var cookiePath = WriteNetscapeCookieFile(request.Session);
+                _events.SetCookieChannel(new CookieChannel
+                {
+                    CookieFile = cookiePath,
+                    CookiesFromBrowser = null,
+                });
+            }
+
+            var url = request.EffectiveUrl();
+            var result = _events.HandleCompanionEnqueue(url);
+
+            OnCompanionIntent?.Invoke(this, new CompanionIntentEventArgs
+            {
+                Url = url,
+                Result = result,
+            });
+
+            return SerializeResponse(CompanionResponse.Ok(requestId, result));
+        }
+        catch (Exception ex)
+        {
+            return SerializeResponse(CompanionResponse.Err(requestId, ex.Message));
+        }
+    }
+
+    private static string? ValidateRequest(CompanionRequest request)
+    {
+        if (request.Version != 1)
+        {
+            return $"unsupported protocol version {request.Version}";
+        }
+        if (!string.Equals(request.Op, "enqueue", StringComparison.Ordinal))
+        {
+            return $"unsupported op '{request.Op}'";
+        }
+        if (string.IsNullOrWhiteSpace(request.RequestId))
+        {
+            return "request_id must not be empty";
+        }
+        var url = request.EffectiveUrl();
+        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"URL must be http(s), got: {url}";
+        }
+        return null;
+    }
+
+    private static string WriteNetscapeCookieFile(CompanionSession session)
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var dir = Path.Combine(appData, "Phlegethon", "companion-cookies");
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, $"companion-{Guid.NewGuid():N}.cookies.txt");
+        var sb = new StringBuilder();
+        sb.AppendLine("# Netscape HTTP Cookie File");
+        sb.AppendLine("# Generated by Phlegethon Chrome Companion");
+        sb.AppendLine();
+        foreach (var cookie in session.Cookies)
+        {
+            var domainFlag = cookie.Domain.StartsWith('.') ? "TRUE" : "FALSE";
+            var secure = cookie.Secure ? "TRUE" : "FALSE";
+            sb.AppendLine(
+                $"{cookie.Domain}\t{domainFlag}\t{cookie.Path}\t{secure}\t{cookie.ExpirationDate}\t{cookie.Name}\t{cookie.Value}");
+        }
+        File.WriteAllText(path, sb.ToString());
+        return Path.GetFullPath(path);
+    }
+
+    private static async Task<string> ReadFrameAsync(Stream stream, CancellationToken token)
+    {
+        var lenBuf = new byte[4];
+        await stream.ReadExactlyAsync(lenBuf, token);
+        var len = BitConverter.ToUInt32(lenBuf, 0);
+        if (len == 0 || len > 1024 * 1024)
+        {
+            throw new InvalidDataException($"invalid frame length: {len}");
+        }
+        var body = new byte[len];
+        await stream.ReadExactlyAsync(body, token);
+        return Encoding.UTF8.GetString(body);
+    }
+
+    private static async Task WriteFrameAsync(Stream stream, string json, CancellationToken token)
+    {
+        var body = Encoding.UTF8.GetBytes(json);
+        var len = BitConverter.GetBytes((uint)body.Length);
+        await stream.WriteAsync(len, token);
+        await stream.WriteAsync(body, token);
+        await stream.FlushAsync(token);
+    }
+
+    private static string SerializeResponse(CompanionResponse response) =>
+        JsonSerializer.Serialize(response);
+
+    public void Dispose()
+    {
+        _cts?.Cancel();
+        try
+        {
+            _listenTask?.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch
+        {
+            // ignore shutdown races
+        }
+        _cts?.Dispose();
+    }
+}

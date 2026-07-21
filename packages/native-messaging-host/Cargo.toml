@@ -1,0 +1,13 @@
+[package]
+name = "phlegethon-nmh"
+version.workspace = true
+edition.workspace = true
+description = "Chrome native messaging host for Phlegethon Companion hand-off"
+
+[[bin]]
+name = "phlegethon-nmh"
+path = "src/main.rs"
+
+[dependencies]
+companion-protocol = { path = "../companion-protocol" }
+serde_json = "1"

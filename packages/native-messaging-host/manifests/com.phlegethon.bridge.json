@@ -1,0 +1,9 @@
+{
+  "name": "com.phlegethon.bridge",
+  "description": "Phlegethon Download Manager bridge",
+  "path": "REPLACE_WITH_ABSOLUTE_PATH_TO/phlegethon-nmh",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://REPLACE_WITH_EXTENSION_ID/"
+  ]
+}

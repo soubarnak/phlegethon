@@ -2,6 +2,8 @@
 //!
 //! Tauri commands expose the Core API to the frontend.
 
+mod companion;
+
 use crossbeam_channel::TryRecvError;
 use download_core::{
     ArchiveEntry, ArchiveOutcome, Core, CoreEvent, EnqueueOutcome, JobSignals,
@@ -755,6 +757,8 @@ pub fn run() {
                 *stored = Some(root.clone());
             }
             let _ = persist_library_root_preference(&root);
+
+            companion::start_companion_receiver(app.handle().clone());
 
             Ok(())
         })

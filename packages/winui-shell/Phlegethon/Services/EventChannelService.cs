@@ -138,6 +138,51 @@ public class EventChannelService : IDisposable
     public ActiveJobMatch? FindActiveJobForUrl(string url) => _core.FindActiveJobForUrl(url);
 
     /// <summary>
+    /// Enqueue a URL for Chrome Companion hand-off. Returns outcome for NMH ack;
+    /// probe path still requires explicit user confirm (no auto-confirm).
+    /// </summary>
+    public CompanionEnqueueResult HandleCompanionEnqueue(string url)
+    {
+        var json = _core.Enqueue(url);
+        var doc = JsonDocument.Parse(json);
+        var type = doc.RootElement.GetProperty("type").GetString();
+
+        if (type == "enqueue_direct")
+        {
+            var jobId = doc.RootElement.GetProperty("job_id").GetString() ?? "";
+            var destination = doc.RootElement.TryGetProperty("destination", out var destEl)
+                ? destEl.GetString() ?? ""
+                : "";
+            OnJobQueued?.Invoke(this, new JobQueuedEventArgs
+            {
+                JobId = jobId,
+                Url = url,
+                Destination = destination,
+                Title = TitleFromUrl(url),
+            });
+            return new CompanionEnqueueDirect
+            {
+                JobId = jobId,
+                Destination = destination,
+            };
+        }
+
+        var probeUrl = doc.RootElement.GetProperty("url").GetString() ?? url;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                _core.Probe(probeUrl);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Companion probe error: {ex.Message}");
+            }
+        });
+        return new CompanionProbeThenConfirm { Url = probeUrl };
+    }
+
+    /// <summary>
     /// Enqueue a URL. If classified as probe_then_confirm, the probe-result
     /// event will fire asynchronously.
     /// </summary>

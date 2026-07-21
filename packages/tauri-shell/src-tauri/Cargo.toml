@@ -16,6 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+companion-protocol = { path = "../../companion-protocol" }
 crossbeam-channel = "0.5"
 dirs = "5"
 download-core = { path = "../../download-core" }
