@@ -5,6 +5,7 @@
 /* ------------------------------------------------------------------ */
 
 import { buildDiscardConfirmCopy } from "./discardConfirm.js";
+import { displayProgressPercent } from "./progressPercent.js";
 
 // Resolve Tauri APIs lazily — withGlobalTauri must be enabled in tauri.conf.json.
 function getInvoke() {
@@ -506,16 +507,14 @@ function renderQueue() {
 
   let html = "";
   state.jobs.forEach((job) => {
-    const hasTotal = job.total_bytes != null && job.total_bytes > 0;
-    const pct = hasTotal
-      ? Math.round((job.bytes_downloaded / job.total_bytes) * 100)
-      : 0;
+    const pct = displayProgressPercent(job.bytes_downloaded, job.total_bytes);
+    const hasTotal = pct != null;
 
     const statusClass = `status-${job.status}`;
     const statusLabel =
       job.status.charAt(0).toUpperCase() + job.status.slice(1);
     const sizeLabel = hasTotal ? formatBytes(job.total_bytes) : "";
-    const progressWidth = Math.min(pct, 100);
+    const progressWidth = pct ?? 0;
     const indeterminate =
       !hasTotal &&
       (job.status === "pending" || job.status === "downloading");

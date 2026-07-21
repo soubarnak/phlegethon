@@ -169,14 +169,7 @@ public sealed partial class DownloadQueueControl : UserControl
                 item.Subtitle = string.IsNullOrEmpty(item.Destination)
                     ? progressText
                     : $"{progressText} · {item.Destination}";
-                if (totalBytes.HasValue && totalBytes.Value > 0)
-                {
-                    item.ProgressPercent = Math.Min(100.0, (double)bytesDownloaded / totalBytes.Value * 100.0);
-                }
-                else
-                {
-                    item.ProgressPercent = 0;
-                }
+                item.ProgressPercent = Phlegethon.ProgressDisplay.DisplayPercent(bytesDownloaded, totalBytes) ?? 0;
                 UpdateVisualStatus(item);
                 return;
             }
@@ -294,17 +287,15 @@ public sealed partial class DownloadQueueControl : UserControl
 
     private static string FormatProgress(ulong bytesDownloaded, ulong? totalBytes)
     {
-        if (totalBytes.HasValue && totalBytes.Value > 0)
+        var percent = Phlegethon.ProgressDisplay.DisplayPercent(bytesDownloaded, totalBytes);
+        if (percent.HasValue && totalBytes.HasValue)
         {
             var downloaded = FormatBytes(bytesDownloaded);
             var total = FormatBytes(totalBytes.Value);
-            var percent = (double)bytesDownloaded / totalBytes.Value * 100.0;
-            return $"{downloaded} / {total} ({percent:F1}%)";
+            return $"{downloaded} / {total} ({percent.Value:F1}%)";
         }
-        else
-        {
-            return $"{FormatBytes(bytesDownloaded)} downloaded";
-        }
+
+        return $"{FormatBytes(bytesDownloaded)} downloaded";
     }
 
     private static string FormatBytes(ulong bytes)

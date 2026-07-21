@@ -92,6 +92,15 @@ internal static class CoreBridge
         IntPtr errorBuf,
         int errorBufLen);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_preview_probe_destination(
+        IntPtr handle,
+        string selectionJson,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
     // -----------------------------------------------------------------------
     // Lifecycle commands
     // -----------------------------------------------------------------------
@@ -275,6 +284,13 @@ public class CoreHandle : IDisposable
     {
         return CallWithJsonResult(
             (h, o, ol, e, el) => CoreBridge.core_confirm_probe_selection(h, selectionJson, o, ol, e, el),
+            _handle, selectionJson);
+    }
+
+    public string PreviewProbeDestination(string selectionJson)
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_preview_probe_destination(h, selectionJson, o, ol, e, el),
             _handle, selectionJson);
     }
 

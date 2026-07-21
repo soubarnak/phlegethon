@@ -412,6 +412,65 @@ pub unsafe extern "C" fn core_confirm_probe_selection(
     })
 }
 
+/// Preview the Job Destination path for a probe selection without creating jobs.
+///
+/// `selection_json` matches [`core_confirm_probe_selection`]: a [`ProbeSelection`]
+/// object with optional top-level `"destination"` (absolute Save-to parent).
+///
+/// On success writes a [`ProbeDestinationPreview`] JSON object (`path_display`)
+/// to `out_json_buf`. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_preview_probe_destination(
+    handle: *mut Core,
+    selection_json: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let json_str = cstr_to_str(selection_json);
+
+        #[derive(serde::Deserialize)]
+        struct PreviewArgs {
+            url: String,
+            items: Vec<crate::extractor::ItemSelection>,
+            #[serde(default)]
+            destination: Option<std::path::PathBuf>,
+        }
+
+        let args: PreviewArgs = match serde_json::from_str(json_str) {
+            Ok(s) => s,
+            Err(e) => {
+                let err = format!("invalid selection JSON: {e}");
+                write_str_to_buf(&err, error_buf, error_buf_len);
+                return -1;
+            }
+        };
+
+        let selection = ProbeSelection {
+            url: args.url,
+            items: args.items,
+        };
+
+        let core_guard = ctx.core.lock().unwrap();
+        let core = core_guard.as_ref().unwrap();
+
+        match core.preview_probe_destination(&selection, args.destination) {
+            Ok(preview) => {
+                let s = serde_json::to_string(&preview).unwrap();
+                write_str_to_buf(&s, out_json_buf, out_buf_len);
+                0
+            }
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle commands
 // ---------------------------------------------------------------------------

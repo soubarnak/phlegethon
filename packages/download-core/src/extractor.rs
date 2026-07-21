@@ -3,6 +3,22 @@
 //! The Download Core owns the probe flow but delegates the actual extraction
 //! to an `ExtractorToolchain` implementation.  In production this wraps a
 //! yt-dlp sidecar subprocess; in tests a fake returns canned items.
+//!
+//! # Stop-signal contract (Pause / Discard)
+//!
+//! Core runs [`ExtractorToolchain::download`] on a worker thread and polls the
+//! Job Destination for progress until that thread returns. **Ignoring `stop`
+//! stalls Pause and Discard** — the process loop cannot advance while the
+//! worker is still running.
+//!
+//! - Core sets the same `AtomicBool` for **Pause** and **Discard** (job
+//!   `pause_requested` / `JobSignalRegistry::signal_discard_stop`).
+//! - Implementations **must** observe `stop` promptly (poll between work
+//!   units, or hard-kill a subprocess) and return
+//!   [`ExtractorDownloadOutcome::Stopped`] — not hang, not complete after
+//!   stop was set.
+//! - Reference: [`FakeExtractorToolchain`] (chunk loop) and
+//!   `YtDlpExtractorToolchain` (`run_command_interruptible`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,9 +79,17 @@ pub trait ExtractorToolchain: Send + Sync {
     /// `format` is a quality id from probe (e.g. `"720p"`, `"best"`) mapped to
     /// a yt-dlp `-f` selector by the production implementation.
     ///
-    /// `stop` is set by Core when Pause or Discard is requested. Implementations
-    /// must honor it promptly (fake: exit the download loop; production: kill
-    /// the yt-dlp subprocess) and return [`ExtractorDownloadOutcome::Stopped`].
+    /// # Stop signal
+    ///
+    /// `stop` is set by Core when **Pause or Discard** is requested (same flag).
+    /// Implementations **must** honor it promptly and return
+    /// [`ExtractorDownloadOutcome::Stopped`]:
+    /// - Fake / in-process: exit the download loop between chunks.
+    /// - Production: kill the yt-dlp (or other) subprocess; do not wait for
+    ///   natural completion after `stop` is set.
+    ///
+    /// Core's process loop blocks until this method returns. Ignoring `stop`
+    /// leaves Pause/Discard hanging. See module-level stop-signal contract.
     ///
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
     fn download(

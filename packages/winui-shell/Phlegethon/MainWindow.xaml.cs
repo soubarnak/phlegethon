@@ -36,6 +36,7 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.DiscardRequested += OnDiscardRequested;
 
         // Wire up probe sheet
+        ProbeSheetView.ResolveDestinationPreview = json => _eventService.PreviewProbeDestination(json);
         ProbeSheetView.Canceled += (_, _) => OnProbeConfirmed();
         ProbeSheetView.Confirmed += (_, json) =>
         {

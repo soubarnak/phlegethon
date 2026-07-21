@@ -42,6 +42,13 @@ public sealed partial class ProbeSheetControl : UserControl
     private string _probeUrl = "";
     private readonly List<MediaGroupViewModel> _groups = new();
     private string? _saveToDestination;
+    private int _previewRequestId;
+
+    /// <summary>
+    /// Resolve Core Job Destination preview for selection JSON.
+    /// Returns <c>path_display</c>, or null to fall back to raw Save-to / default.
+    /// </summary>
+    public Func<string, string?>? ResolveDestinationPreview { get; set; }
 
     public ProbeSheetControl()
     {
@@ -230,14 +237,51 @@ public sealed partial class ProbeSheetControl : UserControl
             if (g.IsSelected) selected++;
         }
 
-        var basePath = _saveToDestination ?? "Library Root default";
-        if (selected > 1)
+        var fallback = _saveToDestination ?? "Library Root default";
+        var multiNote = selected > 1 ? " (each item under its own subfolder)" : "";
+
+        if (selected == 0 || ResolveDestinationPreview == null || string.IsNullOrEmpty(_probeUrl))
         {
-            SaveToPathLabel.Text = $"{basePath} (each item under its own subfolder)";
+            SaveToPathLabel.Text = selected > 1 ? $"{fallback}{multiNote}" : fallback;
+            return;
+        }
+
+        var items = new List<object>();
+        foreach (var g in _groups)
+        {
+            if (!g.IsSelected) continue;
+            items.Add(new
+            {
+                item_id = g.Id,
+                quality_id = g.SelectedQuality?.Id ?? "",
+            });
+        }
+
+        object payload = _saveToDestination != null
+            ? new { url = _probeUrl, items, destination = _saveToDestination }
+            : new { url = _probeUrl, items };
+
+        var selectionJson = System.Text.Json.JsonSerializer.Serialize(payload);
+        var requestId = ++_previewRequestId;
+        string? pathDisplay = null;
+        try
+        {
+            pathDisplay = ResolveDestinationPreview(selectionJson);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Probe preview error: {ex.Message}");
+        }
+
+        if (requestId != _previewRequestId) return;
+
+        if (!string.IsNullOrEmpty(pathDisplay))
+        {
+            SaveToPathLabel.Text = $"{pathDisplay}{multiNote}";
         }
         else
         {
-            SaveToPathLabel.Text = basePath;
+            SaveToPathLabel.Text = selected > 1 ? $"{fallback}{multiNote}" : fallback;
         }
     }
 

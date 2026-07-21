@@ -213,6 +213,29 @@ public class EventChannelService : IDisposable
     }
 
     /// <summary>
+    /// Preview Core-resolved Job Destination for a probe selection JSON
+    /// (same shape as confirm). Returns <c>path_display</c>, or null on failure.
+    /// </summary>
+    public string? PreviewProbeDestination(string selectionJson)
+    {
+        try
+        {
+            var previewJson = _core.PreviewProbeDestination(selectionJson);
+            using var doc = JsonDocument.Parse(previewJson);
+            if (doc.RootElement.TryGetProperty("path_display", out var pathEl))
+            {
+                return pathEl.GetString();
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Preview destination error: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Discard a job via Core (caller must have confirmed with the user).
     /// </summary>
     public void DiscardJob(string jobId)
