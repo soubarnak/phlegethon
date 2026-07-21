@@ -53,6 +53,10 @@ pub struct MediaItem {
     pub qualities: Vec<Quality>,
     /// True when this media identity is already in the Download Archive.
     pub archived: bool,
+    /// Uploader / channel name when known from probe.
+    pub uploader: Option<String>,
+    /// Upload date (YYYYMMDD) when known from probe.
+    pub upload_date: Option<String>,
 }
 
 /// Result of probing a URL via the Extractor Toolchain.
@@ -120,6 +124,7 @@ pub trait ExtractorToolchain: Send + Sync {
         _stop: &AtomicBool,
         _media_extras: &MediaExtrasOptions,
         _cookies: &CookieChannel,
+        _output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
         Err("extractor download not supported for this toolchain".into())
     }
@@ -222,6 +227,8 @@ impl FakeExtractorToolchain {
                 })
                 .collect(),
             archived: false,
+            uploader: None,
+            upload_date: None,
         };
         self.responses.insert(
             url.to_string(),
@@ -257,6 +264,8 @@ impl FakeExtractorToolchain {
                 })
                 .collect(),
             archived: false,
+            uploader: None,
+            upload_date: None,
         };
         self.responses.insert(
             url.to_string(),
@@ -292,6 +301,8 @@ impl FakeExtractorToolchain {
                     })
                     .collect(),
                 archived: false,
+                uploader: None,
+                upload_date: None,
             })
             .collect();
         self.responses.insert(
@@ -329,6 +340,7 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         stop: &AtomicBool,
         _media_extras: &MediaExtrasOptions,
         _cookies: &CookieChannel,
+        output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
         if stop.load(Ordering::Acquire) {
             return Ok(ExtractorDownloadOutcome::Stopped);
@@ -363,17 +375,20 @@ impl ExtractorToolchain for FakeExtractorToolchain {
             return Ok(ExtractorDownloadOutcome::Completed(path));
         }
 
-        let filename = url::Url::parse(url)
-            .ok()
-            .and_then(|u| {
-                u.path_segments()
-                    .and_then(|mut s| s.next_back())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| "download".to_string());
-
-        let path = dest_dir.join(&filename);
+        let path = if output_template.contains("%(") {
+            let filename = url::Url::parse(url)
+                .ok()
+                .and_then(|u| {
+                    u.path_segments()
+                        .and_then(|mut s| s.next_back())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "download".to_string());
+            dest_dir.join(&filename)
+        } else {
+            dest_dir.join(output_template)
+        };
         let body = format!("fake extractor download:{url}:{format}");
         std::fs::write(&path, body.as_bytes())
             .map_err(|e| format!("write extractor output {path:?}: {e}"))?;

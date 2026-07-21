@@ -117,6 +117,12 @@
         <div class="settings-row">
           <button class="btn btn-primary" id="mediaExtrasApply" type="button">Apply media defaults</button>
         </div>
+        <label class="settings-label" for="filenameTemplateInput">Filename template</label>
+        <p class="settings-help">Extractor outputs: <code>title</code>, <code>id</code>, <code>uploader</code>, <code>upload_date</code>, <code>ext</code>. HTTP jobs keep URL names.</p>
+        <div class="settings-row">
+          <input type="text" class="url-input" id="filenameTemplateInput" placeholder="%(title).200B [%(id)s].%(ext)s" />
+          <button class="btn btn-primary" id="filenameTemplateApply" type="button">Apply template</button>
+        </div>
         <label class="settings-label" for="cookiesFromBrowserInput">Cookie auth</label>
         <p class="settings-help">Optional yt-dlp <code>--cookies-from-browser</code> and/or Netscape cookie file for logged-in Launch Sites.</p>
         <div class="settings-row">

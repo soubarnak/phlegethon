@@ -4,6 +4,7 @@
 //! Writes are atomic (temp file + rename).
 
 use crate::cookie_channel::CookieChannel;
+use crate::filename_template::DEFAULT_FILENAME_TEMPLATE;
 use crate::integrity::ExpectedHash;
 use crate::job::{Job, JobState};
 use crate::media_extras::MediaExtrasOptions;
@@ -56,6 +57,10 @@ fn default_cookie_channel() -> CookieChannel {
     CookieChannel::default()
 }
 
+fn default_filename_template() -> String {
+    DEFAULT_FILENAME_TEMPLATE.to_string()
+}
+
 /// On-disk representation of the job queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedQueue {
@@ -71,6 +76,8 @@ pub struct PersistedQueue {
     pub default_media_extras: MediaExtrasOptions,
     #[serde(default = "default_cookie_channel")]
     pub cookie_channel: CookieChannel,
+    #[serde(default = "default_filename_template")]
+    pub filename_template: String,
     pub jobs: Vec<PersistedJob>,
 }
 
@@ -96,6 +103,12 @@ pub struct PersistedJob {
     pub media_id: Option<String>,
     #[serde(default)]
     pub media_title: Option<String>,
+    #[serde(default)]
+    pub ytdlp_output_spec: Option<String>,
+    #[serde(default)]
+    pub media_uploader: Option<String>,
+    #[serde(default)]
+    pub media_upload_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +241,19 @@ pub fn load_cookie_channel(library_root: &Path) -> Result<CookieChannel, String>
     Ok(queue.cookie_channel.normalized())
 }
 
+/// Load Filename Template from the queue file, if present.
+pub fn load_filename_template(library_root: &Path) -> Result<String, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(DEFAULT_FILENAME_TEMPLATE.to_string());
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    Ok(queue.filename_template)
+}
+
 /// Build a persisted queue snapshot from live jobs.
 pub fn build_queue(
     jobs: &[Job],
@@ -237,6 +263,7 @@ pub fn build_queue(
     audio_only_mode: bool,
     default_media_extras: &MediaExtrasOptions,
     cookie_channel: &CookieChannel,
+    filename_template: &str,
 ) -> PersistedQueue {
     PersistedQueue {
         version: QUEUE_VERSION,
@@ -246,6 +273,7 @@ pub fn build_queue(
         audio_only_mode,
         default_media_extras: *default_media_extras,
         cookie_channel: cookie_channel.clone(),
+        filename_template: filename_template.to_string(),
         jobs: jobs.iter().map(Job::to_persisted).collect(),
     }
 }
@@ -360,6 +388,7 @@ mod tests {
             false,
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
+            DEFAULT_FILENAME_TEMPLATE,
         );
         save_queue(&root, &queue).unwrap();
 
@@ -449,6 +478,7 @@ mod tests {
             false,
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
+            DEFAULT_FILENAME_TEMPLATE,
         );
         save_queue(&root, &queue).unwrap();
 

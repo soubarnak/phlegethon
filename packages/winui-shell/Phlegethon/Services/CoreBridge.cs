@@ -212,6 +212,19 @@ internal static class CoreBridge
         IntPtr errorBuf,
         int errorBufLen);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_get_filename_template(
+        IntPtr handle,
+        IntPtr outBuf,
+        int outBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_set_filename_template(
+        IntPtr handle,
+        string template,
+        IntPtr errorBuf,
+        int errorBufLen);
+
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
@@ -499,6 +512,25 @@ public class CoreHandle : IDisposable
     {
         ThrowOnError(
             CoreBridge.core_set_cookie_channel_json(_handle, channelJson, IntPtr.Zero, 0));
+    }
+
+    public string GetFilenameTemplate()
+    {
+        unsafe
+        {
+            byte* outBuf = stackalloc byte[BufSize];
+            var outPtr = new IntPtr(outBuf);
+            int result = CoreBridge.core_get_filename_template(_handle, outPtr, BufSize);
+            if (result != 0)
+                throw new InvalidOperationException("Failed to read Filename Template from Core");
+            return Marshal.PtrToStringAnsi(outPtr) ?? "%(title).200B [%(id)s].%(ext)s";
+        }
+    }
+
+    public void SetFilenameTemplate(string template)
+    {
+        ThrowOnError(
+            CoreBridge.core_set_filename_template(_handle, template, IntPtr.Zero, 0));
     }
 
     public string DrainEvents()

@@ -145,6 +145,18 @@ public sealed partial class DownloadQueueControl : UserControl
         CookieFileBox.Text = channel.CookieFile ?? string.Empty;
     }
 
+    public void SetFilenameTemplateDisplay(string template)
+    {
+        FilenameTemplateBox.Text = template;
+    }
+
+    private void OnFilenameTemplateApply(object sender, RoutedEventArgs e)
+    {
+        var template = FilenameTemplateBox.Text.Trim();
+        if (!string.IsNullOrEmpty(template))
+            FilenameTemplateChanged?.Invoke(this, template);
+    }
+
     private void OnMediaExtrasDefaultsApply(object sender, RoutedEventArgs e)
     {
         MediaExtrasDefaultsChanged?.Invoke(this, new MediaExtrasOptions
@@ -424,6 +436,8 @@ public sealed partial class DownloadQueueControl : UserControl
 
     /// <summary>Raised when the user applies cookie auth channel settings.</summary>
     public event EventHandler<CookieChannel>? CookieChannelChanged;
+
+    public event EventHandler<string>? FilenameTemplateChanged;
 
     // -----------------------------------------------------------------------
     // Helpers

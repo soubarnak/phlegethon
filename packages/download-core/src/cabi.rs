@@ -883,6 +883,43 @@ pub unsafe extern "C" fn core_set_cookie_channel_json(
     })
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn core_get_filename_template(
+    handle: *mut Core,
+    out_buf: *mut c_char,
+    out_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        let core = &*core_guard;
+        write_str_to_buf(core.filename_template(), out_buf, out_buf_len);
+        0
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_set_filename_template(
+    handle: *mut Core,
+    template: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let template_str = cstr_to_str(template).to_string();
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = &mut *core_guard;
+        match core.set_filename_template(template_str) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Bandwidth caps
 // ---------------------------------------------------------------------------
@@ -1087,12 +1124,14 @@ impl Serialize for crate::extractor::ProbeResult {
 impl Serialize for crate::extractor::MediaItem {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("MediaItem", 5)?;
+        let mut st = s.serialize_struct("MediaItem", 7)?;
         st.serialize_field("id", &self.id)?;
         st.serialize_field("title", &self.title)?;
         st.serialize_field("url", &self.url)?;
         st.serialize_field("qualities", &self.qualities)?;
         st.serialize_field("archived", &self.archived)?;
+        st.serialize_field("uploader", &self.uploader)?;
+        st.serialize_field("upload_date", &self.upload_date)?;
         st.end()
     }
 }

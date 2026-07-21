@@ -13,6 +13,7 @@ mod media_extras;
 mod quality_policy;
 mod event;
 mod extractor;
+mod filename_template;
 mod http;
 mod integrity;
 mod job;
@@ -35,6 +36,10 @@ pub use event::CoreEvent;
 pub use extractor::{
     ExtractorDownloadOutcome, ExtractorToolchain, FakeExtractorToolchain, ItemSelection,
     MediaItem, ProbeResult, ProbeSelection, Quality,
+};
+pub use filename_template::{
+    media_item_raw_id, prepare_extractor_output, render_template, resolve_collision,
+    sanitize_filename, TemplateVars, DEFAULT_FILENAME_TEMPLATE,
 };
 pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
 pub use disk_space::{
@@ -129,6 +134,7 @@ pub struct Core {
     audio_only_mode: bool,
     default_media_extras: MediaExtrasOptions,
     cookie_channel: CookieChannel,
+    filename_template: String,
     clock: Arc<dyn bandwidth::Clock>,
     /// Pending probe results, keyed by URL.
     /// Stored until confirm or replaced by a new probe for the same URL.
@@ -291,6 +297,7 @@ impl Core {
             audio_only_mode: false,
             default_media_extras: MediaExtrasOptions::default(),
             cookie_channel: CookieChannel::default(),
+            filename_template: DEFAULT_FILENAME_TEMPLATE.to_string(),
             clock,
             pending_probes: HashMap::new(),
             last_progress_flush: Instant::now(),
@@ -400,6 +407,7 @@ impl Core {
         let media_settings = storage::load_media_extras_settings(&root)?;
         self.default_media_extras = media_settings.defaults;
         self.cookie_channel = storage::load_cookie_channel(&root)?;
+        self.filename_template = storage::load_filename_template(&root)?;
         self.download_archive = download_archive::DownloadArchive::load(&root)?;
         self.library_root = Some(root);
         self.last_progress_flush = Instant::now();
@@ -434,6 +442,7 @@ impl Core {
                 self.audio_only_mode,
                 &self.default_media_extras,
                 &self.cookie_channel,
+                &self.filename_template,
             );
             storage::save_queue(root, &queue)?;
         }
@@ -996,6 +1005,81 @@ impl Core {
         self.persist_queue_now()
     }
 
+    /// Current Filename Template for extractor job outputs.
+    pub fn filename_template(&self) -> &str {
+        &self.filename_template
+    }
+
+    /// Update the Filename Template and persist it.
+    pub fn set_filename_template(&mut self, template: String) -> Result<(), String> {
+        let trimmed = template.trim();
+        if trimmed.is_empty() {
+            return Err("Filename Template cannot be empty".to_string());
+        }
+        self.filename_template = trimmed.to_string();
+        self.persist_queue_now()
+    }
+
+    fn apply_extractor_filename(
+        &self,
+        job: &mut job::Job,
+        item: &MediaItem,
+        quality: &Quality,
+    ) {
+        let ext = quality
+            .container
+            .as_deref()
+            .unwrap_or("mp4");
+        let raw_id = media_item_raw_id(&item.id);
+        let vars = TemplateVars {
+            title: &item.title,
+            id: raw_id,
+            uploader: item.uploader.as_deref(),
+            upload_date: item.upload_date.as_deref(),
+            ext,
+        };
+        let (ytdlp_spec, basename) =
+            prepare_extractor_output(job.destination(), &self.filename_template, &vars);
+        job.set_ytdlp_output_spec(ytdlp_spec);
+        job.set_filename(basename);
+        job.set_media_probe_metadata(item.uploader.clone(), item.upload_date.clone());
+    }
+
+    fn extractor_output_for_job(&self, job: &job::Job) -> (String, String) {
+        if let (Some(media_id), Some(title)) = (job.media_id(), job.media_title()) {
+            let ext = job
+                .filename()
+                .rsplit_once('.')
+                .map(|(_, e)| e)
+                .unwrap_or("mp4");
+            let vars = TemplateVars {
+                title,
+                id: media_item_raw_id(media_id),
+                uploader: job.media_uploader(),
+                upload_date: job.media_upload_date(),
+                ext,
+            };
+            return prepare_extractor_output(
+                job.destination(),
+                &self.filename_template,
+                &vars,
+            );
+        }
+        (
+            self.filename_template.clone(),
+            render_template(
+                &self.filename_template,
+                &TemplateVars {
+                    title: "download",
+                    id: "id",
+                    uploader: None,
+                    upload_date: None,
+                    ext: "mp4",
+                },
+            ),
+        )
+    }
+
     /// Effective media extras for a probe confirm (defaults + optional override).
     pub fn resolve_media_extras(
         &self,
@@ -1319,6 +1403,7 @@ impl Core {
             job.set_extractor_format(&sel.quality_id);
             job.set_media_extras(media_extras);
             job.set_media_identity(item.id.clone(), item.title.clone());
+            self.apply_extractor_filename(&mut job, item, quality);
             if let Some(size) = quality.size_bytes {
                 job.set_total_bytes(Some(size));
             }
@@ -1657,11 +1742,21 @@ impl Core {
                 )
             };
 
+            let ytdlp_output_spec = extractor_format
+                .as_ref()
+                .map(|_| {
+                    let (spec, basename) = self.extractor_output_for_job(&self.jobs[i]);
+                    self.jobs[i].set_filename(basename);
+                    spec
+                });
+
             if !self.guard_disk_space_for_transfer(i, &job_id, &dest, &url, bytes_received)? {
                 return Ok(());
             }
 
             if let Some(format) = extractor_format {
+                let output_spec_owned = ytdlp_output_spec
+                    .unwrap_or_else(|| self.filename_template.clone());
                 let on_disk = storage::destination_byte_total(&dest);
                 if on_disk > 0 && !self.extractor.supports_extractor_resume() {
                     self.jobs[i].mark_failed();
@@ -1700,6 +1795,7 @@ impl Core {
                     let dest_ref = dest.as_path();
                     let url_ref = url.as_str();
                     let format_ref = format.as_str();
+                    let output_spec = output_spec_owned.as_str();
                     let extras = media_extras;
                     let cookies = self.cookie_channel.clone();
                     s.spawn(move || {
@@ -1710,6 +1806,7 @@ impl Core {
                             stop,
                             &extras,
                             &cookies,
+                            output_spec,
                         );
                         let _ = result_tx.send(outcome);
                     });
@@ -2150,6 +2247,9 @@ impl Core {
             .map_err(|_| "event channel closed".to_string())?;
 
         self.jobs[job_index].mark_completed();
+        if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
+            self.jobs[job_index].set_filename(name);
+        }
         self.record_completed_media_identity(job_id, job_index)?;
         self.persist_queue_now()
     }

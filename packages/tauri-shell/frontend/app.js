@@ -90,6 +90,8 @@ const mediaExtrasApply = $("mediaExtrasApply");
 const cookiesFromBrowserInput = $("cookiesFromBrowserInput");
 const cookieFileInput = $("cookieFileInput");
 const cookieChannelApply = $("cookieChannelApply");
+const filenameTemplateInput = $("filenameTemplateInput");
+const filenameTemplateApply = $("filenameTemplateApply");
 const discardConfirmOverlay = $("discardConfirmOverlay");
 const discardConfirmTitle = $("discardConfirmTitle");
 const discardConfirmBody = $("discardConfirmBody");
@@ -1175,6 +1177,7 @@ async function openSettings() {
     const audioOnly = await invoke("get_audio_only_mode");
     const mediaDefaults = await invoke("get_default_media_extras");
     const cookieChannel = await invoke("get_cookie_channel");
+    const filenameTemplate = await invoke("get_filename_template");
     const caps = await loadMediaExtrasCapabilities();
     state.pendingLibraryRoot = root;
     libraryRootPath.value = root || "";
@@ -1186,6 +1189,7 @@ async function openSettings() {
     remuxDefault.checked = Boolean(mediaDefaults.remux);
     cookiesFromBrowserInput.value = cookieChannel.cookies_from_browser || "";
     cookieFileInput.value = cookieChannel.cookie_file || "";
+    filenameTemplateInput.value = filenameTemplate || "";
     const watcherPref = localStorage.getItem("phlegethon-clipboard-watcher") === "1";
     clipboardWatcherInput.checked = watcherPref;
     applyEmbedAvailability(settingsOverlay, caps);
@@ -1298,6 +1302,20 @@ cookieChannelApply.addEventListener("click", async () => {
     closeSettings();
   } catch (err) {
     showError(`Apply cookie channel failed: ${err}`);
+  }
+});
+
+filenameTemplateApply.addEventListener("click", async () => {
+  try {
+    const template = filenameTemplateInput.value.trim();
+    if (!template) {
+      showError("Filename template cannot be empty");
+      return;
+    }
+    await getInvoke()("set_filename_template", { template });
+    closeSettings();
+  } catch (err) {
+    showError(`Apply filename template failed: ${err}`);
   }
 });
 

@@ -57,8 +57,10 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.SetAudioOnlyModeDisplay(_eventService.GetAudioOnlyMode());
         DownloadQueueView.SetMediaExtrasDefaultsDisplay(_eventService.GetDefaultMediaExtras());
         DownloadQueueView.SetCookieChannelDisplay(_eventService.GetCookieChannel());
+        DownloadQueueView.SetFilenameTemplateDisplay(_eventService.GetFilenameTemplate());
         DownloadQueueView.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
         DownloadQueueView.CookieChannelChanged += OnCookieChannelChanged;
+        DownloadQueueView.FilenameTemplateChanged += OnFilenameTemplateChanged;
 
         // Wire up probe sheet
         ProbeSheetView.ResolveDestinationPreview = json => _eventService.PreviewProbeDestination(json);
@@ -480,6 +482,19 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             UrlStatusText.Text = $"Cookie channel failed: {ex.Message}";
+        }
+    }
+
+    private void OnFilenameTemplateChanged(object? sender, string template)
+    {
+        try
+        {
+            _eventService.SetFilenameTemplate(template);
+            UrlStatusText.Text = "Filename template updated";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Filename template failed: {ex.Message}";
         }
     }
 

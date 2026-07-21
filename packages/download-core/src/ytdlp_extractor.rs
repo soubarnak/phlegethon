@@ -381,6 +381,8 @@ impl YtDlpExtractorToolchain {
             url: info.original_url.unwrap_or_else(|| url.to_string()),
             qualities,
             archived: false,
+            uploader: info.uploader.clone(),
+            upload_date: info.upload_date.clone(),
         };
 
         Ok(ProbeResult {
@@ -437,6 +439,8 @@ impl YtDlpExtractorToolchain {
                 url: item_url,
                 qualities,
                 archived: false,
+                uploader: None,
+                upload_date: None,
             });
         }
 
@@ -614,16 +618,18 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         stop: &AtomicBool,
         media_extras: &MediaExtrasOptions,
         cookies: &CookieChannel,
+        output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
         let format_selector = quality_id_to_ytdlp_format(format);
-        let out_tmpl = dest_dir.join("%(title).200B [%(id)s].%(ext)s");
+        let out_tmpl = dest_dir.join(output_template);
         let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
 
         let mut cmd = Command::new(&self.config.binary_path);
         cmd.arg("--no-warnings")
+            .arg("--no-overwrites")
             .arg("-f")
             .arg(&format_selector)
             .arg("-o")

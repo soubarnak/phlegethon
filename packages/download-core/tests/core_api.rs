@@ -6420,3 +6420,101 @@ fn find_active_job_for_url_ignores_completed_jobs() {
         .is_none());
 }
 
+// ---------------------------------------------------------------------------
+// Filename Template (issue #58)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filename_template_setting_persists_in_queue_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(root.clone()).unwrap();
+
+    let custom = "%(uploader)s - %(title)s.%(ext)s".to_string();
+    core.set_filename_template(custom.clone()).unwrap();
+    assert_eq!(core.filename_template(), custom.as_str());
+
+    let (mut core2, _rx2) = make_core(Box::new(fake_http()));
+    core2.set_library_root(root).unwrap();
+    assert_eq!(core2.filename_template(), custom.as_str());
+}
+
+#[test]
+fn extractor_confirm_applies_filename_template() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=abc123",
+        "My Video",
+        "https://cdn.youtube.com/video.mp4",
+        vec![("720p", "720p")],
+    );
+
+    let http = fake_http_with_responses(vec![(
+        "https://cdn.youtube.com/video.mp4",
+        b"video".as_slice(),
+    )]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(root.clone()).unwrap();
+    core.set_filename_template("clip-%(id)s.%(ext)s".to_string())
+        .unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=abc123".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    core.confirm_probe_selection(&selection, None).unwrap();
+
+    let queue_raw =
+        std::fs::read_to_string(root.join(".phlegethon").join("jobs.json")).unwrap();
+    assert!(
+        queue_raw.contains("clip-1.mp4"),
+        "expected templated filename in persisted job, got: {queue_raw}"
+    );
+}
+
+#[test]
+fn http_enqueue_keeps_url_derived_filename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_filename_template("ignored-%(title)s.%(ext)s".to_string())
+        .unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/archive.zip");
+    let job = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap();
+    assert_eq!(job.title, "archive.zip");
+}
+
+#[test]
+fn filename_template_collision_suffix_in_core_module() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("clip.mp4"), b"done").unwrap();
+
+    let vars = TemplateVars {
+        title: "Clip",
+        id: "abc",
+        uploader: None,
+        upload_date: None,
+        ext: "mp4",
+    };
+    let (ytdlp, basename) =
+        prepare_extractor_output(&dest, "%(title)s.%(ext)s", &vars);
+    assert_eq!(ytdlp, basename);
+    assert_eq!(basename, "Clip (1).mp4");
+}
+

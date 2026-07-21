@@ -249,6 +249,27 @@
                     Margin="8,0,0,0"
                     Click="OnMediaExtrasDefaultsApply" />
                 <TextBlock
+                    Text="Filename template"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    VerticalAlignment="Center"
+                    Margin="16,0,0,0" />
+                <TextBox
+                    x:Name="FilenameTemplateBox"
+                    PlaceholderText="%(title).200B [%(id)s].%(ext)s"
+                    Width="260"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <Button
+                    Content="Apply template"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    Margin="8,0,0,0"
+                    Click="OnFilenameTemplateApply" />
+                <TextBlock
                     Text="Cookies browser"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize12}"

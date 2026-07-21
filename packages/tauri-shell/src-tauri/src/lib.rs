@@ -489,6 +489,18 @@ fn set_cookie_channel(
 }
 
 #[tauri::command]
+fn get_filename_template(state: State<AppState>) -> Result<String, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.filename_template().to_string())
+}
+
+#[tauri::command]
+fn set_filename_template(state: State<AppState>, template: String) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_filename_template(template)
+}
+
+#[tauri::command]
 fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
     let rx = state.event_rx.lock().map_err(|e| e.to_string())?;
     let mut events = Vec::new();
@@ -604,6 +616,8 @@ pub fn run() {
             get_media_extras_capabilities,
             get_cookie_channel,
             set_cookie_channel,
+            get_filename_template,
+            set_filename_template,
             select_default_quality,
             reorder_job,
             poll_events,

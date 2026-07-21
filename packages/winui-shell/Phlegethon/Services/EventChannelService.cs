@@ -297,6 +297,10 @@ public class EventChannelService : IDisposable
         _core.SetCookieChannelJson(json);
     }
 
+    public string GetFilenameTemplate() => _core.GetFilenameTemplate();
+
+    public void SetFilenameTemplate(string template) => _core.SetFilenameTemplate(template);
+
     public string? SelectDefaultQuality(IReadOnlyList<Quality> qualities)
     {
         var payload = System.Text.Json.JsonSerializer.Serialize(

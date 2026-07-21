@@ -114,6 +114,12 @@ pub struct Job {
     media_id: Option<String>,
     /// Human title for the media identity (archive / History).
     media_title: Option<String>,
+    /// yt-dlp `-o` template or fixed basename (relative to Job Destination).
+    ytdlp_output_spec: Option<String>,
+    /// Uploader from probe (filename template variable).
+    media_uploader: Option<String>,
+    /// Upload date from probe (filename template variable).
+    media_upload_date: Option<String>,
 }
 
 impl Job {
@@ -190,6 +196,9 @@ impl Job {
             media_extras: MediaExtrasOptions::default(),
             media_id: None,
             media_title: None,
+            ytdlp_output_spec: None,
+            media_uploader: None,
+            media_upload_date: None,
         }
     }
 
@@ -215,6 +224,9 @@ impl Job {
             media_extras: persisted.media_extras,
             media_id: persisted.media_id,
             media_title: persisted.media_title,
+            ytdlp_output_spec: persisted.ytdlp_output_spec,
+            media_uploader: persisted.media_uploader,
+            media_upload_date: persisted.media_upload_date,
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -250,6 +262,9 @@ impl Job {
             media_extras: self.media_extras,
             media_id: self.media_id.clone(),
             media_title: self.media_title.clone(),
+            ytdlp_output_spec: self.ytdlp_output_spec.clone(),
+            media_uploader: self.media_uploader.clone(),
+            media_upload_date: self.media_upload_date.clone(),
         }
     }
 
@@ -283,6 +298,31 @@ impl Job {
 
     pub fn media_title(&self) -> Option<&str> {
         self.media_title.as_deref()
+    }
+
+    pub fn ytdlp_output_spec(&self) -> Option<&str> {
+        self.ytdlp_output_spec.as_deref()
+    }
+
+    pub fn set_ytdlp_output_spec(&mut self, spec: impl Into<String>) {
+        self.ytdlp_output_spec = Some(spec.into());
+    }
+
+    pub fn media_uploader(&self) -> Option<&str> {
+        self.media_uploader.as_deref()
+    }
+
+    pub fn media_upload_date(&self) -> Option<&str> {
+        self.media_upload_date.as_deref()
+    }
+
+    pub fn set_media_probe_metadata(
+        &mut self,
+        uploader: Option<String>,
+        upload_date: Option<String>,
+    ) {
+        self.media_uploader = uploader;
+        self.media_upload_date = upload_date;
     }
 
     pub fn id(&self) -> &str {
