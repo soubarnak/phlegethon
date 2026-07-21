@@ -102,7 +102,7 @@
 
   <!-- Probe Sheet (hidden by default) -->
   <div class="probe-overlay" id="probeOverlay">
-    <div class="probe-sheet">
+    <div class="probe-sheet" role="dialog" aria-modal="true" aria-labelledby="probeTitle">
       <div class="probe-header">
         <div>
           <h2 id="probeTitle">Probe Results</h2>
@@ -111,7 +111,7 @@
         <div class="probe-header-actions">
           <button class="btn btn-sm" id="probeSelectAll" type="button">Select all</button>
           <button class="btn btn-sm" id="probeDeselectAll" type="button">Deselect all</button>
-          <button class="btn-icon" id="probeClose" type="button" title="Cancel">✕</button>
+          <button class="btn-icon" id="probeClose" type="button" title="Cancel" aria-label="Close probe sheet">✕</button>
         </div>
       </div>
       <div class="probe-media-extras" id="probeMediaExtras"></div>

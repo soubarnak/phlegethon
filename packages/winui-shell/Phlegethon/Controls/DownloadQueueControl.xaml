@@ -4,6 +4,7 @@
     x:Class="Phlegethon.Controls.DownloadQueueControl"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:automation="using:Microsoft.UI.Xaml.Automation"
     xmlns:controls="using:Phlegethon.Controls">
 
     <Grid>
@@ -56,6 +57,7 @@
                     Grid.Column="0"
                     x:Name="QueueSearchBox"
                     PlaceholderText="Search queue…"
+                    automation:AutomationProperties.Name="Search queue"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize12}"
                     TextChanged="OnQueueSearchChanged" />
@@ -63,6 +65,7 @@
                     Grid.Column="1"
                     x:Name="QueueFilterBox"
                     Width="140"
+                    automation:AutomationProperties.Name="Filter by state"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize12}"
                     SelectionChanged="OnQueueFilterChanged"
@@ -78,6 +81,7 @@
                     Grid.Column="2"
                     x:Name="QueueSortBox"
                     Width="140"
+                    automation:AutomationProperties.Name="Sort queue"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize12}"
                     SelectionChanged="OnQueueSortChanged"
@@ -99,7 +103,7 @@
             SelectionMode="Single"
             ItemContainerStyle="{StaticResource GeistListViewItemStyle}">
             <ListView.ItemTemplate>
-                <DataTemplate>
+                <DataTemplate x:DataType="controls:DownloadItemViewModel">
                     <Border
                         Background="Transparent"
                         BorderBrush="{ThemeResource GeistBorderBrush}"
@@ -121,7 +125,8 @@
                                 Height="24"
                                 CornerRadius="4"
                                 Background="{ThemeResource GeistGray100}"
-                                VerticalAlignment="Center">
+                                VerticalAlignment="Center"
+                                automation:AutomationProperties.Name="{Binding StatusAccessibleName}">
                                 <TextBlock
                                     Text="{Binding StatusIcon}"
                                     FontFamily="{ThemeResource GeistSansFont}"
@@ -187,6 +192,7 @@
                                     Width="28"
                                     Padding="0"
                                     Click="OnMoveUpClick"
+                                    automation:AutomationProperties.Name="Move up"
                                     ToolTipService.ToolTip="Move up" />
                                 <Button
                                     Content="↓"
@@ -196,6 +202,7 @@
                                     Width="28"
                                     Padding="0"
                                     Click="OnMoveDownClick"
+                                    automation:AutomationProperties.Name="Move down"
                                     ToolTipService.ToolTip="Move down" />
                                 <Button
                                     Content="{Binding ActionLabel}"
@@ -205,6 +212,7 @@
                                     MinWidth="64"
                                     Padding="8,0"
                                     Click="OnItemAction"
+                                    automation:AutomationProperties.Name="{Binding ActionLabel}"
                                     Visibility="{Binding PrimaryActionVisible}" />
                                 <Button
                                     Content="Discard"
@@ -213,7 +221,8 @@
                                     Height="28"
                                     MinWidth="64"
                                     Padding="8,0"
-                                    Click="OnDiscardClick" />
+                                    Click="OnDiscardClick"
+                                    automation:AutomationProperties.Name="Discard" />
                                 <Button
                                     Content="Reveal"
                                     FontFamily="{ThemeResource GeistSansFont}"
@@ -223,6 +232,7 @@
                                     Padding="8,0"
                                     Click="OnRevealClick"
                                     Visibility="{Binding CompletedActionsVisible}"
+                                    automation:AutomationProperties.Name="Reveal in folder"
                                     ToolTipService.ToolTip="Reveal in folder" />
                                 <Button
                                     Content="Open"
@@ -233,6 +243,7 @@
                                     Padding="8,0"
                                     Click="OnOpenClick"
                                     Visibility="{Binding CompletedActionsVisible}"
+                                    automation:AutomationProperties.Name="Open file"
                                     ToolTipService.ToolTip="Open file" />
                             </StackPanel>
                         </Grid>
@@ -269,6 +280,7 @@
                     Foreground="{ThemeResource GeistTextSecondaryBrush}"
                     VerticalAlignment="Center" />
                 <TextBlock
+                    x:Name="ActiveLimitLabel"
                     Text="Active limit"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize12}"

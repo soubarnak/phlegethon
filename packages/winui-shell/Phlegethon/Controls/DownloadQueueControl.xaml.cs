@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Phlegethon;
 using Phlegethon.Services;
+using Phlegethon.Strings;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -22,6 +23,7 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     private string _destination = "";
     private string _outputPath = "";
     private string _statusIcon = "⋯";
+    private string _statusAccessibleName = "Queued";
     private string _actionLabel = "Pause";
     private Visibility _primaryActionVisible = Visibility.Visible;
     private double _progressPercent;
@@ -65,6 +67,12 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     {
         get => _statusIcon;
         set => SetField(ref _statusIcon, value);
+    }
+
+    public string StatusAccessibleName
+    {
+        get => _statusAccessibleName;
+        set => SetField(ref _statusAccessibleName, value);
     }
 
     public string ActionLabel
@@ -156,12 +164,67 @@ public sealed partial class DownloadQueueControl : UserControl
     public DownloadQueueControl()
     {
         this.InitializeComponent();
+        ApplyLocalizedStrings();
         if (DownloadList != null)
         {
             DownloadList.ItemsSource = _viewItems;
         }
         ActiveJobLimitBox.Value = 3;
         RefreshView();
+    }
+
+    private void ApplyLocalizedStrings()
+    {
+        QueueSearchBox.PlaceholderText = ShellStrings.Get("queue.search.placeholder");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            QueueSearchBox, ShellStrings.Get("queue.search.label"));
+
+        var filterItems = new (string key, string tag)[]
+        {
+            ("queue.filter.all", "all"),
+            ("queue.filter.queued", "queued"),
+            ("queue.filter.downloading", "downloading"),
+            ("queue.filter.paused", "paused"),
+            ("queue.filter.completed", "completed"),
+            ("queue.filter.failed", "failed"),
+        };
+        QueueFilterBox.Items.Clear();
+        foreach (var (key, tag) in filterItems)
+        {
+            QueueFilterBox.Items.Add(new ComboBoxItem
+            {
+                Content = ShellStrings.Get(key),
+                Tag = tag,
+            });
+        }
+        QueueFilterBox.SelectedIndex = 0;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            QueueFilterBox, ShellStrings.Get("queue.filter.label"));
+
+        var sortItems = new (string key, string tag)[]
+        {
+            ("queue.sort.queue", "queue"),
+            ("queue.sort.title", "title"),
+            ("queue.sort.status", "status"),
+            ("queue.sort.size", "size"),
+        };
+        QueueSortBox.Items.Clear();
+        foreach (var (key, tag) in sortItems)
+        {
+            QueueSortBox.Items.Add(new ComboBoxItem
+            {
+                Content = ShellStrings.Get(key),
+                Tag = tag,
+            });
+        }
+        QueueSortBox.SelectedIndex = 0;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            QueueSortBox, ShellStrings.Get("queue.sort.label"));
+
+        StatusFooter.Text = ShellStrings.Get("queue.footer.ready");
+        ActiveLimitLabel.Text = ShellStrings.Get("queue.footer.activeLimit");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetLabeledBy(
+            ActiveJobLimitBox, ActiveLimitLabel);
     }
 
     /// <summary>Sync the Active Job Limit field from Core settings.</summary>
@@ -448,6 +511,10 @@ public sealed partial class DownloadQueueControl : UserControl
 
             DownloadList.SelectedIndex = i;
             DownloadList.ScrollIntoView(_viewItems[i]);
+            if (DownloadList.ContainerFromIndex(i) is ListViewItem container)
+            {
+                container.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+            }
             return true;
         }
 
@@ -690,22 +757,26 @@ public sealed partial class DownloadQueueControl : UserControl
         {
             case DownloadStatus.Queued:
                 item.StatusIcon = "⋯";
-                item.ActionLabel = "Pause";
+                item.StatusAccessibleName = ShellStrings.Get("queue.status.queued");
+                item.ActionLabel = ShellStrings.Get("queue.action.pause");
                 item.PrimaryActionVisible = Visibility.Visible;
                 break;
             case DownloadStatus.Downloading:
                 item.StatusIcon = "↓";
-                item.ActionLabel = "Pause";
+                item.StatusAccessibleName = ShellStrings.Get("queue.status.downloading");
+                item.ActionLabel = ShellStrings.Get("queue.action.pause");
                 item.PrimaryActionVisible = Visibility.Visible;
                 break;
             case DownloadStatus.Paused:
                 item.StatusIcon = "⏸";
-                item.ActionLabel = "Resume";
+                item.StatusAccessibleName = ShellStrings.Get("queue.status.paused");
+                item.ActionLabel = ShellStrings.Get("queue.action.resume");
                 item.PrimaryActionVisible = Visibility.Visible;
                 break;
             case DownloadStatus.Completed:
                 item.StatusIcon = "✓";
-                item.ActionLabel = "Discard";
+                item.StatusAccessibleName = ShellStrings.Get("queue.status.completed");
+                item.ActionLabel = ShellStrings.Get("queue.action.discard");
                 item.PrimaryActionVisible = Visibility.Collapsed;
                 item.CompletedActionsVisible = !string.IsNullOrWhiteSpace(item.OutputPath)
                     ? Visibility.Visible
@@ -713,7 +784,8 @@ public sealed partial class DownloadQueueControl : UserControl
                 break;
             case DownloadStatus.Failed:
                 item.StatusIcon = "✗";
-                item.ActionLabel = "Retry";
+                item.StatusAccessibleName = ShellStrings.Get("queue.status.failed");
+                item.ActionLabel = ShellStrings.Get("queue.action.retry");
                 item.PrimaryActionVisible = Visibility.Visible;
                 break;
         }
@@ -728,12 +800,12 @@ public sealed partial class DownloadQueueControl : UserControl
 
         if (_items.Count == 0)
         {
-            EmptyStateText.Text = "No downloads yet";
+            EmptyStateText.Text = ShellStrings.Get("queue.empty");
             EmptyStateText.Visibility = Visibility.Visible;
         }
         else if (_viewItems.Count == 0)
         {
-            EmptyStateText.Text = "No matching downloads";
+            EmptyStateText.Text = ShellStrings.Get("queue.emptyFiltered");
             EmptyStateText.Visibility = Visibility.Visible;
         }
         else

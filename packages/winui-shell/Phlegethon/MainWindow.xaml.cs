@@ -543,6 +543,7 @@ public sealed partial class MainWindow : Window
             DownloadQueueView.Visibility = Visibility.Collapsed;
             HistoryView.Visibility = Visibility.Collapsed;
             ProbeSheetView.Visibility = Visibility.Visible;
+            ProbeSheetView.FocusInitial();
         });
     }
 
@@ -848,5 +849,6 @@ public sealed partial class MainWindow : Window
             HistoryView.Visibility = Visibility.Collapsed;
         }
         ProbeSheetView.Visibility = Visibility.Collapsed;
+        UrlInput?.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
     }
 }

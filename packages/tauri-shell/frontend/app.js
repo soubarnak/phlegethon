@@ -7,6 +7,8 @@
 import { buildDiscardConfirmCopy } from "./discardConfirm.js";
 import { displayProgressPercent } from "./progressPercent.js";
 import { createClipboardWatcher } from "./clipboardWatcher.js";
+import { initLocale, t } from "./i18n.js";
+import { focusFirst, trapFocus } from "./focusTrap.js";
 import {
   initNotificationActivation,
   loadDesktopNotificationsEnabled,
@@ -61,6 +63,8 @@ const state = {
   queueSearch: "",
   queueFilter: QUEUE_FILTER_ALL,
   queueSort: QUEUE_SORT_QUEUE,
+  /** Cleanup for probe sheet focus trap. */
+  releaseProbeFocusTrap: null,
 };
 
 const urlInputApi = createUrlInputApi(getInvoke);
@@ -76,6 +80,7 @@ const queueSearch = $("queueSearch");
 const queueFilter = $("queueFilter");
 const queueSort = $("queueSort");
 const probeOverlay = $("probeOverlay");
+const probeSheet = probeOverlay?.querySelector(".probe-sheet");
 const probeTitle = $("probeTitle");
 const probeUrlEl = $("probeUrl");
 const probeItems = $("probeItems");
@@ -143,6 +148,52 @@ const desktopNotificationsInput = $("desktopNotificationsInput");
 
 /** @type {{ resolve: (choice: "enqueue" | "focus" | "cancel") => void } | null} */
 let duplicateConfirmWaiter = null;
+
+initLocale();
+
+function applyStaticLabels() {
+  urlInput.placeholder = t("url.placeholder");
+  urlInput.setAttribute("aria-label", t("url.placeholder"));
+  enqueueBtn.textContent = t("url.enqueue");
+  saveToBtn.textContent = t("url.saveTo");
+  saveToBtn.setAttribute("aria-label", t("url.saveTo"));
+  queueSearch.placeholder = t("queue.search.placeholder");
+  queueSearch.setAttribute("aria-label", t("queue.search.label"));
+  queueFilter.setAttribute("aria-label", t("queue.filter.label"));
+  queueSort.setAttribute("aria-label", t("queue.sort.label"));
+  const filterOptions = [
+    ["all", "queue.filter.all"],
+    ["queued", "queue.filter.queued"],
+    ["downloading", "queue.filter.downloading"],
+    ["paused", "queue.filter.paused"],
+    ["completed", "queue.filter.completed"],
+    ["failed", "queue.filter.failed"],
+  ];
+  for (const [value, key] of filterOptions) {
+    const option = queueFilter.querySelector(`option[value="${value}"]`);
+    if (option) option.textContent = t(key);
+  }
+  const sortOptions = [
+    ["queue", "queue.sort.queue"],
+    ["title", "queue.sort.title"],
+    ["status", "queue.sort.status"],
+    ["size", "queue.sort.size"],
+  ];
+  for (const [value, key] of sortOptions) {
+    const option = queueSort.querySelector(`option[value="${value}"]`);
+    if (option) option.textContent = t(key);
+  }
+  probeSelectAll.textContent = t("probe.selectAll");
+  probeDeselectAll.textContent = t("probe.deselectAll");
+  probeCancel.textContent = t("probe.cancel");
+  probeConfirm.textContent = t("probe.confirm");
+  probeSaveToBtn.textContent = t("probe.saveTo");
+  probeSaveToBtn.setAttribute("aria-label", t("probe.saveTo"));
+  probeClose.setAttribute("aria-label", t("probe.close"));
+  probeSaveToPath.textContent = t("probe.libraryRootDefault");
+}
+
+applyStaticLabels();
 
 /** @type {{ resolve: (ok: boolean) => void } | null} */
 let discardConfirmWaiter = null;
@@ -421,8 +472,8 @@ function readMediaExtrasFromRoot(root) {
 
 async function startProbe(url) {
   try {
-    probeOverlay.classList.add("open");
-    probeTitle.textContent = "Probing…";
+    openProbeSheet();
+    probeTitle.textContent = t("probe.probingTitle");
     probeUrlEl.textContent = url;
     probeItems.innerHTML =
       '<div class="queue-empty" style="padding:2rem"><span>Analyzing URL and loading qualities…</span></div>';
@@ -438,13 +489,13 @@ async function startProbe(url) {
     const result = await getInvoke()("probe_url", { url });
     await showProbeResults(url, result);
   } catch (err) {
-    probeOverlay.classList.remove("open");
+    closeProbe();
     showError(`Probe failed: ${err}`);
   }
 }
 
 async function showProbeResults(url, result) {
-  probeTitle.textContent = result.source_name || "Probe Results";
+  probeTitle.textContent = result.source_name || t("probe.results");
   probeUrlEl.textContent = url;
   probeItems.innerHTML = "";
 
@@ -490,6 +541,10 @@ async function showProbeResults(url, result) {
     checkbox.className = "probe-item-checkbox";
     checkbox.checked = !item.archived;
     checkbox.dataset.itemIndex = idx;
+    checkbox.setAttribute(
+      "aria-label",
+      t("probe.selectItem", { title: item.title }),
+    );
 
     const info = document.createElement("div");
     info.className = "probe-item-info";
@@ -502,7 +557,7 @@ async function showProbeResults(url, result) {
     if (item.archived) {
       const badge = document.createElement("div");
       badge.className = "probe-item-archived-badge";
-      badge.textContent = "Downloaded";
+      badge.textContent = t("probe.downloaded");
       info.appendChild(badge);
     }
 
@@ -515,26 +570,42 @@ async function showProbeResults(url, result) {
 
     const qualitiesWrap = document.createElement("div");
     qualitiesWrap.className = "probe-item-qualities";
+    qualitiesWrap.setAttribute("role", "radiogroup");
+    qualitiesWrap.setAttribute(
+      "aria-label",
+      t("probe.qualityFor", { title: item.title }),
+    );
 
     const defaultQuality = await resolveDefaultQuality(item.qualities);
     row.dataset.defaultQuality = defaultQuality || "";
 
     item.qualities.forEach((q) => {
-      const chip = document.createElement("span");
+      const chip = document.createElement("button");
+      chip.type = "button";
       chip.className = "quality-chip";
+      chip.setAttribute("role", "radio");
       chip.textContent = q.label || q.id;
       chip.dataset.qualityId = q.id;
       chip.dataset.itemIndex = idx;
+      chip.setAttribute(
+        "aria-label",
+        t("probe.qualityFor", { title: item.title }) + `: ${q.label || q.id}`,
+      );
 
       if (q.id === defaultQuality) {
         chip.classList.add("selected");
+        chip.setAttribute("aria-checked", "true");
+      } else {
+        chip.setAttribute("aria-checked", "false");
       }
 
       chip.addEventListener("click", () => {
         qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
           c.classList.remove("selected");
+          c.setAttribute("aria-checked", "false");
         });
         chip.classList.add("selected");
+        chip.setAttribute("aria-checked", "true");
         checkbox.checked = true;
         updateProbeSaveToHint();
       });
@@ -561,17 +632,22 @@ async function showProbeResults(url, result) {
   }
 
   updateProbeSaveToHint();
+  focusFirst(probeSheet);
 }
 
 function selectDefaultQualityForRow(qualitiesWrap, defaultQuality) {
   const chips = qualitiesWrap.querySelectorAll(".quality-chip");
   if (chips.length === 0) return;
 
-  chips.forEach((c) => c.classList.remove("selected"));
+  chips.forEach((c) => {
+    c.classList.remove("selected");
+    c.setAttribute("aria-checked", "false");
+  });
   const target =
     qualitiesWrap.querySelector(`[data-quality-id="${defaultQuality}"]`) ||
     chips[0];
   target.classList.add("selected");
+  target.setAttribute("aria-checked", "true");
 }
 
 async function setAllProbeItemsSelected(selected) {
@@ -592,6 +668,7 @@ async function setAllProbeItemsSelected(selected) {
     } else {
       qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
         c.classList.remove("selected");
+        c.setAttribute("aria-checked", "false");
       });
     }
   }
@@ -702,10 +779,7 @@ probeConfirm.addEventListener("click", async () => {
       args.destination = state.probeSaveToDestination;
     }
     const jobIds = await invoke("confirm_probe_selection", args);
-    probeOverlay.classList.remove("open");
-    state.pendingProbe = null;
-    state.probeSaveToDestination = null;
-    updateProbeSaveToHint();
+    closeProbe();
 
     await refreshJobs();
     jobIds.forEach((id) => {
@@ -720,11 +794,22 @@ probeConfirm.addEventListener("click", async () => {
 });
 
 // Close probe sheet
+function openProbeSheet() {
+  probeOverlay.classList.add("open");
+  state.releaseProbeFocusTrap?.();
+  if (probeSheet) {
+    state.releaseProbeFocusTrap = trapFocus(probeSheet, { onEscape: closeProbe });
+  }
+}
+
 function closeProbe() {
   probeOverlay.classList.remove("open");
+  state.releaseProbeFocusTrap?.();
+  state.releaseProbeFocusTrap = null;
   state.pendingProbe = null;
   state.probeSaveToDestination = null;
   updateProbeSaveToHint();
+  urlInput.focus();
 }
 
 probeCancel.addEventListener("click", closeProbe);
@@ -796,8 +881,8 @@ function renderQueue() {
   if (viewJobs.length === 0) {
     queueEmpty.style.display = "flex";
     queueEmptyMessage.textContent = hasJobs
-      ? "No matching downloads."
-      : "No downloads yet. Paste a URL above or drag one in.";
+      ? t("queue.emptyFiltered")
+      : t("queue.emptyWithHint");
     queueList.innerHTML = "";
     return;
   }
@@ -832,7 +917,7 @@ function renderQueue() {
     }
 
     html += `
-      <div class="queue-row ${state.selectedJobId === job.job_id ? "selected" : ""}" data-job-id="${job.job_id}">
+      <div class="queue-row ${state.selectedJobId === job.job_id ? "selected" : ""}" data-job-id="${job.job_id}" role="listitem">
         <div class="row-info">
           <div class="row-title" title="${escapeHtml(job.title)}">${escapeHtml(job.title)}</div>
           <div class="row-url" title="${escapeHtml(job.url)}">${escapeHtml(job.url)}</div>
@@ -842,7 +927,7 @@ function renderQueue() {
               : ""
           }
         </div>
-        <div class="row-status ${statusClass}">${statusLabel}</div>
+        <div class="row-status ${statusClass}" aria-label="${escapeHtml(statusLabel)}">${statusLabel}</div>
         <div class="row-progress">
           <div class="progress-bar${indeterminate ? " indeterminate" : ""}" role="progressbar"${
             hasTotal
@@ -854,20 +939,22 @@ function renderQueue() {
         </div>
         <div class="row-meta">${formatBytes(job.bytes_downloaded)}${sizeLabel ? ` / ${sizeLabel}` : ""}${hasTotal ? ` (${pct}%)` : ""}</div>
         <div class="row-actions">
-          ${coreIndex > 0 ? `<button class="btn-icon btn-sm" data-action="reorder-up" data-job-id="${job.job_id}" title="Move up in queue">↑</button>` : ""}
-          ${coreIndex >= 0 && coreIndex < state.jobs.length - 1 ? `<button class="btn-icon btn-sm" data-action="reorder-down" data-job-id="${job.job_id}" title="Move down in queue">↓</button>` : ""}
-          ${job.status === "pending" || job.status === "downloading" ? `<button class="btn-icon btn-sm" data-action="pause" data-job-id="${job.job_id}" title="Pause">⏸</button>` : ""}
-          ${job.status === "paused" ? `<button class="btn-icon btn-sm" data-action="resume" data-job-id="${job.job_id}" title="Resume">▶</button>` : ""}
-          ${job.status === "failed" ? `<button class="btn-icon btn-sm" data-action="retry" data-job-id="${job.job_id}" title="Retry">↻</button>` : ""}
-          ${job.status === "completed" && job.path ? `<button class="btn-icon btn-sm" data-action="reveal" data-job-id="${job.job_id}" title="Reveal in folder">Reveal</button>` : ""}
-          ${job.status === "completed" && job.path ? `<button class="btn-icon btn-sm" data-action="open" data-job-id="${job.job_id}" title="Open file">Open</button>` : ""}
-          <button class="btn-icon btn-sm btn-danger" data-action="discard" data-job-id="${job.job_id}" title="Discard">✕</button>
+          ${coreIndex > 0 ? `<button class="btn-icon btn-sm" data-action="reorder-up" data-job-id="${job.job_id}" aria-label="${t("queue.action.moveUp")}" title="${t("queue.action.moveUp")}">↑</button>` : ""}
+          ${coreIndex >= 0 && coreIndex < state.jobs.length - 1 ? `<button class="btn-icon btn-sm" data-action="reorder-down" data-job-id="${job.job_id}" aria-label="${t("queue.action.moveDown")}" title="${t("queue.action.moveDown")}">↓</button>` : ""}
+          ${job.status === "pending" || job.status === "downloading" ? `<button class="btn-icon btn-sm" data-action="pause" data-job-id="${job.job_id}" aria-label="${t("queue.action.pause")}" title="${t("queue.action.pause")}">⏸</button>` : ""}
+          ${job.status === "paused" ? `<button class="btn-icon btn-sm" data-action="resume" data-job-id="${job.job_id}" aria-label="${t("queue.action.resume")}" title="${t("queue.action.resume")}">▶</button>` : ""}
+          ${job.status === "failed" ? `<button class="btn-icon btn-sm" data-action="retry" data-job-id="${job.job_id}" aria-label="${t("queue.action.retry")}" title="${t("queue.action.retry")}">↻</button>` : ""}
+          ${job.status === "completed" && job.path ? `<button class="btn-icon btn-sm" data-action="reveal" data-job-id="${job.job_id}" aria-label="${t("queue.action.reveal")}" title="${t("queue.action.reveal")}">${t("queue.action.reveal")}</button>` : ""}
+          ${job.status === "completed" && job.path ? `<button class="btn-icon btn-sm" data-action="open" data-job-id="${job.job_id}" aria-label="${t("queue.action.open")}" title="${t("queue.action.open")}">${t("queue.action.open")}</button>` : ""}
+          <button class="btn-icon btn-sm btn-danger" data-action="discard" data-job-id="${job.job_id}" aria-label="${t("queue.action.discard")}" title="${t("queue.action.discard")}">✕</button>
         </div>
       </div>
     `;
   });
 
   queueList.innerHTML = html;
+  queueList.setAttribute("role", "list");
+  queueList.setAttribute("aria-label", t("queue.title"));
 
   // Attach action handlers
   queueList.querySelectorAll("[data-action]").forEach((btn) => {
@@ -1144,6 +1231,7 @@ function focusJobRow(jobId) {
   renderQueue();
   const row = queueList.querySelector(`[data-job-id="${jobId}"]`);
   row?.scrollIntoView({ block: "nearest" });
+  row?.querySelector(".row-actions button")?.focus();
 }
 
 // ---- Error display ----
@@ -1197,7 +1285,7 @@ function updateProbeSaveToHint() {
   const fallbackHint = () =>
     state.probeSaveToDestination
       ? state.probeSaveToDestination
-      : "Library Root default";
+      : t("probe.libraryRootDefault");
 
   // Sync hint when probe sheet closed or still loading.
   if (!state.pendingProbe) {

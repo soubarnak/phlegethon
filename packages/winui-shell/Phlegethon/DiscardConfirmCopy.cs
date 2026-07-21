@@ -1,3 +1,5 @@
+using Phlegethon.Strings;
+
 namespace Phlegethon;
 
 /// <summary>
@@ -21,16 +23,16 @@ public static class DiscardConfirmCopy
 
     public static Dialog Build(string status, string? destination = null)
     {
-        const string title = "Discard job?";
-        const string confirmLabel = "Discard";
-        const string cancelLabel = "Cancel";
+        var title = ShellStrings.Get("discard.title");
+        var confirmLabel = ShellStrings.Get("discard.confirm");
+        var cancelLabel = ShellStrings.Get("discard.cancel");
         var deletesFiles = DeletesFiles(status);
 
         if (!deletesFiles)
         {
             return new Dialog(
                 title,
-                "This removes the job from the queue only. Files on disk will not be deleted.",
+                ShellStrings.Get("discard.completedBody"),
                 confirmLabel,
                 cancelLabel,
                 deletesFiles);
@@ -38,12 +40,12 @@ public static class DiscardConfirmCopy
 
         var path = (destination ?? "").Trim();
         var pathLine = path.Length > 0
-            ? $"Files under the Job Destination will be deleted:\n\n{path}"
-            : "Files under the Job Destination will be deleted.";
+            ? ShellStrings.Format("discard.unfinishedBodyWithPath", new Dictionary<string, string> { ["path"] = path })
+            : ShellStrings.Get("discard.unfinishedBody");
 
         return new Dialog(
             title,
-            $"{pathLine}\n\nThis cannot be undone.",
+            $"{pathLine}\n\n{ShellStrings.Get("discard.cannotUndo")}",
             confirmLabel,
             cancelLabel,
             deletesFiles);

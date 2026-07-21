@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Phlegethon.Services;
+using Phlegethon.Strings;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
 
@@ -69,6 +71,29 @@ public sealed partial class ProbeSheetControl : UserControl
     public ProbeSheetControl()
     {
         this.InitializeComponent();
+        ApplyLocalizedStrings();
+    }
+
+    private void ApplyLocalizedStrings()
+    {
+        ProbeTitleText.Text = ShellStrings.Get("probe.title");
+        CancelButton.Content = ShellStrings.Get("probe.cancel");
+        AutomationProperties.SetName(CancelButton, ShellStrings.Get("probe.cancel"));
+        SaveToButton.Content = ShellStrings.Get("probe.saveTo");
+        AutomationProperties.SetName(SaveToButton, ShellStrings.Get("probe.saveTo"));
+        ConfirmButton.Content = ShellStrings.Get("probe.confirm");
+        AutomationProperties.SetName(ConfirmButton, ShellStrings.Get("probe.confirm"));
+        SaveToPathLabel.Text = ShellStrings.Get("probe.libraryRootDefault");
+        SelectionSummary.Text = ShellStrings.Get("probe.noSelection");
+        SourceLabel.Text = ShellStrings.Get("probe.probing");
+        Microsoft.UI.Xaml.Input.KeyboardNavigation.SetTabNavigation(
+            ProbeSheetRoot, Microsoft.UI.Xaml.Input.KeyboardNavigationMode.Cycle);
+    }
+
+    /// <summary>Move keyboard focus to the probe sheet header for keyboard users.</summary>
+    public void FocusInitial()
+    {
+        CancelButton?.Focus(FocusState.Programmatic);
     }
 
     /// <summary>
@@ -88,8 +113,12 @@ public sealed partial class ProbeSheetControl : UserControl
         UpdateSaveToLabel();
 
         SourceLabel.Text = sourceName != null
-            ? $"{sourceName} — {url}"
-            : $"Probed: {url}";
+            ? ShellStrings.Format("probe.sourceAndUrl", new Dictionary<string, string>
+            {
+                ["source"] = sourceName,
+                ["url"] = url,
+            })
+            : ShellStrings.Format("probe.probed", new Dictionary<string, string> { ["url"] = url });
 
         _mediaExtras = ResolveDefaultMediaExtras?.Invoke() ?? new MediaExtrasOptions();
         BuildMediaExtrasPanel();
@@ -134,7 +163,7 @@ public sealed partial class ProbeSheetControl : UserControl
 
         var title = new TextBlock
         {
-            Text = "Media options",
+            Text = ShellStrings.Get("probe.mediaOptions"),
             FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
             FontSize = 12,
             FontWeight = (Windows.UI.Text.FontWeight)Application.Current.Resources["GeistTypeWeightMedium"],
@@ -246,6 +275,9 @@ public sealed partial class ProbeSheetControl : UserControl
             VerticalAlignment = VerticalAlignment.Center,
             IsChecked = group.IsSelected,
         };
+        AutomationProperties.SetName(
+            checkBox,
+            ShellStrings.Format("probe.selectItem", new Dictionary<string, string> { ["title"] = group.Title }));
         checkBox.Checked += (_, _) => { group.IsSelected = true; UpdateSelectionSummary(); };
         checkBox.Unchecked += (_, _) => { group.IsSelected = false; UpdateSelectionSummary(); };
         Grid.SetColumn(checkBox, 0);
@@ -283,7 +315,7 @@ public sealed partial class ProbeSheetControl : UserControl
                 Padding = new Thickness(6, 2),
                 Child = new TextBlock
                 {
-                    Text = "Downloaded",
+                    Text = ShellStrings.Get("probe.downloaded"),
                     FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
                     FontSize = 11,
                     Foreground = (Brush)Application.Current.Resources["GeistTextSecondaryBrush"],
@@ -302,10 +334,13 @@ public sealed partial class ProbeSheetControl : UserControl
                 Height = 28,
                 FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
                 FontSize = 12,
-                PlaceholderText = "Quality",
+                PlaceholderText = ShellStrings.Get("probe.quality"),
                 ItemsSource = group.Qualities,
                 SelectedItem = group.SelectedQuality,
             };
+            AutomationProperties.SetName(
+                qualityCombo,
+                ShellStrings.Format("probe.qualityFor", new Dictionary<string, string> { ["title"] = group.Title }));
             qualityCombo.SelectionChanged += (_, args) =>
             {
                 if (args.AddedItems.Count > 0)
@@ -340,6 +375,9 @@ public sealed partial class ProbeSheetControl : UserControl
             Padding = new Thickness(6, 0),
             VerticalAlignment = VerticalAlignment.Center,
         };
+        AutomationProperties.SetName(
+            urlButton,
+            ShellStrings.Format("probe.openUrl", new Dictionary<string, string> { ["title"] = group.Title }));
         urlButton.Click += (_, _) =>
         {
             var uri = new Uri(group.Url);
@@ -366,9 +404,12 @@ public sealed partial class ProbeSheetControl : UserControl
 
         SelectionSummary.Text = count switch
         {
-            0 => "No selection",
-            1 => "1 item selected",
-            _ => $"{count} items selected",
+            0 => ShellStrings.Get("probe.noSelection"),
+            1 => ShellStrings.Get("probe.selection.one"),
+            _ => ShellStrings.Format("probe.selection.many", new Dictionary<string, string>
+            {
+                ["count"] = count.ToString(),
+            }),
         };
 
         ConfirmButton.IsEnabled = count > 0;
@@ -383,7 +424,7 @@ public sealed partial class ProbeSheetControl : UserControl
             if (g.IsSelected) selected++;
         }
 
-        var fallback = _saveToDestination ?? "Library Root default";
+        var fallback = _saveToDestination ?? ShellStrings.Get("probe.libraryRootDefault");
         var multiNote = selected > 1 ? " (each item under its own subfolder)" : "";
 
         if (selected == 0 || ResolveDestinationPreview == null || string.IsNullOrEmpty(_probeUrl))

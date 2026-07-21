@@ -33,4 +33,8 @@
     <Compile Include="bindings\CoreBindings.g.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\shell-strings\en.json" Link="Strings\en.json" />
+  </ItemGroup>
+
 </Project>

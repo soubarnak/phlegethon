@@ -3,6 +3,8 @@
  * Completed: queue-row removal only. Otherwise: delete Job Destination files.
  */
 
+import { t } from "./i18n.js";
+
 /**
  * @param {string} status Core/UI job status
  * @returns {boolean}
@@ -18,14 +20,14 @@ export function discardsDeletesFiles(status) {
  */
 export function buildDiscardConfirmCopy(status, destination = "") {
   const deletesFiles = discardsDeletesFiles(status);
-  const title = "Discard job?";
-  const confirmLabel = "Discard";
-  const cancelLabel = "Cancel";
+  const title = t("discard.title");
+  const confirmLabel = t("discard.confirm");
+  const cancelLabel = t("discard.cancel");
 
   if (!deletesFiles) {
     return {
       title,
-      body: "This removes the job from the queue only. Files on disk will not be deleted.",
+      body: t("discard.completedBody"),
       confirmLabel,
       cancelLabel,
       deletesFiles,
@@ -34,12 +36,12 @@ export function buildDiscardConfirmCopy(status, destination = "") {
 
   const path = String(destination ?? "").trim();
   const pathLine = path
-    ? `Files under the Job Destination will be deleted:\n\n${path}`
-    : "Files under the Job Destination will be deleted.";
+    ? t("discard.unfinishedBodyWithPath", { path })
+    : t("discard.unfinishedBody");
 
   return {
     title,
-    body: `${pathLine}\n\nThis cannot be undone.`,
+    body: `${pathLine}\n\n${t("discard.cannotUndo")}`,
     confirmLabel,
     cancelLabel,
     deletesFiles,

@@ -3,7 +3,9 @@
 <UserControl
     x:Class="Phlegethon.Controls.ProbeSheetControl"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:automation="using:Microsoft.UI.Xaml.Automation"
+    x:Name="ProbeSheetRoot">
 
     <Grid Background="{ThemeResource GeistBackgroundBrush}">
         <Grid.RowDefinitions>
@@ -27,6 +29,7 @@
                 <!-- Probe source label -->
                 <StackPanel Grid.Column="0" VerticalAlignment="Center">
                     <TextBlock
+                        x:Name="ProbeTitleText"
                         Text="Select Format"
                         FontFamily="{ThemeResource GeistSansFont}"
                         FontSize="{ThemeResource GeistTypeSize16}"
@@ -47,6 +50,7 @@
                     Grid.Column="1"
                     x:Name="CancelButton"
                     Content="Cancel"
+                    automation:AutomationProperties.Name="Cancel"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize13}"
                     Height="{ThemeResource GeistButtonHeight}"
@@ -97,6 +101,7 @@
                     Grid.Column="1"
                     x:Name="SaveToButton"
                     Content="Save to…"
+                    automation:AutomationProperties.Name="Save to…"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize13}"
                     Height="{ThemeResource GeistButtonHeight}"
@@ -107,6 +112,7 @@
                     Grid.Column="2"
                     x:Name="ConfirmButton"
                     Content="Download Selected"
+                    automation:AutomationProperties.Name="Download Selected"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize14}"
                     MinWidth="140"
