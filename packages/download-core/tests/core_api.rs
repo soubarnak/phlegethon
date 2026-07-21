@@ -4323,13 +4323,21 @@ fn enqueue_accepts_absolute_destination_outside_library_root() {
         _ => panic!("expected enqueue_direct"),
     };
 
-    assert_eq!(destination, off_root);
+    assert!(
+        destination.starts_with(&off_root),
+        "Job Destination must nest under Save-to parent"
+    );
+    assert_ne!(
+        destination, off_root,
+        "Job Destination must be unique job-owned subfolder, not shared parent"
+    );
+    assert_eq!(destination.parent(), Some(off_root.as_path()));
     let snap = core
         .list_job_snapshots()
         .into_iter()
         .find(|s| s.job_id == job_id)
         .expect("job snapshot");
-    assert_eq!(snap.destination, off_root.display().to_string());
+    assert_eq!(snap.destination, destination.display().to_string());
 }
 
 #[test]
@@ -4379,7 +4387,11 @@ fn off_root_destination_persists_across_queue_reload() {
         .into_iter()
         .find(|s| s.job_id == job_id)
         .expect("reloaded job");
-    assert_eq!(snap.destination, off_root.display().to_string());
+    let dest = PathBuf::from(&snap.destination);
+    assert!(
+        dest.starts_with(&off_root) && dest != off_root,
+        "persisted Job Destination must remain nested under Save-to parent"
+    );
 }
 
 #[test]
@@ -4419,8 +4431,17 @@ fn confirm_probe_selection_accepts_absolute_destination_override() {
         .into_iter()
         .find(|s| s.job_id == job_ids[0])
         .expect("confirmed job");
-    assert_eq!(snap.destination, off_root.display().to_string());
-    assert!(!PathBuf::from(&snap.destination).starts_with(&root));
+    let dest = PathBuf::from(&snap.destination);
+    assert!(
+        dest.starts_with(&off_root) && dest != off_root,
+        "single-item Save-to must nest unique Job Destination under parent"
+    );
+    assert!(!dest.starts_with(&root));
+    let name = dest.file_name().unwrap().to_string_lossy();
+    assert!(
+        name.starts_with("Off_Root_Video-"),
+        "nested folder should use title prefix, got {name}"
+    );
 }
 
 #[test]
@@ -4466,7 +4487,11 @@ fn confirm_off_root_destination_persists_across_queue_reload() {
         .into_iter()
         .find(|s| s.job_id == job_id)
         .expect("reloaded confirm job");
-    assert_eq!(snap.destination, off_root.display().to_string());
+    let dest = PathBuf::from(&snap.destination);
+    assert!(
+        dest.starts_with(&off_root) && dest != off_root,
+        "persisted confirm Job Destination must remain nested under Save-to parent"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4552,7 +4577,7 @@ fn preview_probe_destination_shows_batch_subfolder_under_library_root() {
 }
 
 #[test]
-fn preview_probe_destination_shows_exact_path_for_single_save_to_override() {
+fn preview_probe_destination_shows_nested_pattern_for_single_save_to_override() {
     let mut toolchain = FakeExtractorToolchain::new();
     toolchain.insert(
         "https://www.youtube.com/watch?v=prev-exact",
@@ -4582,10 +4607,11 @@ fn preview_probe_destination_shows_exact_path_for_single_save_to_override() {
     let preview = core
         .preview_probe_destination(&selection, Some(off_root.clone()))
         .expect("preview");
+    let expected = off_root.join("Exact_Preview_Video-\u{2026}");
     assert_eq!(
         preview.path_display,
-        off_root.display().to_string(),
-        "single Save to… override must preview the exact Job Destination"
+        expected.display().to_string(),
+        "single Save to… override must preview nested job-owned Job Destination"
     );
 }
 
@@ -4748,5 +4774,247 @@ fn extractor_completed_removes_orphan_temp_siblings_under_job_destination() {
             .join("Orphan Temps Video [orphan-temps].mp4.ytdl")
             .exists(),
         ".ytdl orphan must be removed after Extractor Completed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: nest Job Destination + safe Discard (issue #46)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn single_item_save_to_nests_unique_job_destination_under_parent() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=nest-single",
+        "Nest Single Video",
+        "https://cdn.example.com/nest-single.mp4",
+        vec![("720p", "720p")],
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let shared = tmp.path().join("Downloads");
+    std::fs::create_dir_all(&shared).unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=nest-single")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=nest-single".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core
+        .confirm_probe_selection(&selection, Some(shared.clone()))
+        .unwrap();
+    let dest = PathBuf::from(
+        core.list_job_snapshots()
+            .into_iter()
+            .find(|s| s.job_id == job_ids[0])
+            .expect("job")
+            .destination,
+    );
+
+    assert_eq!(dest.parent(), Some(shared.as_path()));
+    assert_ne!(dest, shared);
+    let name = dest.file_name().unwrap().to_string_lossy();
+    assert!(
+        name.starts_with("Nest_Single_Video-"),
+        "expected title-derived nested folder, got {name}"
+    );
+}
+
+#[test]
+fn discard_save_to_override_deletes_only_job_owned_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let shared = tmp.path().join("shared-downloads");
+    std::fs::create_dir_all(&shared).unwrap();
+    let sibling = shared.join("keep-me.txt");
+    let foreign_part = shared.join("browser-download.part");
+    std::fs::write(&sibling, b"user file").unwrap();
+    std::fs::write(&foreign_part, b"browser partial").unwrap();
+
+    let (mut core, rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let (job_id, job_dir) = match core
+        .enqueue(
+            "https://example.com/override.zip",
+            Some(shared.clone()),
+        )
+        .unwrap()
+    {
+        EnqueueOutcome::EnqueueDirect {
+            job_id,
+            destination,
+        } => (job_id, destination),
+        _ => panic!("expected enqueue_direct"),
+    };
+
+    assert_eq!(job_dir.parent(), Some(shared.as_path()));
+    assert_ne!(job_dir, shared);
+
+    std::fs::create_dir_all(&job_dir).unwrap();
+    std::fs::write(job_dir.join("override.zip.part"), b"job partial").unwrap();
+
+    core.pause_job(&job_id).unwrap();
+    core.discard_job(&job_id).unwrap();
+
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)),
+        "should emit JobDiscarded, got {events:?}"
+    );
+    assert!(
+        !job_dir.exists(),
+        "Discard must remove job-owned destination tree"
+    );
+    assert!(
+        sibling.exists(),
+        "Discard must not wipe sibling files in shared Save-to parent"
+    );
+    assert!(
+        foreign_part.exists(),
+        "Discard must not wipe foreign .part files in shared parent"
+    );
+    assert!(
+        shared.exists(),
+        "shared Save-to parent must survive Discard"
+    );
+}
+
+#[test]
+fn extractor_cleanup_and_byte_totals_ignore_siblings_in_shared_parent() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=safe-siblings",
+        "Safe Siblings Video",
+        "https://cdn.youtube.com/safe-siblings.mp4",
+        vec![("720p", "720p")],
+    );
+    toolchain.leave_orphan_temps(&[
+        "Safe Siblings Video [safe-siblings].mp4.part",
+        "Safe Siblings Video [safe-siblings].mp4.ytdl",
+    ]);
+    let _chunks = toolchain.enable_slow_download(24, std::time::Duration::from_millis(10));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let shared = tmp.path().join("home").join("downloads");
+    std::fs::create_dir_all(&shared).unwrap();
+    let foreign_part = shared.join("chrome-other.part");
+    let foreign_keep = shared.join("photo.jpg");
+    // Large enough that inflated destination_byte_total would blow mid-progress.
+    let foreign_blob = vec![0u8; 2 * 1024 * 1024];
+    std::fs::write(&foreign_part, b"browser in-progress").unwrap();
+    std::fs::write(&foreign_keep, &foreign_blob).unwrap();
+
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=safe-siblings")
+        .unwrap();
+    collect_events(&rx);
+
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=safe-siblings".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+    };
+    let job_ids = core
+        .confirm_probe_selection(&selection, Some(shared.clone()))
+        .unwrap();
+    let job_id = job_ids[0].clone();
+    let job_dir = PathBuf::from(
+        core.list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .expect("job")
+            .destination,
+    );
+    assert_ne!(job_dir, shared);
+
+    let core = Arc::new(Mutex::new(core));
+    let worker = {
+        let core = core.clone();
+        std::thread::spawn(move || {
+            core.lock().unwrap().process_pending().unwrap();
+        })
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut max_progress = 0u64;
+    let mut saw_completed = false;
+    let mut completed_bytes = 0u64;
+
+    while std::time::Instant::now() < deadline {
+        for e in collect_events(&rx) {
+            match e {
+                CoreEvent::JobProgress {
+                    job_id: id,
+                    bytes_downloaded,
+                    ..
+                } if id == job_id => {
+                    max_progress = max_progress.max(bytes_downloaded);
+                    assert!(
+                        bytes_downloaded < foreign_blob.len() as u64,
+                        "destination_byte_total must ignore siblings in shared parent \
+                         (progress {bytes_downloaded} >= foreign {})",
+                        foreign_blob.len()
+                    );
+                }
+                CoreEvent::JobCompleted {
+                    job_id: id,
+                    bytes_written,
+                    ..
+                } if id == job_id => {
+                    saw_completed = true;
+                    completed_bytes = bytes_written;
+                }
+                _ => {}
+            }
+        }
+        if saw_completed {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    worker.join().unwrap();
+
+    assert!(saw_completed, "extractor job should complete");
+    assert!(
+        max_progress > 0 && max_progress < foreign_blob.len() as u64,
+        "mid-transfer progress must reflect job tree only, got max={max_progress}"
+    );
+    assert!(
+        completed_bytes < foreign_blob.len() as u64,
+        "Completed byte total must exclude shared-parent siblings, got {completed_bytes}"
+    );
+    assert!(
+        foreign_part.exists(),
+        "cleanup must not delete foreign .part in shared parent"
+    );
+    assert!(
+        foreign_keep.exists(),
+        "cleanup must not touch sibling files in shared parent"
+    );
+    assert!(
+        !job_dir
+            .join("Safe Siblings Video [safe-siblings].mp4.part")
+            .exists(),
+        "job-owned .part orphans must still be cleaned"
+    );
+    assert!(
+        !job_dir
+            .join("Safe Siblings Video [safe-siblings].mp4.ytdl")
+            .exists(),
+        "job-owned .ytdl orphans must still be cleaned"
     );
 }

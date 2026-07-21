@@ -249,8 +249,8 @@ pub unsafe extern "C" fn core_enqueue(
     )
 }
 
-/// Like [`core_enqueue`], but `destination` may be an absolute Job Destination
-/// override (null or empty = default under Library Root).
+/// Like [`core_enqueue`], but `destination` may be an absolute parent for a
+/// nested job-owned Job Destination (null or empty = default under Library Root).
 #[no_mangle]
 pub unsafe extern "C" fn core_enqueue_with_destination(
     handle: *mut Core,
@@ -354,7 +354,8 @@ pub unsafe extern "C" fn core_probe(
 /// Confirm a probe selection and create download jobs.
 ///
 /// `selection_json` is a [`ProbeSelection`] object.  Optional top-level
-/// `"destination"` (absolute path string) overrides the Job Destination.
+/// `"destination"` (absolute path string) is the Save-to parent; each job
+/// nests a unique Job Destination under it.
 ///
 /// On success writes a JSON array of job IDs to `out_json_buf`.
 /// Returns 0 on success, -1 on error.

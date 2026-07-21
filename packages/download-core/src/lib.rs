@@ -296,10 +296,11 @@ impl Core {
     /// created and ready to process.  For `ProbeThenConfirm`, the shell
     /// should present a probe sheet and call back with selections.
     ///
-    /// `destination` — optional absolute Job Destination override.  When
-    /// `None`, the destination is derived under the Library Root.  When
-    /// `Some`, it may be any absolute folder (including outside the Library
-    /// Root).  Relative paths are rejected.
+    /// `destination` — optional absolute parent for a job-owned Job
+    /// Destination.  When `None`, the destination is derived under the
+    /// Library Root.  When `Some`, Core creates a unique nested folder under
+    /// that absolute parent (including outside the Library Root) — never the
+    /// parent itself.  Relative paths are rejected.
     pub fn enqueue(
         &mut self,
         url_str: &str,
@@ -318,7 +319,9 @@ impl Core {
         match classification::classify(&parsed) {
             classification::Kind::EnqueueDirect => {
                 let job = match destination {
-                    Some(dest) => job::Job::new_at_destination(url_str.to_string(), dest),
+                    Some(dest) => {
+                        job::Job::new_with_source_at(url_str.to_string(), dest, None)
+                    }
                     None => job::Job::new(url_str.to_string(), root.clone()),
                 };
                 let job_id = job.id().to_string();
@@ -668,10 +671,10 @@ impl Core {
     /// Preview where [`Self::confirm_probe_selection`] will place Job
     /// Destinations, without creating jobs.
     ///
-    /// Single-item absolute overrides resolve to that exact folder.  Batch /
-    /// channel defaults (and multi-item overrides) include a sanitized source
-    /// subfolder under the Library Root `jobs/` segment (or under the override
-    /// parent), with an ellipsis standing in for the unique id suffix.
+    /// Always a unique nested Job Destination: under Library Root `jobs/` by
+    /// default, or under an absolute Save-to parent when overridden.  Preview
+    /// includes a sanitized source/title subfolder when available, with an
+    /// ellipsis standing in for the unique id suffix.
     pub fn preview_probe_destination(
         &self,
         selection: &ProbeSelection,
@@ -712,7 +715,6 @@ impl Core {
         let path = Self::preview_destination_path(
             root,
             destination.as_deref(),
-            selection.items.len(),
             job_source.as_deref(),
         );
 
@@ -734,13 +736,8 @@ impl Core {
     fn preview_destination_path(
         library_root: &Path,
         destination: Option<&Path>,
-        selection_len: usize,
         job_source: Option<&str>,
     ) -> PathBuf {
-        if destination.is_some() && selection_len == 1 {
-            return destination.expect("checked is_some").to_path_buf();
-        }
-
         let parent = match destination {
             Some(dest) => dest.to_path_buf(),
             None => library_root.join("jobs"),
@@ -761,13 +758,12 @@ impl Core {
     /// and lists which items at which qualities to download.  Returns the
     /// job IDs of the created jobs.
     ///
-    /// Each selected item creates one job.  Without `destination`, batch/
-    /// channel jobs use a dedicated Job Destination subfolder under the
-    /// Library Root derived from the source name.  With an absolute
-    /// `destination` override: a single selected item uses that folder as
-    /// its Job Destination; multiple selected items each get a unique
-    /// subfolder under it (same naming rules as under Library Root, without
-    /// an extra `jobs/` segment).
+    /// Each selected item creates one job with a unique job-owned Job
+    /// Destination.  Without `destination`, destinations live under the
+    /// Library Root `jobs/` segment (source/title naming when available).
+    /// With an absolute `destination` override, each item nests under that
+    /// parent (same naming rules, no extra `jobs/` segment) — never the
+    /// shared parent itself.
     ///
     /// Errors if no pending probe exists for the URL, or if the selection
     /// references unknown items or qualities.
@@ -799,7 +795,6 @@ impl Core {
         let items_map: HashMap<&str, &MediaItem> =
             probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
 
-        let single_override = destination.is_some() && selection.items.len() == 1;
         let mut job_ids = Vec::new();
 
         for sel in &selection.items {
@@ -826,12 +821,7 @@ impl Core {
 
             let job_source = Self::probe_job_source(probe, item);
 
-            let mut job = if single_override {
-                job::Job::new_at_destination(
-                    item.url.clone(),
-                    destination.clone().expect("single_override implies Some"),
-                )
-            } else if let Some(ref dest_parent) = destination {
+            let mut job = if let Some(ref dest_parent) = destination {
                 job::Job::new_with_source_at(item.url.clone(), dest_parent.clone(), job_source)
             } else {
                 job::Job::new_with_source(item.url.clone(), root.clone(), job_source)

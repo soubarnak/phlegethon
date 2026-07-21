@@ -113,12 +113,6 @@ impl Job {
         Self::assemble(id, url, destination, None)
     }
 
-    /// Create a job whose Job Destination is an absolute folder override.
-    pub fn new_at_destination(url: String, destination: PathBuf) -> Self {
-        let id = uuid::Uuid::new_v4().to_string();
-        Self::assemble(id, url, destination, None)
-    }
-
     /// Create a new job for a probe-then-confirm item.
     ///
     /// `source_name` is optional; when present (batch/channel), the Job
