@@ -19,6 +19,7 @@ mod job;
 mod job_signals;
 mod mirror_set;
 mod transfer;
+mod url_input;
 pub mod plugin_sidecar;
 mod storage;
 pub mod ytdlp_extractor;
@@ -49,6 +50,7 @@ pub use media_extras::{
     MediaExtrasCapabilities, MediaExtrasOptions, PostprocessOutcome,
 };
 pub use quality_policy::{select_default_quality, DefaultQualityPolicy, DEFAULT_MAX_HEIGHT};
+pub use url_input::{normalize_url, split_urls};
 
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
 use std::collections::HashMap;
@@ -72,6 +74,15 @@ pub struct JobSnapshot {
     pub status: String,
     pub bytes_downloaded: u64,
     pub total_bytes: Option<u64>,
+    pub title: String,
+}
+
+/// Match for a URL already active or queued in Core.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActiveJobMatch {
+    pub job_id: String,
+    pub url: String,
+    pub status: String,
     pub title: String,
 }
 
@@ -536,7 +547,8 @@ impl Core {
         url_str: &str,
         destination: Option<PathBuf>,
     ) -> Result<EnqueueOutcome, String> {
-        let parsed = url::Url::parse(url_str).map_err(|_| "invalid URL".to_string())?;
+        let url_str = normalize_url(url_str).ok_or_else(|| "invalid URL".to_string())?;
+        let parsed = url::Url::parse(&url_str).map_err(|_| "invalid URL".to_string())?;
         let root = self
             .library_root
             .as_ref()
@@ -550,9 +562,9 @@ impl Core {
             classification::Kind::EnqueueDirect => {
                 let job = match destination {
                     Some(dest) => {
-                        job::Job::new_with_source_at(url_str.to_string(), dest, None)
+                        job::Job::new_with_source_at(url_str.clone(), dest, None)
                     }
-                    None => job::Job::new(url_str.to_string(), root.clone()),
+                    None => job::Job::new(url_str.clone(), root.clone()),
                 };
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
@@ -565,11 +577,51 @@ impl Core {
                 })
             }
             classification::Kind::ProbeThenConfirm => {
-                Ok(EnqueueOutcome::ProbeThenConfirm {
-                    url: url_str.to_string(),
-                })
+                Ok(EnqueueOutcome::ProbeThenConfirm { url: url_str })
             }
         }
+    }
+
+    /// Find an active or queued job matching a normalized URL.
+    ///
+    /// Completed jobs are ignored. Pending probes for the same URL also match.
+    pub fn find_active_job_for_url(&self, url_str: &str) -> Option<ActiveJobMatch> {
+        let normalized = normalize_url(url_str)?;
+
+        for job in &self.jobs {
+            if job.state() == JobState::Completed {
+                continue;
+            }
+            if normalize_url(job.url()).as_deref() == Some(normalized.as_str()) {
+                let title = job
+                    .source()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| job.filename().to_string());
+                return Some(ActiveJobMatch {
+                    job_id: job.id().to_string(),
+                    url: job.url().to_string(),
+                    status: match job.state() {
+                        JobState::Pending => "pending",
+                        JobState::Paused => "paused",
+                        JobState::Failed => "failed",
+                        JobState::Completed => "completed",
+                    }
+                    .to_string(),
+                    title,
+                });
+            }
+        }
+
+        if self.pending_probes.contains_key(&normalized) {
+            return Some(ActiveJobMatch {
+                job_id: String::new(),
+                url: normalized.clone(),
+                status: "probing".to_string(),
+                title: normalized,
+            });
+        }
+
+        None
     }
 
     // -----------------------------------------------------------------------
@@ -1068,18 +1120,19 @@ impl Core {
     /// Errors (unknown URL, toolchain failure) produce a `ProbeFailed` event
     /// instead and return the error.
     pub fn probe(&mut self, url: &str) -> Result<ProbeResult, String> {
-        match self.extractor.probe(url, &self.cookie_channel) {
+        let url = normalize_url(url).ok_or_else(|| "invalid URL".to_string())?;
+        match self.extractor.probe(&url, &self.cookie_channel) {
             Ok(mut result) => {
                 self.mark_archived_probe_items(&mut result.items);
 
                 // Store for subsequent confirm
                 self.pending_probes
-                    .insert(url.to_string(), result.clone());
+                    .insert(url.clone(), result.clone());
 
                 // Emit event
                 self.event_tx
                     .send(CoreEvent::ProbeResult {
-                        url: url.to_string(),
+                        url: url.clone(),
                         items: result.items.clone(),
                         source_name: result.source_name.clone(),
                     })
@@ -1090,7 +1143,7 @@ impl Core {
             Err(err) => {
                 self.event_tx
                     .send(CoreEvent::ProbeFailed {
-                        url: url.to_string(),
+                        url: url.clone(),
                         error: err.clone(),
                     })
                     .map_err(|_| "event channel closed".to_string())?;
@@ -1124,10 +1177,12 @@ impl Core {
             return Err("selection has no items".to_string());
         }
 
-        let probe = self.pending_probes.get(&selection.url).ok_or_else(|| {
+        let url_key = normalize_url(&selection.url)
+            .ok_or_else(|| format!("invalid URL: {}", selection.url))?;
+        let probe = self.pending_probes.get(&url_key).ok_or_else(|| {
             format!(
                 "no pending probe for {}. Call probe() first.",
-                selection.url
+                url_key
             )
         })?;
 
@@ -1212,13 +1267,15 @@ impl Core {
             Self::require_absolute_destination(dest)?;
         }
 
+        let url_key = normalize_url(&selection.url)
+            .ok_or_else(|| format!("invalid URL: {}", selection.url))?;
         let probe = self
             .pending_probes
-            .get(&selection.url)
+            .get(&url_key)
             .ok_or_else(|| {
                 format!(
                     "no pending probe for {}. Call probe() first.",
-                    selection.url
+                    url_key
                 )
             })?;
 

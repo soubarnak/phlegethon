@@ -128,6 +128,12 @@ public class EventChannelService : IDisposable
     // URL enqueue
     // -----------------------------------------------------------------------
 
+    public IReadOnlyList<string> SplitUrls(string text) => _core.SplitUrls(text);
+
+    public string? NormalizeUrl(string url) => _core.NormalizeUrl(url);
+
+    public ActiveJobMatch? FindActiveJobForUrl(string url) => _core.FindActiveJobForUrl(url);
+
     /// <summary>
     /// Enqueue a URL. If classified as probe_then_confirm, the probe-result
     /// event will fire asynchronously.

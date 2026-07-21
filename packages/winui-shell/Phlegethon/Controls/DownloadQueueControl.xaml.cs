@@ -15,6 +15,7 @@ public class DownloadItemViewModel : INotifyPropertyChanged
 {
     private string _jobId = "";
     private string _title = "Untitled";
+    private string _url = "";
     private string _subtitle = "Queued";
     private string _destination = "";
     private string _statusIcon = "⋯";
@@ -35,6 +36,12 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     {
         get => _title;
         set => SetField(ref _title, value);
+    }
+
+    public string Url
+    {
+        get => _url;
+        set => SetField(ref _url, value);
     }
 
     public string Subtitle
@@ -169,7 +176,7 @@ public sealed partial class DownloadQueueControl : UserControl
     /// <summary>
     /// Add or update a job row.
     /// </summary>
-    public void AddOrUpdateJob(string jobId, string title, string subtitle, DownloadStatus status, double progress, string? destination = null)
+    public void AddOrUpdateJob(string jobId, string title, string subtitle, DownloadStatus status, double progress, string? destination = null, string? url = null)
     {
         // Find existing item
         foreach (var item in _items)
@@ -184,6 +191,10 @@ public sealed partial class DownloadQueueControl : UserControl
                 {
                     item.Destination = destination;
                 }
+                if (url != null)
+                {
+                    item.Url = url;
+                }
                 UpdateVisualStatus(item);
                 return;
             }
@@ -194,6 +205,7 @@ public sealed partial class DownloadQueueControl : UserControl
         {
             JobId = jobId,
             Title = title,
+            Url = url ?? "",
             Subtitle = subtitle,
             Destination = destination ?? "",
             Status = status,
@@ -276,6 +288,44 @@ public sealed partial class DownloadQueueControl : UserControl
                 return;
             }
         }
+    }
+
+    /// <summary>Scroll to and highlight a queue row by job id.</summary>
+    public bool FocusJob(string jobId)
+    {
+        for (var i = 0; i < _items.Count; i++)
+        {
+            if (_items[i].JobId != jobId)
+            {
+                continue;
+            }
+
+            DownloadList.SelectedIndex = i;
+            DownloadList.ScrollIntoView(_items[i]);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Find a row by normalized URL match.</summary>
+    public DownloadItemViewModel? FindItemByUrl(string normalizedUrl, Func<string, string?> normalize)
+    {
+        foreach (var item in _items)
+        {
+            if (string.IsNullOrEmpty(item.Url))
+            {
+                continue;
+            }
+
+            var itemNormalized = normalize(item.Url);
+            if (itemNormalized == normalizedUrl)
+            {
+                return item;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Remove a job row after confirmed Discard (or Core JobDiscarded).</summary>

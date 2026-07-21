@@ -1011,6 +1011,65 @@ pub unsafe extern "C" fn core_job_mirrors(
 }
 
 // ---------------------------------------------------------------------------
+// URL input helpers (#57)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn url_normalize_json(
+    url: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let url_str = cstr_to_str(url);
+        let json = match crate::normalize_url(url_str) {
+            Some(normalized) => serde_json::Value::String(normalized),
+            None => serde_json::Value::Null,
+        };
+        write_str_to_buf(&json.to_string(), out_json_buf, out_buf_len);
+        0
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn url_split_json(
+    text: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let text_str = cstr_to_str(text);
+        let urls = crate::split_urls(text_str);
+        let json = serde_json::to_string(&urls).unwrap_or_else(|_| "[]".to_string());
+        write_str_to_buf(&json, out_json_buf, out_buf_len);
+        0
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_find_active_job_for_url(
+    handle: *mut Core,
+    url: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    _error_buf: *mut c_char,
+    _error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let url_str = cstr_to_str(url);
+        let core_guard = ctx.core.lock().unwrap();
+        let core = &*core_guard;
+        let json = match core.find_active_job_for_url(url_str) {
+            Some(matched) => serde_json::to_string(&matched).unwrap_or_else(|_| "null".to_string()),
+            None => "null".to_string(),
+        };
+        write_str_to_buf(&json, out_json_buf, out_buf_len);
+        0
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Serialisation support for C ABI types
 // ---------------------------------------------------------------------------
 

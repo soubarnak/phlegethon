@@ -41,7 +41,7 @@
       <div id="queueList"></div>
     </div>
     <div class="shortcuts-hint">
-      <kbd>Ctrl+V</kbd> paste &amp; enqueue &nbsp;·&nbsp; <kbd>Esc</kbd> close probe sheet
+      <kbd>Ctrl+V</kbd> paste multiple URLs &nbsp;·&nbsp; <kbd>Esc</kbd> close probe sheet
     </div>
   </main>
 
@@ -126,6 +126,14 @@
           <input type="text" class="url-input" id="cookieFileInput" placeholder="Cookie file (absolute path)" />
           <button class="btn btn-primary" id="cookieChannelApply" type="button">Apply cookies</button>
         </div>
+        <label class="settings-label" for="clipboardWatcherInput">Clipboard watcher</label>
+        <p class="settings-help">When enabled, detected URLs fill the input bar. Downloads never start automatically.</p>
+        <div class="settings-row">
+          <label class="settings-checkbox">
+            <input type="checkbox" id="clipboardWatcherInput" />
+            Watch clipboard for URLs
+          </label>
+        </div>
       </div>
     </div>
   </div>
@@ -138,6 +146,19 @@
       <div class="confirm-actions">
         <button class="btn" id="discardConfirmCancel" type="button">Cancel</button>
         <button class="btn btn-danger" id="discardConfirmOk" type="button">Discard</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Duplicate URL confirmation -->
+  <div class="confirm-overlay" id="duplicateConfirmOverlay" hidden>
+    <div class="confirm-sheet" role="alertdialog" aria-modal="true" aria-labelledby="duplicateConfirmTitle" aria-describedby="duplicateConfirmBody">
+      <h2 id="duplicateConfirmTitle">URL already active</h2>
+      <p class="confirm-body" id="duplicateConfirmBody"></p>
+      <div class="confirm-actions">
+        <button class="btn" id="duplicateConfirmCancel" type="button">Cancel</button>
+        <button class="btn" id="duplicateConfirmFocus" type="button">Focus existing</button>
+        <button class="btn btn-primary" id="duplicateConfirmEnqueue" type="button">Enqueue anyway</button>
       </div>
     </div>
   </div>

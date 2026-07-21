@@ -273,6 +273,31 @@ internal static class CoreBridge
         int outBufLen,
         IntPtr errorBuf,
         int errorBufLen);
+
+    // -----------------------------------------------------------------------
+    // URL input helpers (#57)
+    // -----------------------------------------------------------------------
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int url_normalize_json(
+        string url,
+        IntPtr outJsonBuf,
+        int outBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int url_split_json(
+        string text,
+        IntPtr outJsonBuf,
+        int outBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_find_active_job_for_url(
+        IntPtr handle,
+        string url,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +506,43 @@ public class CoreHandle : IDisposable
         return CallWithJsonResult(
             (h, o, ol, e, el) => CoreBridge.core_drain_events_json(h, o, ol),
             _handle);
+    }
+
+    public string? NormalizeUrl(string url)
+    {
+        unsafe
+        {
+            byte* outBuf = stackalloc byte[BufSize];
+            var outPtr = new IntPtr(outBuf);
+            int result = CoreBridge.url_normalize_json(url, outPtr, BufSize);
+            if (result != 0) return null;
+            var json = Marshal.PtrToStringAnsi(outPtr) ?? "null";
+            return System.Text.Json.JsonSerializer.Deserialize<string?>(json);
+        }
+    }
+
+    public IReadOnlyList<string> SplitUrls(string text)
+    {
+        unsafe
+        {
+            byte* outBuf = stackalloc byte[BufSize];
+            var outPtr = new IntPtr(outBuf);
+            int result = CoreBridge.url_split_json(text, outPtr, BufSize);
+            if (result != 0) return Array.Empty<string>();
+            var json = Marshal.PtrToStringAnsi(outPtr) ?? "[]";
+            return System.Text.Json.JsonSerializer.Deserialize<List<string>>(json)
+                ?? new List<string>();
+        }
+    }
+
+    public ActiveJobMatch? FindActiveJobForUrl(string url)
+    {
+        var json = CallWithJsonResult(
+            (h, arg, o, ol, e, el) =>
+                CoreBridge.core_find_active_job_for_url(h, arg, o, ol, e, el),
+            _handle,
+            url);
+        return System.Text.Json.JsonSerializer.Deserialize<ActiveJobMatch?>(json);
     }
 
     private static void ThrowOnError(int result)

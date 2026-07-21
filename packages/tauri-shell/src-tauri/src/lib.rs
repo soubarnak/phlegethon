@@ -325,6 +325,25 @@ fn list_jobs(state: State<AppState>) -> Result<Vec<download_core::JobSnapshot>, 
 }
 
 #[tauri::command]
+fn normalize_url_cmd(url: String) -> Option<String> {
+    download_core::normalize_url(&url)
+}
+
+#[tauri::command]
+fn split_urls_cmd(text: String) -> Vec<String> {
+    download_core::split_urls(&text)
+}
+
+#[tauri::command]
+fn find_active_job_for_url(
+    state: State<AppState>,
+    url: String,
+) -> Result<Option<download_core::ActiveJobMatch>, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.find_active_job_for_url(&url))
+}
+
+#[tauri::command]
 fn pause_job(state: State<AppState>, job_id: String) -> Result<(), String> {
     // Validate + signal stop without blocking on process_pending's Core mutex.
     {
@@ -569,6 +588,9 @@ pub fn run() {
             pick_folder,
             process_pending,
             list_jobs,
+            normalize_url_cmd,
+            split_urls_cmd,
+            find_active_job_for_url,
             pause_job,
             resume_job,
             retry_job,

@@ -13,6 +13,15 @@ namespace Phlegethon;
 public sealed partial class MainWindow : Window
 {
     private readonly EventChannelService _eventService;
+    private readonly Microsoft.UI.Dispatching.DispatcherTimer _clipboardTimer;
+    private string? _lastClipboardUrl;
+
+    private enum DuplicateResolution
+    {
+        EnqueueAnyway,
+        FocusExisting,
+        Cancel,
+    }
 
     public MainWindow()
     {
@@ -24,6 +33,12 @@ public sealed partial class MainWindow : Window
         _eventService.OnJobFailed += OnJobFailed;
         _eventService.OnJobQueued += OnJobQueued;
         _eventService.OnJobDiscarded += OnJobDiscarded;
+
+        _clipboardTimer = new Microsoft.UI.Dispatching.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1.5),
+        };
+        _clipboardTimer.Tick += OnClipboardTimerTick;
 
         // Start the event loop background task
         _ = _eventService.StartEventLoopAsync();
@@ -75,25 +90,201 @@ public sealed partial class MainWindow : Window
     }
 
     // -----------------------------------------------------------------------
+    // URL input flows (#57)
+    // -----------------------------------------------------------------------
+
+    private async void OnEnqueueClick(object sender, RoutedEventArgs e)
+    {
+        await ProcessUrlInputAsync(UrlInput.Text);
+        UrlInput.Text = string.Empty;
+    }
+
+    private async void OnUrlInputKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        await ProcessUrlInputAsync(UrlInput.Text);
+        UrlInput.Text = string.Empty;
+    }
+
+    private async Task ProcessUrlInputAsync(string text)
+    {
+        var urls = _eventService.SplitUrls(text);
+        if (urls.Count == 0)
+        {
+            UrlStatusText.Text = "No valid HTTP(S) URLs found.";
+            return;
+        }
+
+        var enqueued = 0;
+        foreach (var url in urls)
+        {
+            var resolution = await ResolveDuplicateAsync(url);
+            if (resolution == DuplicateResolution.Cancel)
+            {
+                continue;
+            }
+
+            if (resolution == DuplicateResolution.FocusExisting)
+            {
+                continue;
+            }
+
+            _eventService.EnqueueUrl(url);
+            enqueued++;
+        }
+
+        UrlStatusText.Text = enqueued switch
+        {
+            0 => "No URLs enqueued.",
+            1 => $"Enqueued: {urls[0]}",
+            _ => $"Enqueued {enqueued} URLs.",
+        };
+    }
+
+    private async Task<DuplicateResolution> ResolveDuplicateAsync(string url)
+    {
+        var match = _eventService.FindActiveJobForUrl(url);
+        if (match == null)
+        {
+            return DuplicateResolution.EnqueueAnyway;
+        }
+
+        var dialog = new ContentDialog
+        {
+            Title = "URL already active",
+            Content = new TextBlock
+            {
+                Text = $"This URL is already {match.Status}:\n{match.Url}",
+                TextWrapping = TextWrapping.Wrap,
+                FontFamily = (Windows.UI.Xaml.Media.FontFamily)Application.Current.Resources["GeistSansFont"],
+            },
+            PrimaryButtonText = "Enqueue anyway",
+            SecondaryButtonText = "Focus existing",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Secondary,
+            XamlRoot = this.Content.XamlRoot,
+        };
+
+        var result = await dialog.ShowAsync();
+        return result switch
+        {
+            ContentDialogResult.Primary => DuplicateResolution.EnqueueAnyway,
+            ContentDialogResult.Secondary => FocusExistingForMatch(match)
+                ? DuplicateResolution.FocusExisting
+                : DuplicateResolution.Cancel,
+            _ => DuplicateResolution.Cancel,
+        };
+    }
+
+    private bool FocusExistingForMatch(ActiveJobMatch match)
+    {
+        if (!string.IsNullOrEmpty(match.JobId))
+        {
+            return DownloadQueueView.FocusJob(match.JobId);
+        }
+
+        var normalized = _eventService.NormalizeUrl(match.Url);
+        if (normalized == null)
+        {
+            return false;
+        }
+
+        var item = DownloadQueueView.FindItemByUrl(normalized, _eventService.NormalizeUrl);
+        if (item == null)
+        {
+            UrlStatusText.Text = "URL is already being probed.";
+            return true;
+        }
+
+        return DownloadQueueView.FocusJob(item.JobId);
+    }
+
+    private void OnClipboardWatcherChanged(object sender, RoutedEventArgs e)
+    {
+        if (ClipboardWatcherBox.IsChecked == true)
+        {
+            _lastClipboardUrl = null;
+            _clipboardTimer.Start();
+            UrlStatusText.Text = "Watching clipboard for URLs (will not auto-enqueue).";
+        }
+        else
+        {
+            _clipboardTimer.Stop();
+            _lastClipboardUrl = null;
+            UrlStatusText.Text = "Clipboard watcher off.";
+        }
+    }
+
+    private async void OnClipboardTimerTick(object? sender, object e)
+    {
+        if (ClipboardWatcherBox.IsChecked != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var dataPackage = Clipboard.GetContent();
+            if (!dataPackage.Contains(StandardDataFormats.Text))
+            {
+                return;
+            }
+
+            var text = await dataPackage.GetTextAsync();
+            var urls = _eventService.SplitUrls(text);
+            if (urls.Count == 0)
+            {
+                return;
+            }
+
+            var url = urls[0];
+            if (url == _lastClipboardUrl)
+            {
+                return;
+            }
+
+            _lastClipboardUrl = url;
+            UrlInput.Text = urls.Count == 1 ? url : string.Join(Environment.NewLine, urls);
+            UrlStatusText.Text = urls.Count == 1
+                ? "URL detected in clipboard — review and press Enqueue."
+                : $"{urls.Count} URLs detected in clipboard — review and press Enqueue.";
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Clipboard watcher error: {ex.Message}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Paste / Drop
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Handle a keyboard paste (Ctrl+V) — read clipboard text and enqueue.
+    /// Handle a keyboard paste (Ctrl+V) — split URLs and enqueue.
     /// </summary>
     private async void OnPaste(object sender, RoutedEventArgs e)
     {
         var dataPackage = Clipboard.GetContent();
-        if (dataPackage.Contains(StandardDataFormats.Text))
+        if (!dataPackage.Contains(StandardDataFormats.Text))
         {
-            var text = await dataPackage.GetTextAsync();
-            if (Uri.TryCreate(text, UriKind.Absolute, out var uri) &&
-                (uri.Scheme == "http" || uri.Scheme == "https"))
-            {
-                _eventService.EnqueueUrl(text);
-                UrlStatusText.Text = $"Enqueued: {text}";
-            }
+            return;
         }
+
+        var text = await dataPackage.GetTextAsync();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        e.Handled = true;
+        UrlInput.Text = text;
+        await ProcessUrlInputAsync(text);
+        UrlInput.Text = string.Empty;
     }
 
     /// <summary>
@@ -106,14 +297,13 @@ public sealed partial class MainWindow : Window
         if (e.DataView.Contains(StandardDataFormats.Text))
         {
             var text = await e.DataView.GetTextAsync();
-            if (Uri.TryCreate(text, UriKind.Absolute, out var uri) &&
-                (uri.Scheme == "http" || uri.Scheme == "https"))
-            {
-                _eventService.EnqueueUrl(text);
-                UrlStatusText.Text = $"Enqueued from drop: {text}";
-            }
+            UrlInput.Text = text;
+            await ProcessUrlInputAsync(text);
+            UrlInput.Text = string.Empty;
+            return;
         }
-        else if (e.DataView.Contains(StandardDataFormats.StorageItems))
+
+        if (e.DataView.Contains(StandardDataFormats.StorageItems))
         {
             var items = await e.DataView.GetStorageItemsAsync();
             foreach (var item in items)
@@ -121,25 +311,26 @@ public sealed partial class MainWindow : Window
                 if (item is StorageFile file && file.FileType == ".url")
                 {
                     var text = await FileIO.ReadTextAsync(file);
-                    _eventService.EnqueueUrl(text);
-                    UrlStatusText.Text = $"Enqueued from file: {text}";
+                    await ProcessUrlInputAsync(text);
                 }
             }
         }
     }
 
     /// <summary>
-    /// Handle "Add URL" button click — show a simple dialog for URL entry.
+    /// Handle "Add URL" button click — show a dialog for URL entry.
     /// </summary>
     private async void OnAddUrlClick(object sender, RoutedEventArgs e)
     {
         var dialog = new ContentDialog
         {
-            Title = "Add Download URL",
+            Title = "Add Download URL(s)",
             Content = new TextBox
             {
                 PlaceholderText = "https://example.com/video.mp4",
-                AcceptsReturn = false,
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap,
+                MinHeight = 96,
                 FontFamily = (Windows.UI.Xaml.Media.FontFamily)Application.Current.Resources["GeistMonoFont"],
             },
             PrimaryButtonText = "Add",
@@ -149,15 +340,16 @@ public sealed partial class MainWindow : Window
         };
 
         var result = await dialog.ShowAsync();
-        if (result == ContentDialogResult.Primary)
+        if (result != ContentDialogResult.Primary)
         {
-            var textBox = (TextBox)dialog.Content;
-            var url = textBox.Text.Trim();
-            if (!string.IsNullOrEmpty(url))
-            {
-                _eventService.EnqueueUrl(url);
-                UrlStatusText.Text = $"Enqueued: {url}";
-            }
+            return;
+        }
+
+        var textBox = (TextBox)dialog.Content;
+        var text = textBox.Text.Trim();
+        if (!string.IsNullOrEmpty(text))
+        {
+            await ProcessUrlInputAsync(text);
         }
     }
 
@@ -188,7 +380,8 @@ public sealed partial class MainWindow : Window
                 subtitle,
                 DownloadStatus.Queued,
                 0,
-                string.IsNullOrEmpty(args.Destination) ? null : args.Destination);
+                string.IsNullOrEmpty(args.Destination) ? null : args.Destination,
+                args.Url);
         });
     }
 

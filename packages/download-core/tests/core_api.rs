@@ -6353,3 +6353,70 @@ fn cookie_channel_rejects_relative_cookie_file() {
     assert!(err.contains("absolute path"), "got: {err}");
 }
 
+// ---------------------------------------------------------------------------
+// URL input: normalization, multi-paste, duplicate detection (#57)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn normalize_url_strips_fragment_and_trailing_slash_on_enqueue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let result = core
+        .enqueue("https://example.com/file.zip/#skip", None)
+        .unwrap();
+    let job_id = match result {
+        EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
+        _ => panic!("expected enqueue_direct"),
+    };
+
+    let snapshot = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|s| s.job_id == job_id)
+        .unwrap();
+    assert_eq!(snapshot.url, "https://example.com/file.zip");
+}
+
+#[test]
+fn split_urls_splits_multiline_paste() {
+    use download_core::split_urls;
+    let text = "https://a.example/one\nhttps://b.example/two";
+    assert_eq!(
+        split_urls(text),
+        vec![
+            "https://a.example/one".to_string(),
+            "https://b.example/two".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn find_active_job_for_url_matches_pending_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    let matched = core
+        .find_active_job_for_url("https://example.com/file.zip/#frag")
+        .unwrap();
+    assert_eq!(matched.job_id, job_id);
+    assert_eq!(matched.status, "pending");
+}
+
+#[test]
+fn find_active_job_for_url_ignores_completed_jobs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.process_pending().unwrap();
+
+    assert!(core
+        .find_active_job_for_url("https://example.com/file.zip")
+        .is_none());
+}
+

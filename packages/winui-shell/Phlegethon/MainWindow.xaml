@@ -23,50 +23,86 @@
             BorderBrush="{ThemeResource GeistBorderBrush}"
             BorderThickness="0,0,0,1"
             Padding="{ThemeResource GeistSpace5}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
+            <StackPanel Spacing="8">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
 
-                <!-- App title -->
-                <TextBlock
-                    Grid.Column="0"
-                    Text="Phlegethon"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize16}"
-                    FontWeight="{ThemeResource GeistTypeWeightSemiBold}"
-                    VerticalAlignment="Center"
-                    Margin="0,0,16,0" />
+                    <TextBlock
+                        Grid.Column="0"
+                        Text="Phlegethon"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize16}"
+                        FontWeight="{ThemeResource GeistTypeWeightSemiBold}"
+                        VerticalAlignment="Center"
+                        Margin="0,0,16,0" />
 
-                <!-- URL input area: paste hint + status -->
-                <TextBlock
-                    Grid.Column="1"
-                    x:Name="UrlStatusText"
-                    Text="Paste a URL or drop a file/link to start"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize13}"
-                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                    VerticalAlignment="Center"
-                    TextWrapping="NoWrap"
-                    TextTrimming="CharacterEllipsis" />
+                    <TextBox
+                        Grid.Column="1"
+                        x:Name="UrlInput"
+                        PlaceholderText="Paste or type URL(s)… then press Enter or Enqueue"
+                        FontFamily="{ThemeResource GeistMonoFont}"
+                        FontSize="{ThemeResource GeistTypeSize13}"
+                        AcceptsReturn="True"
+                        TextWrapping="Wrap"
+                        MaxHeight="96"
+                        KeyDown="OnUrlInputKeyDown" />
 
-                <!-- Add URL button -->
-                <Button
-                    Grid.Column="2"
-                    x:Name="AddUrlButton"
-                    Content="Add URL"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize14}"
-                    Height="{ThemeResource GeistButtonHeight}"
-                    Click="OnAddUrlClick">
-                    <Button.Resources>
-                        <SolidColorBrush x:Key="ButtonBackground" Color="{ThemeResource GeistGray1000}" />
-                        <SolidColorBrush x:Key="ButtonForeground" Color="{ThemeResource GeistBackground100}" />
-                    </Button.Resources>
-                </Button>
-            </Grid>
+                    <Button
+                        Grid.Column="2"
+                        x:Name="EnqueueButton"
+                        Content="Enqueue"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize14}"
+                        Height="{ThemeResource GeistButtonHeight}"
+                        Margin="8,0,0,0"
+                        Click="OnEnqueueClick">
+                        <Button.Resources>
+                            <SolidColorBrush x:Key="ButtonBackground" Color="{ThemeResource GeistGray1000}" />
+                            <SolidColorBrush x:Key="ButtonForeground" Color="{ThemeResource GeistBackground100}" />
+                        </Button.Resources>
+                    </Button>
+
+                    <Button
+                        Grid.Column="3"
+                        x:Name="AddUrlButton"
+                        Content="Add URL"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize14}"
+                        Height="{ThemeResource GeistButtonHeight}"
+                        Margin="8,0,0,0"
+                        Click="OnAddUrlClick" />
+                </Grid>
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock
+                        Grid.Column="0"
+                        x:Name="UrlStatusText"
+                        Text="Paste multiple URLs to enqueue or probe them"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                        TextTrimming="CharacterEllipsis" />
+
+                    <CheckBox
+                        Grid.Column="1"
+                        x:Name="ClipboardWatcherBox"
+                        Content="Watch clipboard"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Checked="OnClipboardWatcherChanged"
+                        Unchecked="OnClipboardWatcherChanged" />
+                </Grid>
+            </StackPanel>
         </Border>
 
         <!-- Content area -->

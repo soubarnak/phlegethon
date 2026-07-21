@@ -6,6 +6,12 @@
 
 import { buildDiscardConfirmCopy } from "./discardConfirm.js";
 import { displayProgressPercent } from "./progressPercent.js";
+import { createClipboardWatcher } from "./clipboardWatcher.js";
+import {
+  createUrlInputApi,
+  processUrlInput,
+  resolveDuplicateUrl,
+} from "./urlInput.js";
 
 // Resolve Tauri APIs lazily — withGlobalTauri must be enabled in tauri.conf.json.
 function getInvoke() {
@@ -35,7 +41,10 @@ const state = {
   /** Per-probe media extras override (pre-filled from settings). */
   probeMediaExtras: null,
   mediaExtrasCapabilities: null,
+  clipboardWatcherEnabled: false,
 };
+
+const urlInputApi = createUrlInputApi(getInvoke);
 
 // ---- DOM refs ----
 const $ = (id) => document.getElementById(id);
@@ -86,6 +95,16 @@ const discardConfirmTitle = $("discardConfirmTitle");
 const discardConfirmBody = $("discardConfirmBody");
 const discardConfirmCancel = $("discardConfirmCancel");
 const discardConfirmOk = $("discardConfirmOk");
+const duplicateConfirmOverlay = $("duplicateConfirmOverlay");
+const duplicateConfirmTitle = $("duplicateConfirmTitle");
+const duplicateConfirmBody = $("duplicateConfirmBody");
+const duplicateConfirmCancel = $("duplicateConfirmCancel");
+const duplicateConfirmFocus = $("duplicateConfirmFocus");
+const duplicateConfirmEnqueue = $("duplicateConfirmEnqueue");
+const clipboardWatcherInput = $("clipboardWatcherInput");
+
+/** @type {{ resolve: (choice: "enqueue" | "focus" | "cancel") => void } | null} */
+let duplicateConfirmWaiter = null;
 
 /** @type {{ resolve: (ok: boolean) => void } | null} */
 let discardConfirmWaiter = null;
@@ -107,25 +126,58 @@ const savedTheme = localStorage.getItem("phlegethon-theme");
 if (savedTheme) setTheme(savedTheme);
 
 // ---- URL Enqueue ----
-async function enqueueUrl(url) {
-  if (!url || !url.trim()) {
+async function enqueueOneUrl(url) {
+  const args = { url };
+  if (state.saveToDestination) {
+    args.destination = state.saveToDestination;
+  }
+  const result = await getInvoke()("enqueue_url", args);
+  handleEnqueueResult(url, result);
+}
+
+async function enqueueUrlInput(text) {
+  if (!text || !text.trim()) {
     showError("Paste or type a URL first.");
     urlInput.focus();
     return;
   }
-  const trimmed = url.trim();
 
   try {
-    const invoke = getInvoke();
-    const args = { url: trimmed };
-    if (state.saveToDestination) {
-      args.destination = state.saveToDestination;
+    const { enqueued, total } = await processUrlInput(
+      {
+        splitUrls: (value) => urlInputApi.splitUrls(value),
+        resolveDuplicate: (url) =>
+          resolveDuplicateUrl(
+            {
+              findActiveJobForUrl: (value) =>
+                urlInputApi.findActiveJobForUrl(value),
+              confirmDuplicate: confirmDuplicate,
+              focusExisting: focusExistingJob,
+            },
+            url,
+          ),
+        enqueueOne: enqueueOneUrl,
+      },
+      text.trim(),
+    );
+
+    if (total === 0) {
+      showError("No valid HTTP(S) URLs found.");
+      return;
     }
-    const result = await invoke("enqueue_url", args);
-    handleEnqueueResult(trimmed, result);
+
+    if (enqueued === 0) {
+      return;
+    }
+
+    urlInput.value = "";
   } catch (err) {
     showError(`Enqueue failed: ${err}`);
   }
+}
+
+async function enqueueUrl(url) {
+  await enqueueUrlInput(url);
 }
 
 function handleEnqueueResult(url, result) {
@@ -140,32 +192,72 @@ function handleEnqueueResult(url, result) {
   }
 }
 
-enqueueBtn.addEventListener("click", () => enqueueUrl(urlInput.value));
+enqueueBtn.addEventListener("click", () => enqueueUrlInput(urlInput.value));
 urlInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
+  if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    enqueueUrl(urlInput.value);
+    enqueueUrlInput(urlInput.value);
   }
 });
+
+function closeDuplicateConfirm(choice) {
+  if (!duplicateConfirmOverlay.hidden) {
+    duplicateConfirmOverlay.hidden = true;
+  }
+  const waiter = duplicateConfirmWaiter;
+  duplicateConfirmWaiter = null;
+  if (waiter) {
+    waiter.resolve(choice);
+  }
+}
+
+function confirmDuplicate(match) {
+  duplicateConfirmTitle.textContent = "URL already active";
+  duplicateConfirmBody.textContent = `This URL is already ${match.status}:\n${match.url}`;
+  duplicateConfirmOverlay.hidden = false;
+  duplicateConfirmFocus.focus();
+
+  return new Promise((resolve) => {
+    duplicateConfirmWaiter = { resolve };
+  });
+}
+
+duplicateConfirmCancel.addEventListener("click", () =>
+  closeDuplicateConfirm("cancel"),
+);
+duplicateConfirmFocus.addEventListener("click", () =>
+  closeDuplicateConfirm("focus"),
+);
+duplicateConfirmEnqueue.addEventListener("click", () =>
+  closeDuplicateConfirm("enqueue"),
+);
+duplicateConfirmOverlay.addEventListener("click", (e) => {
+  if (e.target === duplicateConfirmOverlay) {
+    closeDuplicateConfirm("cancel");
+  }
+});
+
+async function focusExistingJob(match) {
+  if (match.job_id) {
+    state.selectedJobId = match.job_id;
+    renderQueue();
+    const row = queueList.querySelector(`[data-job-id="${match.job_id}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+    return;
+  }
+
+  showError("URL is already being probed.");
+}
 
 // ---- Paste handler (Ctrl+V anywhere) ----
 document.addEventListener("paste", (e) => {
   const text = e.clipboardData?.getData("text") || "";
-  if (text && isValidUrl(text)) {
-    e.preventDefault();
-    urlInput.value = text;
-    enqueueUrl(text);
-  }
-});
+  if (!text.trim()) return;
 
-function isValidUrl(str) {
-  try {
-    new URL(str);
-    return str.startsWith("http://") || str.startsWith("https://");
-  } catch {
-    return false;
-  }
-}
+  e.preventDefault();
+  urlInput.value = text;
+  void enqueueUrlInput(text);
+});
 
 // ---- Drag & Drop ----
 document.addEventListener("dragenter", (e) => {
@@ -193,8 +285,9 @@ document.addEventListener("drop", (e) => {
   dragOverlay.classList.remove("show");
 
   const text = e.dataTransfer?.getData("text") || "";
-  if (text && isValidUrl(text)) {
-    enqueueUrl(text);
+  if (text.trim()) {
+    urlInput.value = text;
+    void enqueueUrlInput(text);
     return;
   }
 
@@ -607,6 +700,10 @@ probeOverlay.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    if (!duplicateConfirmOverlay.hidden) {
+      closeDuplicateConfirm("cancel");
+      return;
+    }
     if (!discardConfirmOverlay.hidden) {
       closeDiscardConfirm(false);
       return;
@@ -1089,6 +1186,8 @@ async function openSettings() {
     remuxDefault.checked = Boolean(mediaDefaults.remux);
     cookiesFromBrowserInput.value = cookieChannel.cookies_from_browser || "";
     cookieFileInput.value = cookieChannel.cookie_file || "";
+    const watcherPref = localStorage.getItem("phlegethon-clipboard-watcher") === "1";
+    clipboardWatcherInput.checked = watcherPref;
     applyEmbedAvailability(settingsOverlay, caps);
     if (!caps.ffmpeg_available && caps.embed_disabled_reason) {
       mediaExtrasFfmpegNote.textContent = caps.embed_disabled_reason;
@@ -1202,6 +1301,41 @@ cookieChannelApply.addEventListener("click", async () => {
   }
 });
 
+const clipboardWatcher = createClipboardWatcher({
+  readClipboardText: async () => {
+    if (!navigator.clipboard?.readText) {
+      throw new Error("clipboard unavailable");
+    }
+    return navigator.clipboard.readText();
+  },
+  splitUrls: (text) => urlInputApi.splitUrls(text),
+  onUrlsDetected(urls) {
+    urlInput.value = urls.join("\n");
+    showError(
+      urls.length === 1
+        ? "URL detected in clipboard — review and press Enqueue."
+        : `${urls.length} URLs detected in clipboard — review and press Enqueue.`,
+    );
+  },
+});
+
+function applyClipboardWatcherPreference(enabled) {
+  state.clipboardWatcherEnabled = enabled;
+  localStorage.setItem(
+    "phlegethon-clipboard-watcher",
+    enabled ? "1" : "0",
+  );
+  if (enabled) {
+    clipboardWatcher.start();
+  } else {
+    clipboardWatcher.stop();
+  }
+}
+
+clipboardWatcherInput?.addEventListener("change", () => {
+  applyClipboardWatcherPreference(clipboardWatcherInput.checked);
+});
+
 // ---- Init ----
 document.addEventListener("DOMContentLoaded", async () => {
   urlInput.focus();
@@ -1217,6 +1351,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   pollEvents();
   startProcessPendingLoop();
+  applyClipboardWatcherPreference(
+    localStorage.getItem("phlegethon-clipboard-watcher") === "1",
+  );
   await refreshJobs();
 });
 
