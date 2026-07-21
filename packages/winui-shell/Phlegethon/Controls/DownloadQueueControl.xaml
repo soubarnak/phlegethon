@@ -7,6 +7,14 @@
     xmlns:automation="using:Microsoft.UI.Xaml.Automation"
     xmlns:controls="using:Phlegethon.Controls">
 
+    <UserControl.Resources>
+        <x:String x:Key="QueueActionMoveUp">Move up</x:String>
+        <x:String x:Key="QueueActionMoveDown">Move down</x:String>
+        <x:String x:Key="QueueActionDiscard">Discard</x:String>
+        <x:String x:Key="QueueActionReveal">Reveal in folder</x:String>
+        <x:String x:Key="QueueActionOpen">Open file</x:String>
+    </UserControl.Resources>
+
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -31,6 +39,7 @@
                 </Grid.ColumnDefinitions>
                 <TextBlock
                     Grid.Column="0"
+                    x:Name="QueueHeaderText"
                     Text="Queue"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize13}"
@@ -192,8 +201,8 @@
                                     Width="28"
                                     Padding="0"
                                     Click="OnMoveUpClick"
-                                    automation:AutomationProperties.Name="Move up"
-                                    ToolTipService.ToolTip="Move up" />
+                                    automation:AutomationProperties.Name="{StaticResource QueueActionMoveUp}"
+                                    ToolTipService.ToolTip="{StaticResource QueueActionMoveUp}" />
                                 <Button
                                     Content="↓"
                                     FontFamily="{ThemeResource GeistSansFont}"
@@ -202,8 +211,8 @@
                                     Width="28"
                                     Padding="0"
                                     Click="OnMoveDownClick"
-                                    automation:AutomationProperties.Name="Move down"
-                                    ToolTipService.ToolTip="Move down" />
+                                    automation:AutomationProperties.Name="{StaticResource QueueActionMoveDown}"
+                                    ToolTipService.ToolTip="{StaticResource QueueActionMoveDown}" />
                                 <Button
                                     Content="{Binding ActionLabel}"
                                     FontFamily="{ThemeResource GeistSansFont}"
@@ -215,16 +224,16 @@
                                     automation:AutomationProperties.Name="{Binding ActionLabel}"
                                     Visibility="{Binding PrimaryActionVisible}" />
                                 <Button
-                                    Content="Discard"
+                                    Content="{StaticResource QueueActionDiscard}"
                                     FontFamily="{ThemeResource GeistSansFont}"
                                     FontSize="{ThemeResource GeistTypeSize12}"
                                     Height="28"
                                     MinWidth="64"
                                     Padding="8,0"
                                     Click="OnDiscardClick"
-                                    automation:AutomationProperties.Name="Discard" />
+                                    automation:AutomationProperties.Name="{StaticResource QueueActionDiscard}" />
                                 <Button
-                                    Content="Reveal"
+                                    Content="{StaticResource QueueActionReveal}"
                                     FontFamily="{ThemeResource GeistSansFont}"
                                     FontSize="{ThemeResource GeistTypeSize12}"
                                     Height="28"
@@ -232,10 +241,10 @@
                                     Padding="8,0"
                                     Click="OnRevealClick"
                                     Visibility="{Binding CompletedActionsVisible}"
-                                    automation:AutomationProperties.Name="Reveal in folder"
-                                    ToolTipService.ToolTip="Reveal in folder" />
+                                    automation:AutomationProperties.Name="{StaticResource QueueActionReveal}"
+                                    ToolTipService.ToolTip="{StaticResource QueueActionReveal}" />
                                 <Button
-                                    Content="Open"
+                                    Content="{StaticResource QueueActionOpen}"
                                     FontFamily="{ThemeResource GeistSansFont}"
                                     FontSize="{ThemeResource GeistTypeSize12}"
                                     Height="28"
@@ -243,8 +252,8 @@
                                     Padding="8,0"
                                     Click="OnOpenClick"
                                     Visibility="{Binding CompletedActionsVisible}"
-                                    automation:AutomationProperties.Name="Open file"
-                                    ToolTipService.ToolTip="Open file" />
+                                    automation:AutomationProperties.Name="{StaticResource QueueActionOpen}"
+                                    ToolTipService.ToolTip="{StaticResource QueueActionOpen}" />
                             </StackPanel>
                         </Grid>
                     </Border>

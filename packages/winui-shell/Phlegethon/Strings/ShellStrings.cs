@@ -33,6 +33,7 @@ public static class ShellStrings
     }
 
     // Static accessors for XAML x:Bind in data templates.
+    public static string QueueTitle => Get("queue.title");
     public static string QueueActionMoveUp => Get("queue.action.moveUp");
     public static string QueueActionMoveDown => Get("queue.action.moveDown");
     public static string QueueActionDiscard => Get("queue.action.discard");

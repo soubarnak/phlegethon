@@ -175,6 +175,13 @@ public sealed partial class DownloadQueueControl : UserControl
 
     private void ApplyLocalizedStrings()
     {
+        QueueHeaderText.Text = ShellStrings.Get("queue.title");
+        Resources["QueueActionMoveUp"] = ShellStrings.Get("queue.action.moveUp");
+        Resources["QueueActionMoveDown"] = ShellStrings.Get("queue.action.moveDown");
+        Resources["QueueActionDiscard"] = ShellStrings.Get("queue.action.discard");
+        Resources["QueueActionReveal"] = ShellStrings.Get("queue.action.reveal");
+        Resources["QueueActionOpen"] = ShellStrings.Get("queue.action.open");
+
         QueueSearchBox.PlaceholderText = ShellStrings.Get("queue.search.placeholder");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             QueueSearchBox, ShellStrings.Get("queue.search.label"));
