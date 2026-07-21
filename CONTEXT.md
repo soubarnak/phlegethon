@@ -17,8 +17,8 @@ The destination of the current wayfinding effort — a product and engineering s
 _Avoid_: MVP build, working prototype (as the map destination)
 
 **Chrome Companion**:
-A browser extension that hands URLs, cookies, or download intents to the desktop Download Manager; optional for the first shippable desktop slice.
-_Avoid_: required for basic downloads, browser-only downloader
+A browser extension that hands URLs, cookies, or download intents to the desktop Download Manager; optional for the first shippable desktop slice. Cookie hand-off uses the same Core cookie channel as desktop `cookies-from-browser` / cookie-file settings.
+_Avoid_: required for basic downloads, browser-only downloader, a second unrelated cookie store
 
 **Launch Site**:
 One of the four equal v1 must-have sources: YouTube, xxxbp.tv, luxuretv, and xHamster — each must meet the hand-off spec’s probe/download acceptance bar (at minimum single-video probe and quality list; multi-item list pages where the site supports them).
@@ -44,21 +44,33 @@ _Avoid_: relying on upstream merge for gap sites, user-installed untrusted plugi
 The default flow for multi-item sources (channels, playlists, batches): discover items and qualities, present a selectable list (all selected by default), start downloads only after explicit user confirmation.
 _Avoid_: silent full-channel download, auto-start without review
 
+**Default Quality Policy**:
+Settings-backed rule for pre-selecting probe qualities (default: best ≤ 1080p, prefer mp4). The probe sheet still lets the user override per item; audio-only mode, when enabled, overrides this video policy.
+_Avoid_: forcing best-available with no height cap as the only option, hiding overrides, remembering-per-host as a substitute for an explicit default
+
+**Download Archive**:
+A Library Root–scoped record of completed media identities used to detect “already downloaded” items during probe and to back History. Probe marks archived items; confirm skips them by default unless the user re-selects for re-download.
+_Avoid_: filename-only matching as the primary detector, a separate History store that disagrees with the archive
+
+**Filename Template**:
+A settings-backed naming pattern for extractor job outputs using a small yt-dlp-like variable set (title, id, uploader, upload_date, ext). Plain HTTP jobs keep URL-derived names unless overridden. Collisions get a numeric suffix; completed files are never overwritten silently.
+_Avoid_: arbitrary full yt-dlp template passthrough as the only mode, fixed non-configurable names only
+
 **Library Root**:
 The user-chosen base directory that is the default parent for Job Destinations; set in settings, not hardcoded by the app.
 _Avoid_: hardcoded save path, app-managed-only storage, required parent of every override path
 
 **Job Destination**:
-The folder where a specific download job writes its files — by default a path under the Library Root (batch/channel jobs get a dedicated subfolder derived from the source); the user may override it to any absolute folder on disk for that job.
-_Avoid_: scattering batch items across unrelated folders by default, requiring every job to stay under Library Root
+The folder where a specific download job writes its files — always a job-owned directory (unique under Library Root by default, or a unique subfolder under a user-picked absolute parent when Save-to overrides). The job never treats a shared user folder as its own destination.
+_Avoid_: scattering batch items across unrelated folders by default, writing single-item overrides into a shared folder verbatim, requiring every job to stay under Library Root
 
 **Discard**:
 User action that removes a job from the queue; for in-flight, Paused, or Failed jobs it also stops the transfer and deletes that job’s files under its Job Destination (including partials); for Completed jobs it removes the queue row only and leaves files on disk.
 _Avoid_: Cancel (as the product name for this action), Pause, deleting Completed outputs, leaving orphaned partials after removing an unfinished job
 
 **Resumable Transfer**:
-A download that can continue from the last successful byte after interruption, with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded.
-_Avoid_: restart-from-zero on every failure, silent delete of partials
+A download that can continue from the last successful byte after interruption (including app exit or crash), with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded. On relaunch, jobs that were Downloading auto-resume; user-Paused stay Paused; Failed stay Failed until Retry.
+_Avoid_: restart-from-zero on every failure, silent delete of partials, requiring manual Resume after every crash for in-flight jobs
 
 **Segmented Transfer**:
 A general HTTP(S) download that uses multiple concurrent Range connections when the server allows, falling back to a single connection otherwise.
@@ -67,6 +79,14 @@ _Avoid_: always-single-connection only, requiring Range for every host
 **Mirror Set**:
 A set of equivalent source URLs for one job, discovered from structured sources (Metalink / `.meta4` and page-local mirror lists) or added by the user — not from web-wide hash/filename search.
 _Avoid_: web-wide mirror search engines as v1 discovery
+
+**Integrity Check**:
+Post-completion verification against a known hash when one is available (metalink, sidecar, or user-supplied); if no expected hash exists, the job completes without verification. Mismatch marks the job Failed and leaves the file on disk for the user to inspect, Retry, or Discard.
+_Avoid_: failing jobs that have no hash, auto-deleting mismatched files, requiring hashes for Launch Site media
+
+**Active Job Limit**:
+The maximum number of jobs allowed to transfer at once (default 3, user-configurable). Queue order controls which waiting jobs start next; an already-active job is not preempted when the queue is reordered.
+_Avoid_: unlimited simultaneous jobs as the default, preempting in-flight transfers on reorder
 
 **Bandwidth Cap**:
 An optional global and/or per-job throughput limit; default is uncapped. Schedule-based caps (e.g. nights-only) are out of v1.
