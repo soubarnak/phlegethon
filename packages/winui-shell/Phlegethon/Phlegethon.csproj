@@ -12,6 +12,8 @@
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>true</EnableMsixTooling>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <WindowsPackageType>None</WindowsPackageType>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..\..'))</RepoRoot>
   </PropertyGroup>
 
   <ItemGroup>
@@ -22,19 +24,30 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Geist font files — embed as Content -->
-    <Content Include="Assets\Fonts\Geist\*">
+    <!-- Geist font files — embed as Content when present -->
+    <Content Include="Assets\Fonts\Geist\*" Condition="Exists('Assets\Fonts\Geist')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 
   <ItemGroup>
-    <!-- csbindgen-generated C# imports for Download Core -->
-    <Compile Include="bindings\CoreBindings.g.cs" />
+    <Page Include="..\..\..\design\geist\GeistTheme.xaml" Link="Design\GeistTheme.xaml" />
+    <Page Remove="Controls\DownloadQueueTemplates.xaml" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="..\..\shell-strings\en.json" Link="Strings\en.json" />
   </ItemGroup>
+
+  <Target Name="CopyDownloadCore" AfterTargets="Build">
+    <PropertyGroup>
+      <DownloadCoreDll>$(RepoRoot)\target\debug\download_core.dll</DownloadCoreDll>
+    </PropertyGroup>
+    <Copy
+      SourceFiles="$(DownloadCoreDll)"
+      DestinationFolder="$(TargetDir)"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(DownloadCoreDll)')" />
+  </Target>
 
 </Project>

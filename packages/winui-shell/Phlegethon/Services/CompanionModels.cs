@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
@@ -78,7 +79,7 @@ public sealed class CompanionResponse
     [JsonPropertyName("result")]
     public CompanionEnqueueResult? Result { get; set; }
 
-    public static CompanionResponse Ok(string requestId, CompanionEnqueueResult result) =>
+    public static CompanionResponse Success(string requestId, CompanionEnqueueResult result) =>
         new()
         {
             RequestId = requestId,

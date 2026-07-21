@@ -11,13 +11,10 @@
 
     <Grid Background="{ThemeResource GeistBackgroundBrush}">
         <Grid.RowDefinitions>
-            <!-- Top bar -->
             <RowDefinition Height="Auto" />
-            <!-- Main content: queue or probe sheet -->
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- Top Bar -->
         <Border
             Grid.Row="0"
             BorderBrush="{ThemeResource GeistBorderBrush}"
@@ -44,7 +41,7 @@
                     <TextBox
                         Grid.Column="1"
                         x:Name="UrlInput"
-                        PlaceholderText="Paste or type URL(s)… then press Enter or Enqueue"
+                        PlaceholderText="Paste or type URL(s), then press Enter or Enqueue"
                         FontFamily="{ThemeResource GeistMonoFont}"
                         FontSize="{ThemeResource GeistTypeSize13}"
                         AcceptsReturn="True"
@@ -60,12 +57,7 @@
                         FontSize="{ThemeResource GeistTypeSize14}"
                         Height="{ThemeResource GeistButtonHeight}"
                         Margin="8,0,0,0"
-                        Click="OnEnqueueClick">
-                        <Button.Resources>
-                            <SolidColorBrush x:Key="ButtonBackground" Color="{ThemeResource GeistGray1000}" />
-                            <SolidColorBrush x:Key="ButtonForeground" Color="{ThemeResource GeistBackground100}" />
-                        </Button.Resources>
-                    </Button>
+                        Click="OnEnqueueClick" />
 
                     <Button
                         Grid.Column="3"
@@ -117,7 +109,6 @@
             </StackPanel>
         </Border>
 
-        <!-- Content area -->
         <Grid
             Grid.Row="1"
             x:Name="ContentArea"
@@ -127,7 +118,6 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <!-- Queue / History tabs -->
             <Border
                 Grid.Row="0"
                 BorderBrush="{ThemeResource GeistBorderBrush}"
@@ -155,17 +145,14 @@
             </Border>
 
             <Grid Grid.Row="1">
-                <!-- Download Queue (default view) -->
                 <controls:DownloadQueueControl
                     x:Name="DownloadQueueView"
                     Visibility="Visible" />
 
-                <!-- History view -->
                 <controls:HistoryControl
                     x:Name="HistoryView"
                     Visibility="Collapsed" />
 
-                <!-- Probe-then-Confirm Sheet (shown when probing) -->
                 <controls:ProbeSheetControl
                     x:Name="ProbeSheetView"
                     Visibility="Collapsed" />

@@ -4,6 +4,7 @@ using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Phlegethon.Services;
 using Phlegethon.Strings;
@@ -86,8 +87,7 @@ public sealed partial class ProbeSheetControl : UserControl
         SaveToPathLabel.Text = ShellStrings.Get("probe.libraryRootDefault");
         SelectionSummary.Text = ShellStrings.Get("probe.noSelection");
         SourceLabel.Text = ShellStrings.Get("probe.probing");
-        Microsoft.UI.Xaml.Input.KeyboardNavigation.SetTabNavigation(
-            ProbeSheetRoot, Microsoft.UI.Xaml.Input.KeyboardNavigationMode.Cycle);
+        ProbeSheetRoot.TabFocusNavigation = KeyboardNavigationMode.Cycle;
     }
 
     /// <summary>Move keyboard focus to the probe sheet header for keyboard users.</summary>

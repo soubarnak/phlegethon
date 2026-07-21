@@ -2,13 +2,14 @@
 <Application
     x:Class="Phlegethon.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Phlegethon">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
-                <!-- Geist token theme dictionary -->
-                <ResourceDictionary Source="ms-appx:///design/geist/GeistTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///Design/GeistTheme.xaml" />
             </ResourceDictionary.MergedDictionaries>
+            <local:PercentToWidthConverter x:Key="PercentToWidthConverter" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>

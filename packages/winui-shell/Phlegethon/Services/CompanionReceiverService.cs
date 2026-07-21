@@ -108,7 +108,7 @@ public sealed class CompanionReceiverService : IDisposable
                 Result = result,
             });
 
-            return SerializeResponse(CompanionResponse.Ok(requestId, result));
+            return SerializeResponse(CompanionResponse.Success(requestId, result));
         }
         catch (Exception ex)
         {

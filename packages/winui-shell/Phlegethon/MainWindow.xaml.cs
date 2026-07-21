@@ -17,7 +17,7 @@ public sealed partial class MainWindow : Window
     private readonly EventChannelService _eventService;
     private readonly CompanionReceiverService _companionReceiver;
     private readonly DesktopNotificationService _notificationService;
-    private readonly Microsoft.UI.Dispatching.DispatcherTimer _clipboardTimer;
+    private readonly Microsoft.UI.Xaml.DispatcherTimer _clipboardTimer;
     private string? _lastClipboardUrl;
     private bool _windowActive;
     private bool _desktopNotificationsEnabled = true;
@@ -46,7 +46,7 @@ public sealed partial class MainWindow : Window
         _eventService.OnJobDiscarded += OnJobDiscarded;
         _companionReceiver.OnCompanionIntent += OnCompanionIntent;
 
-        _clipboardTimer = new Microsoft.UI.Dispatching.DispatcherTimer
+        _clipboardTimer = new Microsoft.UI.Xaml.DispatcherTimer
         {
             Interval = TimeSpan.FromSeconds(1.5),
         };
@@ -56,10 +56,9 @@ public sealed partial class MainWindow : Window
         _ = _eventService.StartEventLoopAsync();
         _companionReceiver.Start();
 
-        // Register paste/drop handlers
+        // Register drop handler (global paste uses UrlInput / Add URL dialog).
         this.Content.AllowDrop = true;
         this.Content.Drop += OnDrop;
-        this.Content.PrePaste += OnPaste;
 
         DownloadQueueView.DiscardRequested += OnDiscardRequested;
         DownloadQueueView.RevealRequested += OnRevealRequested;
