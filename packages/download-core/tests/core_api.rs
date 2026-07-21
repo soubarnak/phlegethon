@@ -758,6 +758,7 @@ fn discard_during_in_flight_extractor_download_stops_and_deletes_partials() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -857,6 +858,7 @@ fn pause_during_in_flight_extractor_download_stops_promptly() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -1429,6 +1431,7 @@ fn relaunch_extractor_partial_without_resume_marks_failed() {
                 item_id: "item-1".to_string(),
                 quality_id: "720p".to_string(),
             }],
+            media_extras: None,
         };
         let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
         job_id = job_ids[0].clone();
@@ -2403,6 +2406,7 @@ fn confirm_probe_selection_creates_jobs_for_selected_items() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1, "should create exactly one job");
@@ -2470,6 +2474,7 @@ fn confirm_probe_selection_creates_multiple_jobs_for_batch() {
                 quality_id: "720p".to_string(),
             },
         ],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 2, "should create two jobs");
@@ -2495,6 +2500,7 @@ fn confirm_without_previous_probe_errors() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
+            media_extras: None,
     };
     let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
@@ -2527,6 +2533,7 @@ fn confirm_with_invalid_item_id_errors() {
             item_id: "nonexistent-item".to_string(),
             quality_id: "1080p".to_string(),
         }],
+            media_extras: None,
     };
     let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
@@ -2559,6 +2566,7 @@ fn confirm_with_invalid_quality_id_errors() {
             item_id: "item-1".to_string(),
             quality_id: "8k".to_string(),
         }],
+            media_extras: None,
     };
     let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
@@ -2589,6 +2597,7 @@ fn confirm_without_library_root_errors() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
+            media_extras: None,
     };
     let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
@@ -2635,6 +2644,7 @@ fn batch_job_destination_derives_from_source_name() {
             item_id: "vid-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
@@ -2685,6 +2695,7 @@ fn single_video_probe_without_source_name_uses_title_for_subfolder() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
@@ -2739,6 +2750,7 @@ fn probe_created_jobs_share_same_lifecycle_as_direct_jobs() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
@@ -2812,6 +2824,7 @@ fn probe_created_jobs_use_same_storage_rules() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
+            media_extras: None,
     };
     let probe_job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(probe_job_ids.len(), 1);
@@ -4241,6 +4254,7 @@ fn silent_extractor_download_emits_mid_transfer_job_progress_from_disk_growth() 
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -4350,6 +4364,7 @@ fn extractor_quality_with_known_size_emits_job_progress_total_bytes() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -4460,6 +4475,7 @@ fn extractor_quality_without_size_keeps_job_progress_total_none() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -4667,6 +4683,7 @@ fn confirm_probe_selection_accepts_absolute_destination_override() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core
         .confirm_probe_selection(&selection, Some(off_root.clone()))
@@ -4719,6 +4736,7 @@ fn confirm_off_root_destination_persists_across_queue_reload() {
                 item_id: "item-1".to_string(),
                 quality_id: "720p".to_string(),
             }],
+            media_extras: None,
         };
         let job_ids = core
             .confirm_probe_selection(&selection, Some(off_root.clone()))
@@ -4788,6 +4806,7 @@ fn preview_probe_destination_shows_batch_subfolder_under_library_root() {
                 quality_id: "1080p".to_string(),
             },
         ],
+            media_extras: None,
     };
 
     let preview = core
@@ -4849,6 +4868,7 @@ fn preview_probe_destination_shows_nested_pattern_for_single_save_to_override() 
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
 
     let preview = core
@@ -4906,6 +4926,7 @@ fn preview_probe_destination_shows_multi_item_pattern_under_save_to_override() {
                 quality_id: "1080p".to_string(),
             },
         ],
+            media_extras: None,
     };
 
     let preview = core
@@ -4977,6 +4998,7 @@ fn extractor_completed_removes_orphan_temp_siblings_under_job_destination() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core
         .confirm_probe_selection(&selection, Some(save_to.clone()))
@@ -5054,6 +5076,7 @@ fn single_item_save_to_nests_unique_job_destination_under_parent() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core
         .confirm_probe_selection(&selection, Some(shared.clone()))
@@ -5174,6 +5197,7 @@ fn extractor_cleanup_and_byte_totals_ignore_siblings_in_shared_parent() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
+            media_extras: None,
     };
     let job_ids = core
         .confirm_probe_selection(&selection, Some(shared.clone()))
@@ -5912,5 +5936,147 @@ fn default_quality_policy_settings_change_reflected_on_next_selection() {
         core.select_default_quality(&audio_qualities).as_deref(),
         Some("192k-audio")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance: Media extras + remux/embed (issue #54)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn media_extras_defaults_persist_and_round_trip_on_confirm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(root.clone()).unwrap();
+
+    let defaults = MediaExtrasOptions {
+        write_subs: true,
+        write_thumbnail: true,
+        ..Default::default()
+    };
+    core.set_default_media_extras(defaults).unwrap();
+
+    let mut fake = fake_toolchain();
+    fake.insert(
+        "https://www.youtube.com/watch?v=media-extras",
+        "Extras Video",
+        "https://cdn.example.com/video.webm",
+        vec![("720p", "720p")],
+    );
+    let (mut core, _rx) = Core::new(Box::new(NoRangeFakeHttp(fake_http())), Box::new(fake));
+    core.set_library_root(root.clone()).unwrap();
+    assert_eq!(core.default_media_extras(), defaults);
+
+    core.probe("https://www.youtube.com/watch?v=media-extras")
+        .unwrap();
+
+    let override_opts = MediaExtrasOptions {
+        write_subs: false,
+        write_thumbnail: true,
+        embed_thumbnail: true,
+        ..Default::default()
+    };
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=media-extras".into(),
+        items: vec![ItemSelection {
+            item_id: "item-1".into(),
+            quality_id: "720p".into(),
+        }],
+        media_extras: Some(override_opts),
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(job_ids.len(), 1);
+
+    let stored = core.job_media_extras(&job_ids[0]).unwrap();
+    assert!(!stored.write_subs, "override should disable write_subs");
+    assert!(stored.write_thumbnail);
+    assert!(
+        !stored.embed_thumbnail,
+        "embed stripped when ffmpeg unavailable"
+    );
+}
+
+#[test]
+fn media_extras_capabilities_report_ffmpeg_unavailable_by_default() {
+    let (core, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    let caps = core.media_extras_capabilities();
+    assert!(!caps.ffmpeg_available);
+    assert!(caps.embed_disabled_reason.is_some());
+}
+
+#[test]
+fn remux_stripped_when_ffmpeg_unavailable_and_job_completes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+
+    let mut fake = fake_toolchain();
+    fake.insert(
+        "https://www.youtube.com/watch?v=remux-skip",
+        "Remux Skip",
+        "https://cdn.example.com/clip.webm",
+        vec![("best", "best")],
+    );
+    fake.set_ffmpeg_dir(tmp.path().join("no-ffmpeg"));
+    let (mut core, rx) = Core::new(Box::new(NoRangeFakeHttp(fake_http())), Box::new(fake));
+    core.set_library_root(root).unwrap();
+    core.set_default_media_extras(MediaExtrasOptions {
+        remux: true,
+        ..Default::default()
+    })
+    .unwrap();
+
+    core.probe("https://www.youtube.com/watch?v=remux-skip")
+        .unwrap();
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=remux-skip".into(),
+        items: vec![ItemSelection {
+            item_id: "item-1".into(),
+            quality_id: "best".into(),
+        }],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    let job_id = job_ids[0].clone();
+    assert!(
+        !core.job_media_extras(&job_id).unwrap().remux,
+        "remux stripped when ffmpeg unavailable"
+    );
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CoreEvent::JobCompleted { job_id: id, .. } if id == &job_id
+        )),
+        "job should complete without remux when ffmpeg missing"
+    );
+
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap();
+    let dest = PathBuf::from(&snap.destination);
+    let webm = dest.join("clip.webm");
+    assert!(webm.is_file(), "download output retained at {}", webm.display());
+}
+
+#[test]
+fn default_media_extras_settings_persist_across_library_root_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(root.clone()).unwrap();
+    let opts = MediaExtrasOptions {
+        write_subs: true,
+        write_metadata: true,
+        ..Default::default()
+    };
+    core.set_default_media_extras(opts).unwrap();
+
+    let (mut core2, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core2.set_library_root(root).unwrap();
+    assert_eq!(core2.default_media_extras(), opts);
 }
 

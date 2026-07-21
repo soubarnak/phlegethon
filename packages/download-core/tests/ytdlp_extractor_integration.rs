@@ -389,6 +389,7 @@ fn youtube_playlist_probe_then_confirm_creates_jobs_only_after_confirm() {
                         quality_id: "best".to_string(),
                     },
                 ],
+                media_extras: None,
             },
             None,
         )
@@ -428,6 +429,7 @@ fn xhamster_single_probe_then_confirm_creates_job_only_after_confirm() {
                     item_id: "xh-xh-video-12345".to_string(),
                     quality_id: "720p".to_string(),
                 }],
+                media_extras: None,
             },
             None,
         )

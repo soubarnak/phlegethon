@@ -44,6 +44,9 @@ public sealed partial class ProbeSheetControl : UserControl
     private readonly List<MediaGroupViewModel> _groups = new();
     private string? _saveToDestination;
     private int _previewRequestId;
+    private MediaExtrasOptions _mediaExtras = new();
+    private readonly Dictionary<string, CheckBox> _mediaExtraBoxes = new();
+    private TextBlock? _ffmpegNote;
 
     /// <summary>
     /// Resolve Core Job Destination preview for selection JSON.
@@ -55,6 +58,12 @@ public sealed partial class ProbeSheetControl : UserControl
     /// Resolve the Default Quality Policy selection for a row's qualities.
     /// </summary>
     public Func<IReadOnlyList<QualityViewModel>, string?>? ResolveDefaultQuality { get; set; }
+
+    /// <summary>Load settings-backed media extras defaults for this probe.</summary>
+    public Func<MediaExtrasOptions>? ResolveDefaultMediaExtras { get; set; }
+
+    /// <summary>Report ffmpeg availability for embed/remux toggles.</summary>
+    public Func<MediaExtrasCapabilities>? ResolveMediaExtrasCapabilities { get; set; }
 
     public ProbeSheetControl()
     {
@@ -80,6 +89,9 @@ public sealed partial class ProbeSheetControl : UserControl
         SourceLabel.Text = sourceName != null
             ? $"{sourceName} — {url}"
             : $"Probed: {url}";
+
+        _mediaExtras = ResolveDefaultMediaExtras?.Invoke() ?? new MediaExtrasOptions();
+        BuildMediaExtrasPanel();
 
         foreach (var item in items)
         {
@@ -108,6 +120,103 @@ public sealed partial class ProbeSheetControl : UserControl
         }
 
         UpdateSelectionSummary();
+    }
+
+    private void BuildMediaExtrasPanel()
+    {
+        MediaExtrasPanel.Children.Clear();
+        _mediaExtraBoxes.Clear();
+
+        var caps = ResolveMediaExtrasCapabilities?.Invoke() ?? new MediaExtrasCapabilities();
+        var embedAllowed = caps.FfmpegAvailable;
+
+        var title = new TextBlock
+        {
+            Text = "Media options",
+            FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
+            FontSize = 12,
+            FontWeight = (Windows.UI.Text.FontWeight)Application.Current.Resources["GeistTypeWeightMedium"],
+            Foreground = (Brush)Application.Current.Resources["GeistTextPrimaryBrush"],
+        };
+        MediaExtrasPanel.Children.Add(title);
+
+        if (!embedAllowed && !string.IsNullOrEmpty(caps.EmbedDisabledReason))
+        {
+            _ffmpegNote = new TextBlock
+            {
+                Text = caps.EmbedDisabledReason,
+                FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
+                FontSize = 11,
+                Foreground = (Brush)Application.Current.Resources["GeistTextSecondaryBrush"],
+                TextWrapping = TextWrapping.WrapWholeWords,
+            };
+            MediaExtrasPanel.Children.Add(_ffmpegNote);
+        }
+
+        var grid = new Grid { ColumnSpacing = 12, RowSpacing = 4 };
+        for (var i = 0; i < 4; i++)
+        {
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        }
+
+        AddMediaExtraToggle(grid, 0, 0, "Write subs", nameof(MediaExtrasOptions.WriteSubs), _mediaExtras.WriteSubs, true);
+        AddMediaExtraToggle(grid, 1, 0, "Embed subs", nameof(MediaExtrasOptions.EmbedSubs), _mediaExtras.EmbedSubs, embedAllowed);
+        AddMediaExtraToggle(grid, 2, 0, "Write thumbnail", nameof(MediaExtrasOptions.WriteThumbnail), _mediaExtras.WriteThumbnail, true);
+        AddMediaExtraToggle(grid, 3, 0, "Embed thumbnail", nameof(MediaExtrasOptions.EmbedThumbnail), _mediaExtras.EmbedThumbnail, embedAllowed);
+        AddMediaExtraToggle(grid, 0, 1, "Write metadata", nameof(MediaExtrasOptions.WriteMetadata), _mediaExtras.WriteMetadata, true);
+        AddMediaExtraToggle(grid, 1, 1, "Embed metadata", nameof(MediaExtrasOptions.EmbedMetadata), _mediaExtras.EmbedMetadata, embedAllowed);
+        AddMediaExtraToggle(grid, 2, 1, "Write chapters", nameof(MediaExtrasOptions.WriteChapters), _mediaExtras.WriteChapters, true);
+        AddMediaExtraToggle(grid, 3, 1, "Embed chapters", nameof(MediaExtrasOptions.EmbedChapters), _mediaExtras.EmbedChapters, embedAllowed);
+        AddMediaExtraToggle(grid, 0, 2, "Remux to mp4", nameof(MediaExtrasOptions.Remux), _mediaExtras.Remux, embedAllowed);
+
+        MediaExtrasPanel.Children.Add(grid);
+    }
+
+    private void AddMediaExtraToggle(
+        Grid grid,
+        int column,
+        int row,
+        string label,
+        string key,
+        bool isChecked,
+        bool enabled)
+    {
+        while (grid.RowDefinitions.Count <= row)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        }
+
+        var box = new CheckBox
+        {
+            Content = label,
+            IsChecked = enabled && isChecked,
+            IsEnabled = enabled,
+            FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
+            FontSize = 11,
+        };
+        Grid.SetColumn(box, column);
+        Grid.SetRow(box, row);
+        grid.Children.Add(box);
+        _mediaExtraBoxes[key] = box;
+    }
+
+    private MediaExtrasOptions ReadMediaExtrasFromUi()
+    {
+        bool Read(string key) =>
+            _mediaExtraBoxes.TryGetValue(key, out var box) && box.IsChecked == true;
+
+        return new MediaExtrasOptions
+        {
+            WriteSubs = Read(nameof(MediaExtrasOptions.WriteSubs)),
+            EmbedSubs = Read(nameof(MediaExtrasOptions.EmbedSubs)),
+            WriteChapters = Read(nameof(MediaExtrasOptions.WriteChapters)),
+            EmbedChapters = Read(nameof(MediaExtrasOptions.EmbedChapters)),
+            WriteThumbnail = Read(nameof(MediaExtrasOptions.WriteThumbnail)),
+            EmbedThumbnail = Read(nameof(MediaExtrasOptions.EmbedThumbnail)),
+            WriteMetadata = Read(nameof(MediaExtrasOptions.WriteMetadata)),
+            EmbedMetadata = Read(nameof(MediaExtrasOptions.EmbedMetadata)),
+            Remux = Read(nameof(MediaExtrasOptions.Remux)),
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -266,8 +375,8 @@ public sealed partial class ProbeSheetControl : UserControl
         }
 
         object payload = _saveToDestination != null
-            ? new { url = _probeUrl, items, destination = _saveToDestination }
-            : new { url = _probeUrl, items };
+            ? new { url = _probeUrl, items, destination = _saveToDestination, media_extras = ReadMediaExtrasFromUi() }
+            : new { url = _probeUrl, items, media_extras = ReadMediaExtrasFromUi() };
 
         var selectionJson = System.Text.Json.JsonSerializer.Serialize(payload);
         var requestId = ++_previewRequestId;
@@ -363,8 +472,8 @@ public sealed partial class ProbeSheetControl : UserControl
         }
 
         object payload = _saveToDestination != null
-            ? new { url = _probeUrl, items, destination = _saveToDestination }
-            : new { url = _probeUrl, items };
+            ? new { url = _probeUrl, items, destination = _saveToDestination, media_extras = ReadMediaExtrasFromUi() }
+            : new { url = _probeUrl, items, media_extras = ReadMediaExtrasFromUi() };
 
         var selectionJson = System.Text.Json.JsonSerializer.Serialize(payload);
         Confirmed?.Invoke(this, selectionJson);

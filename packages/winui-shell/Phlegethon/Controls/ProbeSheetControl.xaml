@@ -56,7 +56,10 @@
 
         <!-- Media items list -->
         <ScrollViewer Grid.Row="1">
-            <StackPanel x:Name="ItemsPanel" Spacing="0" />
+            <StackPanel>
+                <StackPanel x:Name="MediaExtrasPanel" Spacing="4" Padding="12,8,12,0" />
+                <StackPanel x:Name="ItemsPanel" Spacing="0" />
+            </StackPanel>
         </ScrollViewer>
 
         <!-- Footer: Save to… + Confirm -->

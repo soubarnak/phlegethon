@@ -378,6 +378,8 @@ pub unsafe extern "C" fn core_confirm_probe_selection(
             items: Vec<crate::extractor::ItemSelection>,
             #[serde(default)]
             destination: Option<std::path::PathBuf>,
+            #[serde(default)]
+            media_extras: Option<crate::media_extras::MediaExtrasOptions>,
         }
 
         let args: ConfirmArgs = match serde_json::from_str(json_str) {
@@ -392,6 +394,7 @@ pub unsafe extern "C" fn core_confirm_probe_selection(
         let selection = ProbeSelection {
             url: args.url,
             items: args.items,
+            media_extras: args.media_extras,
         };
 
         let mut core_guard = ctx.core.lock().unwrap();
@@ -438,6 +441,8 @@ pub unsafe extern "C" fn core_preview_probe_destination(
             items: Vec<crate::extractor::ItemSelection>,
             #[serde(default)]
             destination: Option<std::path::PathBuf>,
+            #[serde(default)]
+            media_extras: Option<crate::media_extras::MediaExtrasOptions>,
         }
 
         let args: PreviewArgs = match serde_json::from_str(json_str) {
@@ -452,6 +457,7 @@ pub unsafe extern "C" fn core_preview_probe_destination(
         let selection = ProbeSelection {
             url: args.url,
             items: args.items,
+            media_extras: args.media_extras,
         };
 
         let core_guard = ctx.core.lock().unwrap();
@@ -760,6 +766,69 @@ pub unsafe extern "C" fn core_select_default_quality_json(
             Some(id) => serde_json::to_string(&id).unwrap(),
             None => "null".to_string(),
         };
+        write_str_to_buf(&json, out_json_buf, out_buf_len);
+        0
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_get_default_media_extras_json(
+    handle: *mut Core,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        let json = serde_json::to_string(&core_guard.default_media_extras()).unwrap();
+        write_str_to_buf(&json, out_json_buf, out_buf_len);
+        0
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_set_default_media_extras_json(
+    handle: *mut Core,
+    options_json: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let json_str = cstr_to_str(options_json);
+        let options: crate::media_extras::MediaExtrasOptions =
+            match serde_json::from_str(json_str) {
+                Ok(o) => o,
+                Err(e) => {
+                    write_str_to_buf(
+                        &format!("parse media extras JSON: {e}"),
+                        error_buf,
+                        error_buf_len,
+                    );
+                    return -1;
+                }
+            };
+        let mut core_guard = ctx.core.lock().unwrap();
+        match core_guard.set_default_media_extras(options) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_get_media_extras_capabilities_json(
+    handle: *mut Core,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        let json = serde_json::to_string(&core_guard.media_extras_capabilities()).unwrap();
         write_str_to_buf(&json, out_json_buf, out_buf_len);
         0
     })

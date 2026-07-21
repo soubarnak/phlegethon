@@ -20,6 +20,7 @@
 //! - Reference: [`FakeExtractorToolchain`] (chunk loop) and
 //!   `YtDlpExtractorToolchain` (`run_command_interruptible`).
 
+use crate::media_extras::MediaExtrasOptions;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -102,6 +103,11 @@ pub trait ExtractorToolchain: Send + Sync {
         false
     }
 
+    /// Optional directory containing ffmpeg binaries for embed/remux.
+    fn ffmpeg_dir(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
     fn download(
         &self,
@@ -109,6 +115,7 @@ pub trait ExtractorToolchain: Send + Sync {
         _format: &str,
         _dest_dir: &std::path::Path,
         _stop: &AtomicBool,
+        _media_extras: &MediaExtrasOptions,
     ) -> Result<ExtractorDownloadOutcome, String> {
         Err("extractor download not supported for this toolchain".into())
     }
@@ -134,6 +141,8 @@ pub struct FakeExtractorToolchain {
     /// Extra sibling filenames written beside the final file before Completed
     /// (simulates yt-dlp leftover `.part` / `.ytdl` artifacts).
     orphan_temp_names: Vec<String>,
+    /// Optional ffmpeg directory reported to Core for embed/remux capability.
+    ffmpeg_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -178,6 +187,11 @@ impl FakeExtractorToolchain {
     /// Used to regression-test Core cleanup of Extractor orphans (issue #42).
     pub fn leave_orphan_temps(&mut self, names: &[&str]) {
         self.orphan_temp_names = names.iter().map(|s| (*s).to_string()).collect();
+    }
+
+    /// Report a specific ffmpeg directory to Core (tests: empty dir → unavailable).
+    pub fn set_ffmpeg_dir(&mut self, dir: std::path::PathBuf) {
+        self.ffmpeg_dir = Some(dir);
     }
 
     /// Insert a single-item probe response.
@@ -284,6 +298,10 @@ impl FakeExtractorToolchain {
 }
 
 impl ExtractorToolchain for FakeExtractorToolchain {
+    fn ffmpeg_dir(&self) -> Option<&std::path::Path> {
+        self.ffmpeg_dir.as_deref()
+    }
+
     fn probe(&self, url: &str) -> Result<ProbeResult, String> {
         let response = self
             .responses
@@ -302,6 +320,7 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         format: &str,
         dest_dir: &std::path::Path,
         stop: &AtomicBool,
+        _media_extras: &MediaExtrasOptions,
     ) -> Result<ExtractorDownloadOutcome, String> {
         if stop.load(Ordering::Acquire) {
             return Ok(ExtractorDownloadOutcome::Stopped);
@@ -379,6 +398,9 @@ pub struct ProbeSelection {
     pub url: String,
     /// Selected items and their chosen qualities.
     pub items: Vec<ItemSelection>,
+    /// Per-job media extras override; when absent, Core defaults apply.
+    #[serde(default)]
+    pub media_extras: Option<MediaExtrasOptions>,
 }
 
 #[cfg(test)]

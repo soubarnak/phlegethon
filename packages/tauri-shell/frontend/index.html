@@ -59,6 +59,8 @@
           <button class="btn-icon" id="probeClose" type="button" title="Cancel">✕</button>
         </div>
       </div>
+      <div class="probe-media-extras" id="probeMediaExtras"></div>
+      <p class="probe-media-note" id="probeMediaExtrasNote" hidden></p>
       <div class="probe-items" id="probeItems"></div>
       <div class="probe-footer">
         <div class="probe-save-to">
@@ -102,6 +104,18 @@
             Audio only
           </label>
           <button class="btn btn-primary" id="audioOnlyModeApply" type="button">Apply</button>
+        </div>
+        <label class="settings-label">Media extras defaults</label>
+        <p class="settings-help" id="mediaExtrasHelp">Write-sidecar options always available. Embed/remux require ffmpeg.</p>
+        <p class="settings-help" id="mediaExtrasFfmpegNote" hidden></p>
+        <div class="settings-row settings-media-grid">
+          <label class="settings-checkbox"><input type="checkbox" id="writeSubsDefault" /> Write subs</label>
+          <label class="settings-checkbox"><input type="checkbox" id="writeThumbnailDefault" /> Write thumbnail</label>
+          <label class="settings-checkbox"><input type="checkbox" id="embedSubsDefault" data-embed-only disabled /> Embed subs</label>
+          <label class="settings-checkbox"><input type="checkbox" id="remuxDefault" data-embed-only disabled /> Remux to mp4</label>
+        </div>
+        <div class="settings-row">
+          <button class="btn btn-primary" id="mediaExtrasApply" type="button">Apply media defaults</button>
         </div>
       </div>
     </div>

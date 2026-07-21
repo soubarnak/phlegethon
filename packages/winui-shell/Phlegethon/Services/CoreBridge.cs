@@ -180,6 +180,25 @@ internal static class CoreBridge
         IntPtr errorBuf,
         int errorBufLen);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_get_default_media_extras_json(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_set_default_media_extras_json(
+        IntPtr handle,
+        string optionsJson,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_get_media_extras_capabilities_json(
+        IntPtr handle,
+        IntPtr outJsonBuf,
+        int outBufLen);
+
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
@@ -409,6 +428,26 @@ public class CoreHandle : IDisposable
             _handle,
             qualitiesJson);
         return System.Text.Json.JsonSerializer.Deserialize<string?>(json);
+    }
+
+    public string GetDefaultMediaExtrasJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_get_default_media_extras_json(h, o, ol),
+            _handle);
+    }
+
+    public void SetDefaultMediaExtrasJson(string optionsJson)
+    {
+        ThrowOnError(
+            CoreBridge.core_set_default_media_extras_json(_handle, optionsJson, IntPtr.Zero, 0));
+    }
+
+    public string GetMediaExtrasCapabilitiesJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_get_media_extras_capabilities_json(h, o, ol),
+            _handle);
     }
 
     public string DrainEvents()

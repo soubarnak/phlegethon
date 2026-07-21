@@ -430,6 +430,31 @@ fn select_default_quality(
 }
 
 #[tauri::command]
+fn get_default_media_extras(
+    state: State<AppState>,
+) -> Result<download_core::MediaExtrasOptions, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.default_media_extras())
+}
+
+#[tauri::command]
+fn set_default_media_extras(
+    state: State<AppState>,
+    options: download_core::MediaExtrasOptions,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_default_media_extras(options)
+}
+
+#[tauri::command]
+fn get_media_extras_capabilities(
+    state: State<AppState>,
+) -> Result<download_core::MediaExtrasCapabilities, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.media_extras_capabilities())
+}
+
+#[tauri::command]
 fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
     let rx = state.event_rx.lock().map_err(|e| e.to_string())?;
     let mut events = Vec::new();
@@ -537,6 +562,9 @@ pub fn run() {
             set_active_job_limit,
             get_audio_only_mode,
             set_audio_only_mode,
+            get_default_media_extras,
+            set_default_media_extras,
+            get_media_extras_capabilities,
             select_default_quality,
             reorder_job,
             poll_events,

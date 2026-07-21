@@ -2,6 +2,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using Phlegethon.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -123,6 +124,21 @@ public sealed partial class DownloadQueueControl : UserControl
     public void SetAudioOnlyModeDisplay(bool enabled)
     {
         AudioOnlyModeBox.IsChecked = enabled;
+    }
+
+    public void SetMediaExtrasDefaultsDisplay(MediaExtrasOptions options)
+    {
+        WriteSubsDefaultBox.IsChecked = options.WriteSubs;
+        WriteThumbnailDefaultBox.IsChecked = options.WriteThumbnail;
+    }
+
+    private void OnMediaExtrasDefaultsApply(object sender, RoutedEventArgs e)
+    {
+        MediaExtrasDefaultsChanged?.Invoke(this, new MediaExtrasOptions
+        {
+            WriteSubs = WriteSubsDefaultBox.IsChecked == true,
+            WriteThumbnail = WriteThumbnailDefaultBox.IsChecked == true,
+        });
     }
 
     public int ActiveJobLimitValue => (int)ActiveJobLimitBox.Value;
@@ -335,6 +351,9 @@ public sealed partial class DownloadQueueControl : UserControl
 
     /// <summary>Raised when the user toggles audio-only mode.</summary>
     public event EventHandler<bool>? AudioOnlyModeChanged;
+
+    /// <summary>Raised when the user applies media extras defaults.</summary>
+    public event EventHandler<MediaExtrasOptions>? MediaExtrasDefaultsChanged;
 
     // -----------------------------------------------------------------------
     // Helpers

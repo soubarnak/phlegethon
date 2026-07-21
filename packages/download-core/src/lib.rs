@@ -7,6 +7,7 @@ mod bandwidth;
 mod cabi;
 mod classification;
 mod disk_space;
+mod media_extras;
 mod quality_policy;
 mod event;
 mod extractor;
@@ -39,6 +40,10 @@ pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
 pub use mirror_set::MirrorSet;
+pub use media_extras::{
+    apply_remux_postprocess, effective_options, ffmpeg_available, ytdlp_media_extras_args,
+    MediaExtrasCapabilities, MediaExtrasOptions, PostprocessOutcome,
+};
 pub use quality_policy::{select_default_quality, DefaultQualityPolicy, DEFAULT_MAX_HEIGHT};
 
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
@@ -107,6 +112,7 @@ pub struct Core {
     active_job_limit: u32,
     default_quality_policy: DefaultQualityPolicy,
     audio_only_mode: bool,
+    default_media_extras: MediaExtrasOptions,
     clock: Arc<dyn bandwidth::Clock>,
     /// Pending probe results, keyed by URL.
     /// Stored until confirm or replaced by a new probe for the same URL.
@@ -266,6 +272,7 @@ impl Core {
             active_job_limit: DEFAULT_ACTIVE_JOB_LIMIT,
             default_quality_policy: DefaultQualityPolicy::default(),
             audio_only_mode: false,
+            default_media_extras: MediaExtrasOptions::default(),
             clock,
             pending_probes: HashMap::new(),
             last_progress_flush: Instant::now(),
@@ -371,6 +378,8 @@ impl Core {
         let quality_settings = storage::load_quality_settings(&root)?;
         self.default_quality_policy = quality_settings.policy;
         self.audio_only_mode = quality_settings.audio_only_mode;
+        let media_settings = storage::load_media_extras_settings(&root)?;
+        self.default_media_extras = media_settings.defaults;
         self.library_root = Some(root);
         self.last_progress_flush = Instant::now();
         self.bytes_since_progress_flush = 0;
@@ -402,6 +411,7 @@ impl Core {
                 self.active_job_limit,
                 &self.default_quality_policy,
                 self.audio_only_mode,
+                &self.default_media_extras,
             );
             storage::save_queue(root, &queue)?;
         }
@@ -873,6 +883,56 @@ impl Core {
     }
 
     // -----------------------------------------------------------------------
+    // Media extras defaults + capabilities
+    // -----------------------------------------------------------------------
+
+    /// Settings-backed defaults for write/embed media options.
+    pub fn default_media_extras(&self) -> MediaExtrasOptions {
+        self.default_media_extras
+    }
+
+    /// Update media extras defaults and persist them.
+    pub fn set_default_media_extras(
+        &mut self,
+        options: MediaExtrasOptions,
+    ) -> Result<(), String> {
+        self.default_media_extras = options;
+        self.persist_queue_now()?;
+        Ok(())
+    }
+
+    /// Capabilities for shells to disable embed toggles when ffmpeg is missing.
+    pub fn media_extras_capabilities(&self) -> MediaExtrasCapabilities {
+        let ffmpeg_dir = self.extractor.ffmpeg_dir();
+        if ffmpeg_available(ffmpeg_dir) {
+            MediaExtrasCapabilities {
+                ffmpeg_available: true,
+                embed_disabled_reason: None,
+            }
+        } else {
+            MediaExtrasCapabilities::unavailable()
+        }
+    }
+
+    /// Effective media extras for a probe confirm (defaults + optional override).
+    pub fn resolve_media_extras(
+        &self,
+        override_options: Option<MediaExtrasOptions>,
+    ) -> MediaExtrasOptions {
+        let base = override_options.unwrap_or(self.default_media_extras);
+        effective_options(&base, &self.media_extras_capabilities())
+    }
+
+    /// Media extras stored on a job (after confirm).
+    pub fn job_media_extras(&self, job_id: &str) -> Result<MediaExtrasOptions, String> {
+        self.jobs
+            .iter()
+            .find(|j| j.id() == job_id)
+            .map(|j| j.media_extras())
+            .ok_or_else(|| format!("job {job_id} not found"))
+    }
+
+    // -----------------------------------------------------------------------
     // Mirror Set management
     // -----------------------------------------------------------------------
 
@@ -1135,6 +1195,7 @@ impl Core {
             probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
 
         let mut job_ids = Vec::new();
+        let media_extras = self.resolve_media_extras(selection.media_extras);
 
         for sel in &selection.items {
             let item = items_map.get(sel.item_id.as_str()).ok_or_else(|| {
@@ -1167,6 +1228,7 @@ impl Core {
             };
             // Launch Site media is fetched by yt-dlp, not plain HTTP of the page URL.
             job.set_extractor_format(&sel.quality_id);
+            job.set_media_extras(media_extras);
             if let Some(size) = quality.size_bytes {
                 job.set_total_bytes(Some(size));
             }
@@ -1486,6 +1548,7 @@ impl Core {
                 bytes_received,
                 job_cap,
                 extractor_format,
+                media_extras,
                 pause_requested,
                 transfer_active,
             ) = {
@@ -1498,6 +1561,7 @@ impl Core {
                     job.bytes_received(),
                     job.bandwidth_cap(),
                     job.extractor_format().map(|s| s.to_string()),
+                    job.media_extras(),
                     job.pause_requested().clone(),
                     job.transfer_active().clone(),
                 )
@@ -1546,9 +1610,10 @@ impl Core {
                     let dest_ref = dest.as_path();
                     let url_ref = url.as_str();
                     let format_ref = format.as_str();
+                    let extras = media_extras;
                     s.spawn(move || {
                         let outcome =
-                            extractor.download(url_ref, format_ref, dest_ref, stop);
+                            extractor.download(url_ref, format_ref, dest_ref, stop, &extras);
                         let _ = result_tx.send(outcome);
                     });
 
@@ -1582,15 +1647,43 @@ impl Core {
                 match download_result {
                     Ok(ExtractorDownloadOutcome::Completed(path)) => {
                         Self::cleanup_extractor_temp_artifacts(&dest, &path);
-                        let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                        let bytes = Self::destination_byte_total(&dest).max(file_bytes);
+                        let ffmpeg_dir = self.extractor.ffmpeg_dir();
+                        let post = apply_remux_postprocess(
+                            &path,
+                            &media_extras,
+                            ffmpeg_dir,
+                            pause_requested.as_ref(),
+                        );
+                        let (final_path, bytes) = match post {
+                            PostprocessOutcome::Unchanged(p) | PostprocessOutcome::Remuxed(p) => {
+                                let file_bytes =
+                                    std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                                let bytes = Self::destination_byte_total(&dest).max(file_bytes);
+                                (p, bytes)
+                            }
+                            PostprocessOutcome::Failed {
+                                error,
+                                pre_remux_path,
+                            } => {
+                                let _ = pre_remux_path;
+                                self.jobs[i].mark_failed();
+                                self.event_tx
+                                    .send(CoreEvent::JobFailed {
+                                        job_id: job_id.clone(),
+                                        error,
+                                    })
+                                    .map_err(|_| "event channel closed".to_string())?;
+                                self.persist_queue_now()?;
+                                return Ok(());
+                            }
+                        };
                         live_bytes.store(bytes, Ordering::Release);
                         let _ = self.event_tx.send(CoreEvent::JobProgress {
                             job_id: job_id.clone(),
                             bytes_downloaded: bytes,
                             total_bytes: total_for_progress,
                         });
-                        self.finalize_completed_job(&job_id, i, &path, bytes)?;
+                        self.finalize_completed_job(&job_id, i, &final_path, bytes)?;
                     }
                     Ok(ExtractorDownloadOutcome::Stopped) => {
                         self.finalize_stop_after_transfer(&job_id)?;

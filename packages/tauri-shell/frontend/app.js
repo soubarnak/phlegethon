@@ -32,6 +32,9 @@ const state = {
   probePreviewRequestId: 0,
   /** Pending Library Root path chosen in settings (applied via Core on Apply). */
   pendingLibraryRoot: null,
+  /** Per-probe media extras override (pre-filled from settings). */
+  probeMediaExtras: null,
+  mediaExtrasCapabilities: null,
 };
 
 // ---- DOM refs ----
@@ -67,6 +70,14 @@ const activeJobLimitInput = $("activeJobLimitInput");
 const activeJobLimitApply = $("activeJobLimitApply");
 const audioOnlyModeInput = $("audioOnlyModeInput");
 const audioOnlyModeApply = $("audioOnlyModeApply");
+const probeMediaExtras = $("probeMediaExtras");
+const probeMediaExtrasNote = $("probeMediaExtrasNote");
+const mediaExtrasFfmpegNote = $("mediaExtrasFfmpegNote");
+const writeSubsDefault = $("writeSubsDefault");
+const writeThumbnailDefault = $("writeThumbnailDefault");
+const embedSubsDefault = $("embedSubsDefault");
+const remuxDefault = $("remuxDefault");
+const mediaExtrasApply = $("mediaExtrasApply");
 const discardConfirmOverlay = $("discardConfirmOverlay");
 const discardConfirmTitle = $("discardConfirmTitle");
 const discardConfirmBody = $("discardConfirmBody");
@@ -193,6 +204,90 @@ document.addEventListener("drop", (e) => {
 });
 
 // ---- Probe ----
+const MEDIA_EXTRA_FIELDS = [
+  { key: "write_subs", label: "Write subs", write: true },
+  { key: "embed_subs", label: "Embed subs", write: false },
+  { key: "write_thumbnail", label: "Write thumbnail", write: true },
+  { key: "embed_thumbnail", label: "Embed thumbnail", write: false },
+  { key: "write_metadata", label: "Write metadata", write: true },
+  { key: "embed_metadata", label: "Embed metadata", write: false },
+  { key: "write_chapters", label: "Write chapters", write: true },
+  { key: "embed_chapters", label: "Embed chapters", write: false },
+  { key: "remux", label: "Remux to mp4", write: false },
+];
+
+async function loadMediaExtrasCapabilities() {
+  try {
+    state.mediaExtrasCapabilities = await getInvoke()(
+      "get_media_extras_capabilities",
+    );
+  } catch {
+    state.mediaExtrasCapabilities = {
+      ffmpeg_available: false,
+      embed_disabled_reason: "ffmpeg not found",
+    };
+  }
+  return state.mediaExtrasCapabilities;
+}
+
+function applyEmbedAvailability(root, caps) {
+  const embedAllowed = Boolean(caps?.ffmpeg_available);
+  const note = caps?.embed_disabled_reason;
+  const noteEl = root.querySelector("[data-embed-note]");
+  if (noteEl) {
+    if (!embedAllowed && note) {
+      noteEl.textContent = note;
+      noteEl.hidden = false;
+    } else {
+      noteEl.hidden = true;
+    }
+  }
+  root.querySelectorAll("[data-embed-only]").forEach((input) => {
+    input.disabled = !embedAllowed;
+    if (!embedAllowed) input.checked = false;
+  });
+}
+
+function renderMediaExtrasPanel(container, options, caps, noteEl) {
+  container.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "probe-media-grid";
+  if (noteEl) {
+    noteEl.dataset.embedNote = "1";
+    noteEl.className = "probe-media-note";
+  }
+
+  for (const field of MEDIA_EXTRA_FIELDS) {
+    const label = document.createElement("label");
+    label.className = "settings-checkbox";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.mediaKey = field.key;
+    if (!field.write) input.dataset.embedOnly = "1";
+    input.checked = Boolean(options?.[field.key]);
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(` ${field.label}`));
+    wrap.appendChild(label);
+  }
+
+  container.appendChild(wrap);
+  applyEmbedAvailability(container, caps);
+  if (noteEl && !caps?.ffmpeg_available && caps?.embed_disabled_reason) {
+    noteEl.textContent = caps.embed_disabled_reason;
+    noteEl.hidden = false;
+  } else if (noteEl) {
+    noteEl.hidden = true;
+  }
+}
+
+function readMediaExtrasFromRoot(root) {
+  const options = {};
+  root.querySelectorAll("[data-media-key]").forEach((input) => {
+    options[input.dataset.mediaKey] = input.checked;
+  });
+  return options;
+}
+
 async function startProbe(url) {
   try {
     probeOverlay.classList.add("open");
@@ -221,6 +316,16 @@ async function showProbeResults(url, result) {
   probeTitle.textContent = result.source_name || "Probe Results";
   probeUrlEl.textContent = url;
   probeItems.innerHTML = "";
+
+  const caps = await loadMediaExtrasCapabilities();
+  let defaults = {};
+  try {
+    defaults = await getInvoke()("get_default_media_extras");
+  } catch {
+    defaults = {};
+  }
+  state.probeMediaExtras = { ...defaults };
+  renderMediaExtrasPanel(probeMediaExtras, state.probeMediaExtras, caps, probeMediaExtrasNote);
 
   if (!result.items || result.items.length === 0) {
     probeItems.innerHTML =
@@ -447,6 +552,7 @@ probeConfirm.addEventListener("click", async () => {
     const selection = {
       url: state.pendingProbe.url,
       items: selectedItems,
+      media_extras: readMediaExtrasFromRoot(probeOverlay),
     };
 
     const invoke = getInvoke();
@@ -957,10 +1063,23 @@ async function openSettings() {
     const root = await invoke("get_library_root");
     const limit = await invoke("get_active_job_limit");
     const audioOnly = await invoke("get_audio_only_mode");
+    const mediaDefaults = await invoke("get_default_media_extras");
+    const caps = await loadMediaExtrasCapabilities();
     state.pendingLibraryRoot = root;
     libraryRootPath.value = root || "";
     activeJobLimitInput.value = String(limit);
     audioOnlyModeInput.checked = Boolean(audioOnly);
+    writeSubsDefault.checked = Boolean(mediaDefaults.write_subs);
+    writeThumbnailDefault.checked = Boolean(mediaDefaults.write_thumbnail);
+    embedSubsDefault.checked = Boolean(mediaDefaults.embed_subs);
+    remuxDefault.checked = Boolean(mediaDefaults.remux);
+    applyEmbedAvailability(settingsOverlay, caps);
+    if (!caps.ffmpeg_available && caps.embed_disabled_reason) {
+      mediaExtrasFfmpegNote.textContent = caps.embed_disabled_reason;
+      mediaExtrasFfmpegNote.hidden = false;
+    } else {
+      mediaExtrasFfmpegNote.hidden = true;
+    }
     settingsOverlay.hidden = false;
   } catch (err) {
     showError(`Settings failed: ${err}`);
@@ -1027,6 +1146,27 @@ audioOnlyModeApply.addEventListener("click", async () => {
     closeSettings();
   } catch (err) {
     showError(`Apply audio-only mode failed: ${err}`);
+  }
+});
+
+mediaExtrasApply.addEventListener("click", async () => {
+  try {
+    await getInvoke()("set_default_media_extras", {
+      options: {
+        write_subs: writeSubsDefault.checked,
+        embed_subs: embedSubsDefault.checked,
+        write_chapters: false,
+        embed_chapters: false,
+        write_thumbnail: writeThumbnailDefault.checked,
+        embed_thumbnail: false,
+        write_metadata: false,
+        embed_metadata: false,
+        remux: remuxDefault.checked,
+      },
+    });
+    closeSettings();
+  } catch (err) {
+    showError(`Apply media defaults failed: ${err}`);
   }
 });
 

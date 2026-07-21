@@ -5,6 +5,7 @@
 
 use crate::integrity::ExpectedHash;
 use crate::job::{Job, JobState};
+use crate::media_extras::MediaExtrasOptions;
 use crate::quality_policy::DefaultQualityPolicy;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -33,11 +34,21 @@ fn default_audio_only_mode() -> bool {
     false
 }
 
+fn default_media_extras() -> MediaExtrasOptions {
+    MediaExtrasOptions::default()
+}
+
 /// Settings loaded from the persisted queue file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualitySettings {
     pub policy: DefaultQualityPolicy,
     pub audio_only_mode: bool,
+}
+
+/// Media extras settings loaded from the persisted queue file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaExtrasSettings {
+    pub defaults: MediaExtrasOptions,
 }
 
 /// On-disk representation of the job queue.
@@ -51,6 +62,8 @@ pub struct PersistedQueue {
     pub default_quality_policy: DefaultQualityPolicy,
     #[serde(default = "default_audio_only_mode")]
     pub audio_only_mode: bool,
+    #[serde(default = "default_media_extras")]
+    pub default_media_extras: MediaExtrasOptions,
     pub jobs: Vec<PersistedJob>,
 }
 
@@ -70,6 +83,8 @@ pub struct PersistedJob {
     pub filename: String,
     #[serde(default)]
     pub expected_hash: Option<ExpectedHash>,
+    #[serde(default = "default_media_extras")]
+    pub media_extras: MediaExtrasOptions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +187,23 @@ pub fn load_quality_settings(library_root: &Path) -> Result<QualitySettings, Str
     })
 }
 
+/// Load Default Media Extras settings from the queue file, if present.
+pub fn load_media_extras_settings(library_root: &Path) -> Result<MediaExtrasSettings, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(MediaExtrasSettings {
+            defaults: MediaExtrasOptions::default(),
+        });
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    Ok(MediaExtrasSettings {
+        defaults: queue.default_media_extras,
+    })
+}
+
 /// Build a persisted queue snapshot from live jobs.
 pub fn build_queue(
     jobs: &[Job],
@@ -179,6 +211,7 @@ pub fn build_queue(
     active_job_limit: u32,
     default_quality_policy: &DefaultQualityPolicy,
     audio_only_mode: bool,
+    default_media_extras: &MediaExtrasOptions,
 ) -> PersistedQueue {
     PersistedQueue {
         version: QUEUE_VERSION,
@@ -186,6 +219,7 @@ pub fn build_queue(
         active_job_limit,
         default_quality_policy: *default_quality_policy,
         audio_only_mode,
+        default_media_extras: *default_media_extras,
         jobs: jobs.iter().map(Job::to_persisted).collect(),
     }
 }
@@ -298,6 +332,7 @@ mod tests {
             DEFAULT_ACTIVE_JOB_LIMIT,
             &DefaultQualityPolicy::default(),
             false,
+            &MediaExtrasOptions::default(),
         );
         save_queue(&root, &queue).unwrap();
 
@@ -385,6 +420,7 @@ mod tests {
             DEFAULT_ACTIVE_JOB_LIMIT,
             &DefaultQualityPolicy::default(),
             false,
+            &MediaExtrasOptions::default(),
         );
         save_queue(&root, &queue).unwrap();
 

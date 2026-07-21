@@ -257,6 +257,26 @@ public class EventChannelService : IDisposable
 
     public void SetAudioOnlyMode(bool enabled) => _core.SetAudioOnlyMode(enabled);
 
+    public MediaExtrasOptions GetDefaultMediaExtras()
+    {
+        var json = _core.GetDefaultMediaExtrasJson();
+        return System.Text.Json.JsonSerializer.Deserialize<MediaExtrasOptions>(json)
+            ?? new MediaExtrasOptions();
+    }
+
+    public void SetDefaultMediaExtras(MediaExtrasOptions options)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(options);
+        _core.SetDefaultMediaExtrasJson(json);
+    }
+
+    public MediaExtrasCapabilities GetMediaExtrasCapabilities()
+    {
+        var json = _core.GetMediaExtrasCapabilitiesJson();
+        return System.Text.Json.JsonSerializer.Deserialize<MediaExtrasCapabilities>(json)
+            ?? new MediaExtrasCapabilities();
+    }
+
     public string? SelectDefaultQuality(IReadOnlyList<Quality> qualities)
     {
         var payload = System.Text.Json.JsonSerializer.Serialize(

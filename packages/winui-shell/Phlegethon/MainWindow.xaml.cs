@@ -40,6 +40,8 @@ public sealed partial class MainWindow : Window
 
         DownloadQueueView.SetActiveJobLimitDisplay((int)_eventService.Core.GetActiveJobLimit());
         DownloadQueueView.SetAudioOnlyModeDisplay(_eventService.GetAudioOnlyMode());
+        DownloadQueueView.SetMediaExtrasDefaultsDisplay(_eventService.GetDefaultMediaExtras());
+        DownloadQueueView.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
 
         // Wire up probe sheet
         ProbeSheetView.ResolveDestinationPreview = json => _eventService.PreviewProbeDestination(json);
@@ -50,6 +52,8 @@ public sealed partial class MainWindow : Window
                 .ToList();
             return _eventService.SelectDefaultQuality(mapped);
         };
+        ProbeSheetView.ResolveDefaultMediaExtras = () => _eventService.GetDefaultMediaExtras();
+        ProbeSheetView.ResolveMediaExtrasCapabilities = () => _eventService.GetMediaExtrasCapabilities();
         ProbeSheetView.Canceled += (_, _) => OnProbeConfirmed();
         ProbeSheetView.Confirmed += (_, json) =>
         {
@@ -255,6 +259,19 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             UrlStatusText.Text = $"Audio-only mode failed: {ex.Message}";
+        }
+    }
+
+    private void OnMediaExtrasDefaultsChanged(object? sender, MediaExtrasOptions options)
+    {
+        try
+        {
+            _eventService.SetDefaultMediaExtras(options);
+            UrlStatusText.Text = "Media extras defaults updated";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Media extras defaults failed: {ex.Message}";
         }
     }
 

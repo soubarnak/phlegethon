@@ -19,6 +19,7 @@
 use crate::extractor::{
     ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
 };
+use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtrasOptions};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
@@ -575,6 +576,10 @@ impl YtDlpExtractorToolchain {
 }
 
 impl ExtractorToolchain for YtDlpExtractorToolchain {
+    fn ffmpeg_dir(&self) -> Option<&std::path::Path> {
+        self.config.ffmpeg_dir.as_deref()
+    }
+
     fn probe(&self, url: &str) -> Result<ProbeResult, String> {
         // Validate URL first
         url::Url::parse(url)
@@ -598,12 +603,14 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         format: &str,
         dest_dir: &std::path::Path,
         stop: &AtomicBool,
+        media_extras: &MediaExtrasOptions,
     ) -> Result<ExtractorDownloadOutcome, String> {
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
         let format_selector = quality_id_to_ytdlp_format(format);
         let out_tmpl = dest_dir.join("%(title).200B [%(id)s].%(ext)s");
+        let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
 
         let mut cmd = Command::new(&self.config.binary_path);
         cmd.arg("--no-warnings")
@@ -615,6 +622,10 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
             .arg("after_move:filepath")
             .arg("--no-playlist")
             .arg(url);
+
+        for arg in ytdlp_media_extras_args(media_extras, ffmpeg_present) {
+            cmd.arg(arg);
+        }
 
         for dir in &self.config.plugin_dirs {
             cmd.arg("--plugin-dirs").arg(dir);

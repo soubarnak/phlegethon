@@ -1,6 +1,7 @@
 //! Job struct — state machine per download job.
 
 use crate::integrity::ExpectedHash;
+use crate::media_extras::MediaExtrasOptions;
 use crate::mirror_set::MirrorSet;
 use crate::storage::{PersistedJob, PersistedJobState};
 use std::path::PathBuf;
@@ -107,6 +108,8 @@ pub struct Job {
     filename: String,
     /// Optional expected digest for post-completion Integrity Check.
     expected_hash: Option<ExpectedHash>,
+    /// Media extras (subs, chapters, thumbnail, metadata, remux) for extractor jobs.
+    media_extras: MediaExtrasOptions,
 }
 
 impl Job {
@@ -180,6 +183,7 @@ impl Job {
             extractor_format: None,
             filename,
             expected_hash: None,
+            media_extras: MediaExtrasOptions::default(),
         }
     }
 
@@ -202,6 +206,7 @@ impl Job {
             extractor_format: persisted.extractor_format,
             filename: persisted.filename,
             expected_hash: persisted.expected_hash,
+            media_extras: persisted.media_extras,
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -234,6 +239,7 @@ impl Job {
             extractor_format: self.extractor_format.clone(),
             filename: self.filename.clone(),
             expected_hash: self.expected_hash.clone(),
+            media_extras: self.media_extras,
         }
     }
 
@@ -245,6 +251,14 @@ impl Job {
     /// Quality / format id for extractor-backed download, if any.
     pub fn extractor_format(&self) -> Option<&str> {
         self.extractor_format.as_deref()
+    }
+
+    pub fn media_extras(&self) -> MediaExtrasOptions {
+        self.media_extras
+    }
+
+    pub fn set_media_extras(&mut self, options: MediaExtrasOptions) {
+        self.media_extras = options;
     }
 
     pub fn id(&self) -> &str {
