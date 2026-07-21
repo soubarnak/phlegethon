@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A single quality/format available for a media item.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Quality {
     /// Canonical identifier (e.g. "1080p", "720p", "best", "worst").
     pub id: String,
@@ -33,6 +33,9 @@ pub struct Quality {
     /// Exact or approximate size in bytes from the Extractor Toolchain
     /// (`filesize` / positive `filesize_approx`). `None` when unknown.
     pub size_bytes: Option<u64>,
+    /// Container extension when known (e.g. `"mp4"`, `"webm"`).
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 /// A single media item discovered during probing.
@@ -197,6 +200,7 @@ impl FakeExtractorToolchain {
                     id: id.to_string(),
                     label: label.to_string(),
                     size_bytes: None,
+                    container: None,
                 })
                 .collect(),
         };
@@ -230,6 +234,7 @@ impl FakeExtractorToolchain {
                     id: id.to_string(),
                     label: label.to_string(),
                     size_bytes: size_bytes.filter(|&n| n > 0),
+                    container: None,
                 })
                 .collect(),
         };
@@ -263,6 +268,7 @@ impl FakeExtractorToolchain {
                         id: qid.to_string(),
                         label: label.to_string(),
                         size_bytes: None,
+                        container: None,
                     })
                     .collect(),
             })

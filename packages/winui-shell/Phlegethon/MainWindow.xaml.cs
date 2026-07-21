@@ -36,11 +36,20 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.DiscardRequested += OnDiscardRequested;
         DownloadQueueView.ReorderRequested += OnReorderRequested;
         DownloadQueueView.ActiveJobLimitChanged += OnActiveJobLimitChanged;
+        DownloadQueueView.AudioOnlyModeChanged += OnAudioOnlyModeChanged;
 
         DownloadQueueView.SetActiveJobLimitDisplay((int)_eventService.Core.GetActiveJobLimit());
+        DownloadQueueView.SetAudioOnlyModeDisplay(_eventService.GetAudioOnlyMode());
 
         // Wire up probe sheet
         ProbeSheetView.ResolveDestinationPreview = json => _eventService.PreviewProbeDestination(json);
+        ProbeSheetView.ResolveDefaultQuality = qualities =>
+        {
+            var mapped = qualities
+                .Select(q => new Quality { Id = q.Id, Label = q.Label })
+                .ToList();
+            return _eventService.SelectDefaultQuality(mapped);
+        };
         ProbeSheetView.Canceled += (_, _) => OnProbeConfirmed();
         ProbeSheetView.Confirmed += (_, json) =>
         {
@@ -231,6 +240,21 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             UrlStatusText.Text = $"Active Job Limit failed: {ex.Message}";
+        }
+    }
+
+    private void OnAudioOnlyModeChanged(object? sender, bool enabled)
+    {
+        try
+        {
+            _eventService.SetAudioOnlyMode(enabled);
+            UrlStatusText.Text = enabled
+                ? "Audio-only mode enabled"
+                : "Audio-only mode disabled";
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Audio-only mode failed: {ex.Message}";
         }
     }
 

@@ -390,6 +390,46 @@ fn reorder_job(
 }
 
 #[tauri::command]
+fn get_audio_only_mode(state: State<AppState>) -> Result<bool, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.audio_only_mode())
+}
+
+#[tauri::command]
+fn set_audio_only_mode(state: State<AppState>, enabled: bool) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_audio_only_mode(enabled)
+}
+
+#[derive(serde::Deserialize)]
+struct QualityInput {
+    id: String,
+    label: String,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+    #[serde(default)]
+    container: Option<String>,
+}
+
+#[tauri::command]
+fn select_default_quality(
+    state: State<AppState>,
+    qualities: Vec<QualityInput>,
+) -> Result<Option<String>, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let qualities: Vec<download_core::Quality> = qualities
+        .into_iter()
+        .map(|q| download_core::Quality {
+            id: q.id,
+            label: q.label,
+            size_bytes: q.size_bytes,
+            container: q.container,
+        })
+        .collect();
+    Ok(core.select_default_quality(&qualities))
+}
+
+#[tauri::command]
 fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
     let rx = state.event_rx.lock().map_err(|e| e.to_string())?;
     let mut events = Vec::new();
@@ -495,6 +535,9 @@ pub fn run() {
             discard_job,
             get_active_job_limit,
             set_active_job_limit,
+            get_audio_only_mode,
+            set_audio_only_mode,
+            select_default_quality,
             reorder_job,
             poll_events,
         ])

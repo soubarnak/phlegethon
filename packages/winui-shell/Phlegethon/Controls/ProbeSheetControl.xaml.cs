@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -50,6 +51,11 @@ public sealed partial class ProbeSheetControl : UserControl
     /// </summary>
     public Func<string, string?>? ResolveDestinationPreview { get; set; }
 
+    /// <summary>
+    /// Resolve the Default Quality Policy selection for a row's qualities.
+    /// </summary>
+    public Func<IReadOnlyList<QualityViewModel>, string?>? ResolveDefaultQuality { get; set; }
+
     public ProbeSheetControl()
     {
         this.InitializeComponent();
@@ -92,7 +98,9 @@ public sealed partial class ProbeSheetControl : UserControl
 
             if (group.Qualities.Count > 0)
             {
-                group.SelectedQuality = group.Qualities[0];
+                var defaultId = ResolveDefaultQuality?.Invoke(group.Qualities);
+                group.SelectedQuality = group.Qualities.FirstOrDefault(q => q.Id == defaultId)
+                    ?? group.Qualities[0];
             }
 
             _groups.Add(group);

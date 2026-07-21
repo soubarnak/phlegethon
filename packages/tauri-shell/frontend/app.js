@@ -65,6 +65,8 @@ const libraryRootPick = $("libraryRootPick");
 const libraryRootApply = $("libraryRootApply");
 const activeJobLimitInput = $("activeJobLimitInput");
 const activeJobLimitApply = $("activeJobLimitApply");
+const audioOnlyModeInput = $("audioOnlyModeInput");
+const audioOnlyModeApply = $("audioOnlyModeApply");
 const discardConfirmOverlay = $("discardConfirmOverlay");
 const discardConfirmTitle = $("discardConfirmTitle");
 const discardConfirmBody = $("discardConfirmBody");
@@ -208,14 +210,14 @@ async function startProbe(url) {
     updateProbeSaveToHint();
 
     const result = await getInvoke()("probe_url", { url });
-    showProbeResults(url, result);
+    await showProbeResults(url, result);
   } catch (err) {
     probeOverlay.classList.remove("open");
     showError(`Probe failed: ${err}`);
   }
 }
 
-function showProbeResults(url, result) {
+async function showProbeResults(url, result) {
   probeTitle.textContent = result.source_name || "Probe Results";
   probeUrlEl.textContent = url;
   probeItems.innerHTML = "";
@@ -237,8 +239,8 @@ function showProbeResults(url, result) {
   probeSelectAll.disabled = false;
   probeDeselectAll.disabled = false;
 
-  result.items.forEach((item, idx) => {
-    // Format duration
+  for (let idx = 0; idx < result.items.length; idx++) {
+    const item = result.items[idx];
     const dur = item.duration ? formatDuration(item.duration) : "";
     const row = document.createElement("div");
     row.className = "probe-item";
@@ -268,8 +270,8 @@ function showProbeResults(url, result) {
     const qualitiesWrap = document.createElement("div");
     qualitiesWrap.className = "probe-item-qualities";
 
-    // Default quality selection
-    const defaultQuality = findDefaultQuality(item.qualities);
+    const defaultQuality = await resolveDefaultQuality(item.qualities);
+    row.dataset.defaultQuality = defaultQuality || "";
 
     item.qualities.forEach((q) => {
       const chip = document.createElement("span");
@@ -283,7 +285,6 @@ function showProbeResults(url, result) {
       }
 
       chip.addEventListener("click", () => {
-        // Deselect all qualities in this item, select this one
         qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
           c.classList.remove("selected");
         });
@@ -301,7 +302,7 @@ function showProbeResults(url, result) {
 
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) {
-        selectDefaultQualityForRow(qualitiesWrap, defaultQuality);
+        selectDefaultQualityForRow(qualitiesWrap, row.dataset.defaultQuality);
       } else {
         qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
           c.classList.remove("selected");
@@ -311,7 +312,7 @@ function showProbeResults(url, result) {
     });
 
     probeItems.appendChild(row);
-  });
+  }
 
   updateProbeSaveToHint();
 }
@@ -327,42 +328,45 @@ function selectDefaultQualityForRow(qualitiesWrap, defaultQuality) {
   target.classList.add("selected");
 }
 
-function setAllProbeItemsSelected(selected) {
-  probeItems.querySelectorAll(".probe-item").forEach((row) => {
+async function setAllProbeItemsSelected(selected) {
+  for (const row of probeItems.querySelectorAll(".probe-item")) {
     const checkbox = row.querySelector(".probe-item-checkbox");
     const qualitiesWrap = row.querySelector(".probe-item-qualities");
     const itemIndex = parseInt(checkbox.dataset.itemIndex, 10);
     const item = state.pendingProbe?.items[itemIndex];
-    if (!checkbox || !qualitiesWrap || !item) return;
+    if (!checkbox || !qualitiesWrap || !item) continue;
 
     checkbox.checked = selected;
     if (selected) {
-      selectDefaultQualityForRow(
-        qualitiesWrap,
-        findDefaultQuality(item.qualities),
-      );
+      const defaultQuality =
+        row.dataset.defaultQuality ||
+        (await resolveDefaultQuality(item.qualities));
+      row.dataset.defaultQuality = defaultQuality || "";
+      selectDefaultQualityForRow(qualitiesWrap, defaultQuality);
     } else {
       qualitiesWrap.querySelectorAll(".quality-chip").forEach((c) => {
         c.classList.remove("selected");
       });
     }
-  });
+  }
   updateProbeSaveToHint();
 }
 
-probeSelectAll.addEventListener("click", () => setAllProbeItemsSelected(true));
-probeDeselectAll.addEventListener("click", () =>
-  setAllProbeItemsSelected(false),
-);
+probeSelectAll.addEventListener("click", () => {
+  void setAllProbeItemsSelected(true);
+});
+probeDeselectAll.addEventListener("click", () => {
+  void setAllProbeItemsSelected(false);
+});
 
-function findDefaultQuality(qualities) {
+async function resolveDefaultQuality(qualities) {
   if (!qualities || qualities.length === 0) return null;
-  // Prefer 720p or 1080p
-  for (const prefix of ["1080p", "720p", "480p", "360p"]) {
-    const found = qualities.find((q) => q.id.startsWith(prefix));
-    if (found) return found.id;
+  try {
+    const selected = await getInvoke()("select_default_quality", { qualities });
+    return selected || qualities[0].id;
+  } catch {
+    return qualities[0].id;
   }
-  return qualities[0].id;
 }
 
 function formatDuration(seconds) {
@@ -371,8 +375,8 @@ function formatDuration(seconds) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-/** Collect currently checked probe items + qualities for Core APIs. */
-function collectProbeSelectionItems() {
+/** Read checked rows with an already-selected quality chip (sync). */
+function collectSelectedItemsFromDom() {
   const selectedItems = [];
   if (!state.pendingProbe) return selectedItems;
 
@@ -382,16 +386,7 @@ function collectProbeSelectionItems() {
 
     const itemIndex = parseInt(checkbox.dataset.itemIndex, 10);
     const item = state.pendingProbe.items[itemIndex];
-    let selectedChip = row.querySelector(".quality-chip.selected");
-
-    if (item && !selectedChip && item.qualities?.length) {
-      const qualitiesWrap = row.querySelector(".probe-item-qualities");
-      selectDefaultQualityForRow(
-        qualitiesWrap,
-        findDefaultQuality(item.qualities),
-      );
-      selectedChip = row.querySelector(".quality-chip.selected");
-    }
+    const selectedChip = row.querySelector(".quality-chip.selected");
 
     if (item && selectedChip) {
       selectedItems.push({
@@ -404,11 +399,44 @@ function collectProbeSelectionItems() {
   return selectedItems;
 }
 
+/** Collect probe selection, filling in Core default qualities when needed. */
+async function collectProbeSelectionItems() {
+  const selectedItems = [];
+  if (!state.pendingProbe) return selectedItems;
+
+  for (const row of probeItems.querySelectorAll(".probe-item")) {
+    const checkbox = row.querySelector(".probe-item-checkbox");
+    if (!checkbox?.checked) continue;
+
+    const itemIndex = parseInt(checkbox.dataset.itemIndex, 10);
+    const item = state.pendingProbe.items[itemIndex];
+    let selectedChip = row.querySelector(".quality-chip.selected");
+
+    if (item && !selectedChip && item.qualities?.length) {
+      const qualitiesWrap = row.querySelector(".probe-item-qualities");
+      const defaultQuality =
+        row.dataset.defaultQuality ||
+        (await resolveDefaultQuality(item.qualities));
+      selectDefaultQualityForRow(qualitiesWrap, defaultQuality);
+      selectedChip = row.querySelector(".quality-chip.selected");
+    }
+
+    if (item && selectedChip) {
+      selectedItems.push({
+        item_id: item.id,
+        quality_id: selectedChip.dataset.qualityId,
+      });
+    }
+  }
+
+  return selectedItems;
+}
+
 // Confirm probe selection
 probeConfirm.addEventListener("click", async () => {
   if (!state.pendingProbe) return;
 
-  const selectedItems = collectProbeSelectionItems();
+  const selectedItems = await collectProbeSelectionItems();
 
   if (selectedItems.length === 0) {
     showError("Select at least one item.");
@@ -856,7 +884,7 @@ function updateProbeSaveToHint() {
     return;
   }
 
-  const selectedItems = collectProbeSelectionItems();
+  const selectedItems = collectSelectedItemsFromDom();
   if (selectedItems.length === 0) {
     probeSaveToPath.textContent = fallbackHint();
     return;
@@ -928,9 +956,11 @@ async function openSettings() {
     const invoke = getInvoke();
     const root = await invoke("get_library_root");
     const limit = await invoke("get_active_job_limit");
+    const audioOnly = await invoke("get_audio_only_mode");
     state.pendingLibraryRoot = root;
     libraryRootPath.value = root || "";
     activeJobLimitInput.value = String(limit);
+    audioOnlyModeInput.checked = Boolean(audioOnly);
     settingsOverlay.hidden = false;
   } catch (err) {
     showError(`Settings failed: ${err}`);
@@ -986,6 +1016,17 @@ activeJobLimitApply.addEventListener("click", async () => {
     closeSettings();
   } catch (err) {
     showError(`Apply Active Job Limit failed: ${err}`);
+  }
+});
+
+audioOnlyModeApply.addEventListener("click", async () => {
+  try {
+    await getInvoke()("set_audio_only_mode", {
+      enabled: audioOnlyModeInput.checked,
+    });
+    closeSettings();
+  } catch (err) {
+    showError(`Apply audio-only mode failed: ${err}`);
   }
 });
 

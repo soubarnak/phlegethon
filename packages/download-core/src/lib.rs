@@ -7,6 +7,7 @@ mod bandwidth;
 mod cabi;
 mod classification;
 mod disk_space;
+mod quality_policy;
 mod event;
 mod extractor;
 mod http;
@@ -38,6 +39,7 @@ pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
 pub use mirror_set::MirrorSet;
+pub use quality_policy::{select_default_quality, DefaultQualityPolicy, DEFAULT_MAX_HEIGHT};
 
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
 use std::collections::HashMap;
@@ -103,6 +105,8 @@ pub struct Core {
     bandwidth_cap: Option<u64>,
     /// Maximum concurrent transferring jobs (default [`DEFAULT_ACTIVE_JOB_LIMIT`]).
     active_job_limit: u32,
+    default_quality_policy: DefaultQualityPolicy,
+    audio_only_mode: bool,
     clock: Arc<dyn bandwidth::Clock>,
     /// Pending probe results, keyed by URL.
     /// Stored until confirm or replaced by a new probe for the same URL.
@@ -260,6 +264,8 @@ impl Core {
             event_tx: tx,
             bandwidth_cap: None,
             active_job_limit: DEFAULT_ACTIVE_JOB_LIMIT,
+            default_quality_policy: DefaultQualityPolicy::default(),
+            audio_only_mode: false,
             clock,
             pending_probes: HashMap::new(),
             last_progress_flush: Instant::now(),
@@ -362,6 +368,9 @@ impl Core {
             self.bandwidth_cap = Some(cap);
         }
         self.active_job_limit = storage::load_active_job_limit(&root)?;
+        let quality_settings = storage::load_quality_settings(&root)?;
+        self.default_quality_policy = quality_settings.policy;
+        self.audio_only_mode = quality_settings.audio_only_mode;
         self.library_root = Some(root);
         self.last_progress_flush = Instant::now();
         self.bytes_since_progress_flush = 0;
@@ -387,7 +396,13 @@ impl Core {
 
     fn persist_queue_now(&mut self) -> Result<(), String> {
         if let Some(root) = &self.library_root {
-            let queue = storage::build_queue(&self.jobs, self.bandwidth_cap, self.active_job_limit);
+            let queue = storage::build_queue(
+                &self.jobs,
+                self.bandwidth_cap,
+                self.active_job_limit,
+                &self.default_quality_policy,
+                self.audio_only_mode,
+            );
             storage::save_queue(root, &queue)?;
         }
         self.last_progress_flush = Instant::now();
@@ -812,6 +827,49 @@ impl Core {
         self.jobs.insert(to_index, job);
         self.persist_queue_now()?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Default Quality Policy + audio-only mode
+    // -----------------------------------------------------------------------
+
+    /// Return the Default Quality Policy (max height, prefer mp4).
+    pub fn default_quality_policy(&self) -> DefaultQualityPolicy {
+        self.default_quality_policy
+    }
+
+    /// Update the Default Quality Policy and persist it.
+    pub fn set_default_quality_policy(
+        &mut self,
+        policy: DefaultQualityPolicy,
+    ) -> Result<(), String> {
+        if policy.max_height == 0 {
+            return Err("Default Quality Policy max height must be at least 1".to_string());
+        }
+        self.default_quality_policy = policy;
+        self.persist_queue_now()?;
+        Ok(())
+    }
+
+    /// Whether audio-only mode overrides the video Default Quality Policy.
+    pub fn audio_only_mode(&self) -> bool {
+        self.audio_only_mode
+    }
+
+    /// Enable or disable audio-only mode and persist the setting.
+    pub fn set_audio_only_mode(&mut self, enabled: bool) -> Result<(), String> {
+        self.audio_only_mode = enabled;
+        self.persist_queue_now()?;
+        Ok(())
+    }
+
+    /// Apply the active Default Quality Policy to a quality list.
+    pub fn select_default_quality(&self, qualities: &[Quality]) -> Option<String> {
+        select_default_quality(
+            qualities,
+            &self.default_quality_policy,
+            self.audio_only_mode,
+        )
     }
 
     // -----------------------------------------------------------------------

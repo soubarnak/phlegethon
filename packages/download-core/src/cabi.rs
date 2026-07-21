@@ -688,6 +688,84 @@ pub unsafe extern "C" fn core_reorder_job(
 }
 
 // ---------------------------------------------------------------------------
+// Default Quality Policy + audio-only mode
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn core_get_audio_only_mode(handle: *mut Core) -> i32 {
+    let ctx = &*(handle as *mut CoreContext);
+    let core_guard = ctx.core.lock().unwrap();
+    if core_guard.audio_only_mode() {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn core_set_audio_only_mode(
+    handle: *mut Core,
+    enabled: i32,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = &mut *core_guard;
+        match core.set_audio_only_mode(enabled != 0) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+/// Select the default quality id for a JSON array of qualities.
+///
+/// Input: `[{"id":"1080p","label":"1080p","size_bytes":null,"container":"mp4"}]`
+/// Output: `"1080p"` (written to `out_json_buf` as a JSON string)
+#[no_mangle]
+pub unsafe extern "C" fn core_select_default_quality_json(
+    handle: *mut Core,
+    qualities_json: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        let core = &*core_guard;
+
+        let qualities_str = cstr_to_str(qualities_json);
+
+        let qualities: Vec<crate::extractor::Quality> = match serde_json::from_str(qualities_str) {
+            Ok(q) => q,
+            Err(e) => {
+                write_str_to_buf(
+                    &format!("parse qualities JSON: {e}"),
+                    error_buf,
+                    error_buf_len,
+                );
+                return -1;
+            }
+        };
+
+        let selected = core.select_default_quality(&qualities);
+        let json = match selected {
+            Some(id) => serde_json::to_string(&id).unwrap(),
+            None => "null".to_string(),
+        };
+        write_str_to_buf(&json, out_json_buf, out_buf_len);
+        0
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Bandwidth caps
 // ---------------------------------------------------------------------------
 
@@ -837,17 +915,6 @@ impl Serialize for crate::extractor::MediaItem {
         st.serialize_field("title", &self.title)?;
         st.serialize_field("url", &self.url)?;
         st.serialize_field("qualities", &self.qualities)?;
-        st.end()
-    }
-}
-
-impl Serialize for crate::extractor::Quality {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("Quality", 3)?;
-        st.serialize_field("id", &self.id)?;
-        st.serialize_field("label", &self.label)?;
-        st.serialize_field("size_bytes", &self.size_bytes)?;
         st.end()
     }
 }

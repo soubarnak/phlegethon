@@ -5807,3 +5807,110 @@ fn disk_precheck_allows_when_size_unknown() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Acceptance: Default Quality Policy + audio-only (issue #53)
+// ---------------------------------------------------------------------------
+
+fn sample_video_qualities() -> Vec<Quality> {
+    vec![
+        Quality {
+            id: "2160p".into(),
+            label: "2160p".into(),
+            size_bytes: None,
+            container: None,
+        },
+        Quality {
+            id: "1080p".into(),
+            label: "1080p".into(),
+            size_bytes: None,
+            container: Some("mp4".into()),
+        },
+        Quality {
+            id: "720p".into(),
+            label: "720p".into(),
+            size_bytes: None,
+            container: None,
+        },
+    ]
+}
+
+#[test]
+fn default_quality_policy_selects_best_at_or_below_1080p() {
+    let (core, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    let selected = core
+        .select_default_quality(&sample_video_qualities())
+        .expect("should select a quality");
+    assert_eq!(selected, "1080p");
+}
+
+#[test]
+fn audio_only_mode_overrides_video_default_quality_policy() {
+    let (mut core, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_audio_only_mode(true).unwrap();
+
+    let qualities = vec![
+        Quality {
+            id: "1080p".into(),
+            label: "1080p".into(),
+            size_bytes: None,
+            container: None,
+        },
+        Quality {
+            id: "256k-audio".into(),
+            label: "high (audio only)".into(),
+            size_bytes: None,
+            container: None,
+        },
+        Quality {
+            id: "130k-audio".into(),
+            label: "medium (audio only)".into(),
+            size_bytes: None,
+            container: None,
+        },
+    ];
+
+    let selected = core
+        .select_default_quality(&qualities)
+        .expect("should select audio");
+    assert_eq!(selected, "256k-audio");
+}
+
+#[test]
+fn audio_only_mode_setting_persists_across_library_root_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(root.clone()).unwrap();
+    core.set_audio_only_mode(true).unwrap();
+
+    let (mut core2, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core2.set_library_root(root).unwrap();
+    assert!(core2.audio_only_mode());
+}
+
+#[test]
+fn default_quality_policy_settings_change_reflected_on_next_selection() {
+    let (mut core, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    let qualities = sample_video_qualities();
+
+    assert_eq!(
+        core.select_default_quality(&qualities).as_deref(),
+        Some("1080p")
+    );
+
+    core.set_audio_only_mode(true).unwrap();
+    let audio_qualities = vec![
+        qualities[1].clone(),
+        Quality {
+            id: "192k-audio".into(),
+            label: "audio".into(),
+            size_bytes: None,
+            container: None,
+        },
+    ];
+    assert_eq!(
+        core.select_default_quality(&audio_qualities).as_deref(),
+        Some("192k-audio")
+    );
+}
+

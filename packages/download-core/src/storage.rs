@@ -5,6 +5,7 @@
 
 use crate::integrity::ExpectedHash;
 use crate::job::{Job, JobState};
+use crate::quality_policy::DefaultQualityPolicy;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,21 @@ fn default_active_job_limit() -> u32 {
     DEFAULT_ACTIVE_JOB_LIMIT
 }
 
+fn default_quality_policy() -> DefaultQualityPolicy {
+    DefaultQualityPolicy::default()
+}
+
+fn default_audio_only_mode() -> bool {
+    false
+}
+
+/// Settings loaded from the persisted queue file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualitySettings {
+    pub policy: DefaultQualityPolicy,
+    pub audio_only_mode: bool,
+}
+
 /// On-disk representation of the job queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedQueue {
@@ -31,6 +47,10 @@ pub struct PersistedQueue {
     pub global_bandwidth_cap: Option<u64>,
     #[serde(default = "default_active_job_limit")]
     pub active_job_limit: u32,
+    #[serde(default = "default_quality_policy")]
+    pub default_quality_policy: DefaultQualityPolicy,
+    #[serde(default = "default_audio_only_mode")]
+    pub audio_only_mode: bool,
     pub jobs: Vec<PersistedJob>,
 }
 
@@ -133,16 +153,39 @@ pub fn load_active_job_limit(library_root: &Path) -> Result<u32, String> {
     Ok(queue.active_job_limit)
 }
 
+/// Load Default Quality Policy settings from the queue file, if present.
+pub fn load_quality_settings(library_root: &Path) -> Result<QualitySettings, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(QualitySettings {
+            policy: DefaultQualityPolicy::default(),
+            audio_only_mode: false,
+        });
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    Ok(QualitySettings {
+        policy: queue.default_quality_policy,
+        audio_only_mode: queue.audio_only_mode,
+    })
+}
+
 /// Build a persisted queue snapshot from live jobs.
 pub fn build_queue(
     jobs: &[Job],
     global_bandwidth_cap: Option<u64>,
     active_job_limit: u32,
+    default_quality_policy: &DefaultQualityPolicy,
+    audio_only_mode: bool,
 ) -> PersistedQueue {
     PersistedQueue {
         version: QUEUE_VERSION,
         global_bandwidth_cap,
         active_job_limit,
+        default_quality_policy: *default_quality_policy,
+        audio_only_mode,
         jobs: jobs.iter().map(Job::to_persisted).collect(),
     }
 }
@@ -249,7 +292,13 @@ mod tests {
 
         let job = Job::new("https://example.com/file.zip".into(), root.clone());
 
-        let queue = build_queue(&[job], Some(1024), DEFAULT_ACTIVE_JOB_LIMIT);
+        let queue = build_queue(
+            &[job],
+            Some(1024),
+            DEFAULT_ACTIVE_JOB_LIMIT,
+            &DefaultQualityPolicy::default(),
+            false,
+        );
         save_queue(&root, &queue).unwrap();
 
         let loaded = load_jobs(&root).unwrap();
@@ -330,7 +379,13 @@ mod tests {
         job.set_bytes_received(512);
         assert_eq!(job.persisted_state(), PersistedJobState::Downloading);
 
-        let queue = build_queue(&[job], None, DEFAULT_ACTIVE_JOB_LIMIT);
+        let queue = build_queue(
+            &[job],
+            None,
+            DEFAULT_ACTIVE_JOB_LIMIT,
+            &DefaultQualityPolicy::default(),
+            false,
+        );
         save_queue(&root, &queue).unwrap();
 
         let loaded = load_jobs(&root).unwrap();

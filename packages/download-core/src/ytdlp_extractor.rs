@@ -465,52 +465,80 @@ impl YtDlpExtractorToolchain {
         for format in formats {
             let label = self.format_label(format);
 
-            // Same label already kept: upgrade missing size if this format has one.
+            // Same label already kept: prefer mp4, upgrade missing size.
             if let Some(idx) = seen_labels.iter().position(|l| l == &label) {
-                if result[idx].size_bytes.is_none() {
+                let incoming_mp4 = format.ext.as_deref().is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+                let existing_mp4 = result[idx]
+                    .container
+                    .as_deref()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+                if incoming_mp4 && !existing_mp4 {
+                    result[idx] = self.quality_from_format(format, &label);
+                } else if result[idx].size_bytes.is_none() {
                     result[idx].size_bytes = usable_format_size(format);
                 }
                 continue;
             }
 
             // Determine quality id: use format_id, or a synthetic stable id
-            let quality_id = if has_video(format) && has_audio(format) {
-                // Combined format: use height-based id
-                if let Some(h) = format.height {
-                    format!("{}p", h)
-                } else if let Some(res) = format.resolution.as_deref() {
-                    res.replace('x', "p")
-                } else {
-                    format.format_id.clone()
-                }
-            } else if has_video(format) && !has_audio(format) {
-                // Video only
-                if let Some(h) = format.height {
-                    format!("{}p-videoonly", h)
-                } else {
-                    format!("{}-videoonly", format.format_id)
-                }
-            } else if has_audio(format) {
-                // Audio only
-                if let Some(tbr) = format.tbr {
-                    let kbps = (tbr / 1000.0).round() as u64;
-                    format!("{}k-audio", kbps.max(1))
-                } else {
-                    format!("{}-audio", format.format_id)
-                }
-            } else {
-                format.format_id.clone()
-            };
+            let quality_id = Self::quality_id_for_format(format, has_video, has_audio);
 
             seen_labels.push(label.clone());
             result.push(Quality {
                 id: quality_id,
                 label,
                 size_bytes: usable_format_size(format),
+                container: format.ext.clone(),
             });
         }
 
         result
+    }
+
+    fn quality_id_for_format(
+        format: &YtDlpFormat,
+        has_video: impl Fn(&YtDlpFormat) -> bool,
+        has_audio: impl Fn(&YtDlpFormat) -> bool,
+    ) -> String {
+        if has_video(format) && has_audio(format) {
+            if let Some(h) = format.height {
+                format!("{}p", h)
+            } else if let Some(res) = format.resolution.as_deref() {
+                res.replace('x', "p")
+            } else {
+                format.format_id.clone()
+            }
+        } else if has_video(format) && !has_audio(format) {
+            if let Some(h) = format.height {
+                format!("{}p-videoonly", h)
+            } else {
+                format!("{}-videoonly", format.format_id)
+            }
+        } else if has_audio(format) {
+            if let Some(tbr) = format.tbr {
+                let kbps = (tbr / 1000.0).round() as u64;
+                format!("{}k-audio", kbps.max(1))
+            } else {
+                format!("{}-audio", format.format_id)
+            }
+        } else {
+            format.format_id.clone()
+        }
+    }
+
+    fn quality_from_format(&self, format: &YtDlpFormat, label: &str) -> Quality {
+        let has_video = |f: &YtDlpFormat| -> bool {
+            f.vcodec.as_deref().map(|c| c != "none").unwrap_or(true)
+        };
+        let has_audio = |f: &YtDlpFormat| -> bool {
+            f.acodec.as_deref().map(|c| c != "none").unwrap_or(true)
+        };
+        Quality {
+            id: Self::quality_id_for_format(format, has_video, has_audio),
+            label: label.to_string(),
+            size_bytes: usable_format_size(format),
+            container: format.ext.clone(),
+        }
     }
 
     /// Build a human-readable label for a format entry.
@@ -851,6 +879,7 @@ fn launch_site_standard_qualities() -> Vec<Quality> {
                 format!("{id}")
             },
             size_bytes: None,
+            container: None,
         })
         .collect()
 }

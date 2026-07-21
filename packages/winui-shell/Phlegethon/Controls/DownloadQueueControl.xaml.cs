@@ -120,6 +120,11 @@ public sealed partial class DownloadQueueControl : UserControl
         ActiveJobLimitBox.Value = limit;
     }
 
+    public void SetAudioOnlyModeDisplay(bool enabled)
+    {
+        AudioOnlyModeBox.IsChecked = enabled;
+    }
+
     public int ActiveJobLimitValue => (int)ActiveJobLimitBox.Value;
 
     /// <summary>Raised when the user clicks Discard on a row (before confirmation).</summary>
@@ -320,8 +325,16 @@ public sealed partial class DownloadQueueControl : UserControl
         ActiveJobLimitChanged?.Invoke(this, ActiveJobLimitValue);
     }
 
+    private void OnAudioOnlyModeChanged(object sender, RoutedEventArgs e)
+    {
+        AudioOnlyModeChanged?.Invoke(this, AudioOnlyModeBox.IsChecked == true);
+    }
+
     /// <summary>Raised when the user applies a new Active Job Limit.</summary>
     public event EventHandler<int>? ActiveJobLimitChanged;
+
+    /// <summary>Raised when the user toggles audio-only mode.</summary>
+    public event EventHandler<bool>? AudioOnlyModeChanged;
 
     // -----------------------------------------------------------------------
     // Helpers

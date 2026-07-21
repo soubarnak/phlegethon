@@ -217,6 +217,15 @@
                     Height="28"
                     Padding="8,0"
                     Click="OnActiveJobLimitApply" />
+                <CheckBox
+                    x:Name="AudioOnlyModeBox"
+                    Content="Audio only"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    VerticalAlignment="Center"
+                    Margin="16,0,0,0"
+                    Checked="OnAudioOnlyModeChanged"
+                    Unchecked="OnAudioOnlyModeChanged" />
             </StackPanel>
         </Border>
     </Grid>

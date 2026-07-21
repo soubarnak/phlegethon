@@ -161,6 +161,25 @@ internal static class CoreBridge
         IntPtr errorBuf,
         int errorBufLen);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int core_get_audio_only_mode(IntPtr handle);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int core_set_audio_only_mode(
+        IntPtr handle,
+        int enabled,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_select_default_quality_json(
+        IntPtr handle,
+        string qualitiesJson,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
@@ -370,6 +389,26 @@ public class CoreHandle : IDisposable
             (UIntPtr)(uint)toIndex,
             IntPtr.Zero,
             0));
+    }
+
+    public bool GetAudioOnlyMode()
+    {
+        return CoreBridge.core_get_audio_only_mode(_handle) != 0;
+    }
+
+    public void SetAudioOnlyMode(bool enabled)
+    {
+        ThrowOnError(CoreBridge.core_set_audio_only_mode(_handle, enabled ? 1 : 0, IntPtr.Zero, 0));
+    }
+
+    public string? SelectDefaultQuality(string qualitiesJson)
+    {
+        var json = CallWithJsonResult(
+            (h, arg, o, ol, e, el) =>
+                CoreBridge.core_select_default_quality_json(h, arg, o, ol, e, el),
+            _handle,
+            qualitiesJson);
+        return System.Text.Json.JsonSerializer.Deserialize<string?>(json);
     }
 
     public string DrainEvents()

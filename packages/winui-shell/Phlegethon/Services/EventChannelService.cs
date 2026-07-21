@@ -253,6 +253,23 @@ public class EventChannelService : IDisposable
         _core.SetActiveJobLimit(limit);
     }
 
+    public bool GetAudioOnlyMode() => _core.GetAudioOnlyMode();
+
+    public void SetAudioOnlyMode(bool enabled) => _core.SetAudioOnlyMode(enabled);
+
+    public string? SelectDefaultQuality(IReadOnlyList<Quality> qualities)
+    {
+        var payload = System.Text.Json.JsonSerializer.Serialize(
+            qualities.Select(q => new
+            {
+                id = q.Id,
+                label = q.Label,
+                size_bytes = (ulong?)null,
+                container = (string?)null,
+            }));
+        return _core.SelectDefaultQuality(payload);
+    }
+
     private static string TitleFromUrl(string url)
     {
         try
