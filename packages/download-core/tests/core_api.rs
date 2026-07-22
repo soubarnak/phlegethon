@@ -6802,6 +6802,40 @@ fn rollback_restores_previous_toolchain_version_when_idle() {
 }
 
 #[test]
+fn rollback_rebinds_extractor_via_apply_sidecar_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let fake = FakeExtractorToolchain::new();
+    let applies = fake.sidecar_root_applies_handle();
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(fake));
+    let sidecar = tmp.path().join("sidecar");
+    let library = tmp.path().join("library");
+    let source: Arc<dyn SidecarUpdateSource> = FakeSidecarUpdateSource::new(catalog);
+    core.set_sidecar_update_source(Arc::clone(&source));
+    core.set_sidecar_root(sidecar.clone()).unwrap();
+    core.set_library_root(library).unwrap();
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    core.apply_sidecar_updates().unwrap();
+    let before_rollback = *applies.lock().unwrap();
+    core.rollback_sidecar(SidecarComponent::Toolchain).unwrap();
+    let after_rollback = *applies.lock().unwrap();
+
+    assert!(
+        after_rollback > before_rollback,
+        "rollback must call apply_sidecar_root (before={before_rollback}, after={after_rollback})"
+    );
+    assert_eq!(
+        core.check_sidecar_updates()
+            .unwrap()
+            .toolchain
+            .installed_version
+            .as_deref(),
+        Some("1.0.0")
+    );
+}
+
+#[test]
 fn deferred_updates_apply_on_launch_when_idle() {
     let tmp = tempfile::tempdir().unwrap();
     let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");

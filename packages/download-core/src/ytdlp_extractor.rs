@@ -192,11 +192,10 @@ impl YtDlpExtractorToolchain {
                 }
             }
         }
-        if let Some(plugin_dir) = crate::plugin_sidecar::plugin_dirs_path(root) {
-            if let Ok(mut dirs) = self.sidecar_plugin_dirs.lock() {
-                if !dirs.iter().any(|d| d == &plugin_dir) {
-                    dirs.push(plugin_dir);
-                }
+        if let Ok(mut dirs) = self.sidecar_plugin_dirs.lock() {
+            dirs.clear();
+            if let Some(plugin_dir) = crate::plugin_sidecar::plugin_dirs_path(root) {
+                dirs.push(plugin_dir);
             }
         }
     }
@@ -204,6 +203,14 @@ impl YtDlpExtractorToolchain {
     #[cfg(test)]
     fn sidecar_binary_for_test(&self) -> Option<PathBuf> {
         self.sidecar_binary.lock().ok().and_then(|g| g.clone())
+    }
+
+    #[cfg(test)]
+    fn sidecar_plugin_dirs_for_test(&self) -> Vec<PathBuf> {
+        self.sidecar_plugin_dirs
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Resolve host to expected extractor key prefixes.
@@ -1692,6 +1699,23 @@ mod tests {
         extractor.bind_sidecar_root(root);
         assert!(extractor.sidecar_binary_for_test().is_none());
         assert_eq!(extractor.effective_binary_path(), PathBuf::from("yt-dlp"));
+    }
+
+    #[test]
+    fn bind_sidecar_root_clears_stale_plugin_dirs_on_rebind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let plugin_dirs = root.join("yt-dlp-plugins");
+        std::fs::create_dir_all(&plugin_dirs).unwrap();
+
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        extractor.bind_sidecar_root(root);
+        extractor.bind_sidecar_root(root);
+        assert_eq!(
+            extractor.sidecar_plugin_dirs_for_test(),
+            vec![plugin_dirs.clone()]
+        );
+        assert_eq!(extractor.effective_plugin_dirs(), vec![plugin_dirs]);
     }
 
     #[test]

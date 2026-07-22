@@ -274,8 +274,8 @@ public sealed partial class MainWindow : Window
         UrlStatusText.Text = enqueued switch
         {
             0 => "No URLs enqueued.",
-            1 => $"Probing / enqueueing: {urls[0]}",
-            _ => $"Probing / enqueueing {enqueued} URLs.",
+            1 => $"Processing: {urls[0]}",
+            _ => $"Processing {enqueued} URLs.",
         };
     }
 
@@ -585,7 +585,7 @@ public sealed partial class MainWindow : Window
     {
         _ = DispatcherQueue.TryEnqueue(() =>
         {
-            var message = TruncateStatus($"Probe failed: {args.Error}");
+            var message = TruncateStatus($"Probe failed ({args.Url}): {args.Error}");
             UrlStatusText.Text = message;
             DownloadQueueView.SetStatus(message);
         });

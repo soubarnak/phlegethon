@@ -165,6 +165,8 @@ pub struct FakeExtractorToolchain {
     orphan_temp_names: Vec<String>,
     /// Optional ffmpeg directory reported to Core for embed/remux capability.
     ffmpeg_dir: Option<std::path::PathBuf>,
+    /// Count of [`ExtractorToolchain::apply_sidecar_root`] calls (tests).
+    sidecar_root_applies: std::sync::Arc<std::sync::Mutex<u32>>,
 }
 
 #[derive(Clone)]
@@ -214,6 +216,19 @@ impl FakeExtractorToolchain {
     /// Report a specific ffmpeg directory to Core (tests: empty dir → unavailable).
     pub fn set_ffmpeg_dir(&mut self, dir: std::path::PathBuf) {
         self.ffmpeg_dir = Some(dir);
+    }
+
+    /// How many times [`ExtractorToolchain::apply_sidecar_root`] was called.
+    pub fn sidecar_root_apply_count(&self) -> u32 {
+        self.sidecar_root_applies
+            .lock()
+            .map(|g| *g)
+            .unwrap_or(0)
+    }
+
+    /// Shared apply counter for tests that hand the fake to Core.
+    pub fn sidecar_root_applies_handle(&self) -> std::sync::Arc<std::sync::Mutex<u32>> {
+        std::sync::Arc::clone(&self.sidecar_root_applies)
     }
 
     /// Insert a single-item probe response.
@@ -331,6 +346,12 @@ impl FakeExtractorToolchain {
 impl ExtractorToolchain for FakeExtractorToolchain {
     fn ffmpeg_dir(&self) -> Option<&std::path::Path> {
         self.ffmpeg_dir.as_deref()
+    }
+
+    fn apply_sidecar_root(&self, _root: &std::path::Path) {
+        if let Ok(mut count) = self.sidecar_root_applies.lock() {
+            *count = count.saturating_add(1);
+        }
     }
 
     fn probe(

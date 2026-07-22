@@ -1182,7 +1182,9 @@ impl Core {
             component,
             self.transfers_active(),
             &mut self.sidecar_runtime_state,
-        )
+        )?;
+        self.extractor.apply_sidecar_root(&root);
+        Ok(())
     }
 
     /// Current Filename Template for extractor job outputs.

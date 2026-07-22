@@ -184,12 +184,8 @@ public class EventChannelService : IDisposable
             }
             catch (Exception ex)
             {
+                // ProbeFailed arrives via the event channel from Core.
                 System.Diagnostics.Debug.WriteLine($"Companion probe error: {ex.Message}");
-                OnProbeFailed?.Invoke(this, new ProbeFailedEventArgs
-                {
-                    Url = probeUrl,
-                    Error = ex.Message,
-                });
             }
         });
         return new CompanionProbeThenConfirm { Url = probeUrl };
@@ -233,14 +229,8 @@ public class EventChannelService : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    // Core also emits ProbeFailed on the event channel; surface here if
-                    // the FFI path fails before that (e.g. JSON parse of error payload).
+                    // ProbeFailed arrives via the event channel from Core.
                     System.Diagnostics.Debug.WriteLine($"Probe error: {ex.Message}");
-                    OnProbeFailed?.Invoke(this, new ProbeFailedEventArgs
-                    {
-                        Url = url,
-                        Error = ex.Message,
-                    });
                 }
             });
         }

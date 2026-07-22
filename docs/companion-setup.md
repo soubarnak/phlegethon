@@ -24,6 +24,36 @@ Platform Shell + Download Core
 
 ## Build
 
+### Prerequisites (Windows / MSVC)
+
+`download-core` (and crates that pull in `ring`) need the **MSVC C++ toolchain** with Windows SDK headers/libs. A plain PowerShell without VC env fails with `vcruntime.h` / `LNK1104: msvcrt.lib` because `INCLUDE` and `LIB` are unset.
+
+Install **Visual Studio 2022 Build Tools** (or Community) with component `Microsoft.VisualStudio.Component.VC.Tools.x86.x64`.
+
+Then either:
+
+1. Open **x64 Native Tools Command Prompt for VS 2022**, `cd` to the repo, and run `cargo`, or
+2. Load DevShell in PowerShell, then build:
+
+```powershell
+$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+  -latest -products * `
+  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+  -property installationPath
+Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64' | Out-Null
+cargo build -p download-core
+```
+
+Or use the helper script (auto-loads DevShell):
+
+```powershell
+./scripts/build-core.ps1
+# optional: ./scripts/build-core.ps1 --release
+```
+
+### Packages
+
 ```bash
 # Native messaging host
 cargo build -p phlegethon-nmh --release
@@ -32,7 +62,7 @@ cargo build -p phlegethon-nmh --release
 cargo build -p phlegethon-tauri
 ```
 
-WinUI shell: build `packages/winui-shell/Phlegethon/Phlegethon.csproj` as usual.
+WinUI shell: build `packages/winui-shell/Phlegethon/Phlegethon.csproj` as usual (`-p:Platform=x64`).
 
 ## Install native messaging host
 
