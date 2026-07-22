@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
@@ -358,18 +359,41 @@ public sealed partial class MainWindow : Window
 
     private void LoadDesktopNotificationsSetting()
     {
-        var settings = ApplicationData.Current.LocalSettings;
-        if (settings.Values.TryGetValue(DesktopNotificationsSettingKey, out var value)
-            && value is bool enabled)
+        // Unpackaged shell has no package identity — Windows.Storage.ApplicationData.Current throws.
+        try
         {
-            _desktopNotificationsEnabled = enabled;
+            var path = DesktopNotificationsSettingsPath();
+            if (File.Exists(path)
+                && bool.TryParse(File.ReadAllText(path).Trim(), out var enabled))
+            {
+                _desktopNotificationsEnabled = enabled;
+            }
+        }
+        catch
+        {
+            // Keep default (_desktopNotificationsEnabled = true).
         }
     }
 
     private void SaveDesktopNotificationsSetting(bool enabled)
     {
         _desktopNotificationsEnabled = enabled;
-        ApplicationData.Current.LocalSettings.Values[DesktopNotificationsSettingKey] = enabled;
+        try
+        {
+            var path = DesktopNotificationsSettingsPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, enabled ? "true" : "false");
+        }
+        catch
+        {
+            // Best-effort persistence for unpackaged local settings.
+        }
+    }
+
+    private static string DesktopNotificationsSettingsPath()
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        return Path.Combine(appData, "Phlegethon", $"{DesktopNotificationsSettingKey}.txt");
     }
 
     private void OnDesktopNotificationsChanged(object sender, RoutedEventArgs e)
