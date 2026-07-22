@@ -43,6 +43,7 @@ public sealed partial class MainWindow : Window
             jobId => DownloadQueueView.FocusJob(jobId));
         _notificationService.EnsureRegistered();
         _eventService.OnProbeResult += OnProbeResult;
+        _eventService.OnProbeFailed += OnProbeFailed;
         _eventService.OnJobProgress += OnJobProgress;
         _eventService.OnJobCompleted += OnJobCompleted;
         _eventService.OnJobFailed += OnJobFailed;
@@ -273,8 +274,8 @@ public sealed partial class MainWindow : Window
         UrlStatusText.Text = enqueued switch
         {
             0 => "No URLs enqueued.",
-            1 => $"Enqueued: {urls[0]}",
-            _ => $"Enqueued {enqueued} URLs.",
+            1 => $"Probing / enqueueing: {urls[0]}",
+            _ => $"Probing / enqueueing {enqueued} URLs.",
         };
     }
 
@@ -564,12 +565,40 @@ public sealed partial class MainWindow : Window
     {
         _ = DispatcherQueue.TryEnqueue(() =>
         {
+            if (args.Items.Count == 0)
+            {
+                UrlStatusText.Text = $"Probe returned no videos: {args.Url}";
+                DownloadQueueView.SetStatus($"Probe empty: {args.Url}");
+                return;
+            }
+
             ProbeSheetView.ShowProbeResult(args.Url, args.Items, args.SourceName);
             DownloadQueueView.Visibility = Visibility.Collapsed;
             HistoryView.Visibility = Visibility.Collapsed;
             ProbeSheetView.Visibility = Visibility.Visible;
             ProbeSheetView.FocusInitial();
+            UrlStatusText.Text = $"Probe ready: {args.Items.Count} item(s)";
         });
+    }
+
+    private void OnProbeFailed(object? sender, ProbeFailedEventArgs args)
+    {
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            var message = TruncateStatus($"Probe failed: {args.Error}");
+            UrlStatusText.Text = message;
+            DownloadQueueView.SetStatus(message);
+        });
+    }
+
+    private static string TruncateStatus(string text, int max = 240)
+    {
+        if (string.IsNullOrEmpty(text) || text.Length <= max)
+        {
+            return text;
+        }
+
+        return text[..(max - 1)] + "…";
     }
 
     private void OnJobQueued(object? sender, JobQueuedEventArgs args)

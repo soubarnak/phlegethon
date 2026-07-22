@@ -22,11 +22,13 @@ use crate::extractor::{
     ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
 };
 use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtrasOptions};
+use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 
@@ -115,6 +117,10 @@ impl YtDlpConfig {
 /// "supported" status for sites that yt-dlp cannot actually resolve.
 pub struct YtDlpExtractorToolchain {
     config: YtDlpConfig,
+    /// Sidecar-resolved yt-dlp binary (overrides [`YtDlpConfig::binary_path`] when set).
+    sidecar_binary: Mutex<Option<PathBuf>>,
+    /// Extra `--plugin-dirs` from the app-managed sidecar root.
+    sidecar_plugin_dirs: Mutex<Vec<PathBuf>>,
     /// Maps known site domains to their expected extractor_key prefixes.
     /// e.g. "youtube.com" → "Youtube"
     expected_extractors: HashMap<&'static str, &'static [&'static str]>,
@@ -150,8 +156,54 @@ impl YtDlpExtractorToolchain {
 
         Self {
             config,
+            sidecar_binary: Mutex::new(None),
+            sidecar_plugin_dirs: Mutex::new(Vec::new()),
             expected_extractors,
         }
+    }
+
+    fn effective_binary_path(&self) -> PathBuf {
+        self.sidecar_binary
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .unwrap_or_else(|| self.config.binary_path.clone())
+    }
+
+    fn effective_plugin_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = self.config.plugin_dirs.clone();
+        if let Ok(extra) = self.sidecar_plugin_dirs.lock() {
+            for dir in extra.iter() {
+                if !dirs.iter().any(|d| d == dir) {
+                    dirs.push(dir.clone());
+                }
+            }
+        }
+        dirs
+    }
+
+    /// Bind toolchain binary + plugin dirs from an installed sidecar root.
+    pub fn bind_sidecar_root(&self, root: &Path) {
+        if let Ok(Some(manifest)) = load_toolchain_manifest(root) {
+            let path = toolchain_binary_path(root, &manifest);
+            if path.is_file() {
+                if let Ok(mut slot) = self.sidecar_binary.lock() {
+                    *slot = Some(path);
+                }
+            }
+        }
+        if let Some(plugin_dir) = crate::plugin_sidecar::plugin_dirs_path(root) {
+            if let Ok(mut dirs) = self.sidecar_plugin_dirs.lock() {
+                if !dirs.iter().any(|d| d == &plugin_dir) {
+                    dirs.push(plugin_dir);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn sidecar_binary_for_test(&self) -> Option<PathBuf> {
+        self.sidecar_binary.lock().ok().and_then(|g| g.clone())
     }
 
     /// Resolve host to expected extractor key prefixes.
@@ -236,7 +288,7 @@ impl YtDlpExtractorToolchain {
         }
         args.extend(ytdlp_cookie_args(cookies));
         args.extend(ytdlp_proxy_args(proxy));
-        for dir in &self.config.plugin_dirs {
+        for dir in self.effective_plugin_dirs() {
             args.push("--plugin-dirs".to_string());
             args.push(dir.display().to_string());
         }
@@ -256,7 +308,7 @@ impl YtDlpExtractorToolchain {
         cookies: &CookieChannel,
         proxy: &ProxySettings,
     ) -> Result<String, String> {
-        let mut cmd = Command::new(&self.config.binary_path);
+        let mut cmd = Command::new(self.effective_binary_path());
         for arg in self.probe_args_for(url, flat_playlist, cookies, proxy) {
             cmd.arg(arg);
         }
@@ -612,6 +664,10 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         self.config.ffmpeg_dir.as_deref()
     }
 
+    fn apply_sidecar_root(&self, root: &Path) {
+        self.bind_sidecar_root(root);
+    }
+
     fn probe(
         &self,
         url: &str,
@@ -652,7 +708,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         let out_tmpl = dest_dir.join(output_template);
         let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
 
-        let mut cmd = Command::new(&self.config.binary_path);
+        let mut cmd = Command::new(self.effective_binary_path());
         cmd.arg("--no-warnings")
             .arg("--no-overwrites")
             .arg("-f")
@@ -671,7 +727,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         append_ytdlp_cookie_args(&mut cmd, cookies);
         append_ytdlp_proxy_args(&mut cmd, proxy);
 
-        for dir in &self.config.plugin_dirs {
+        for dir in self.effective_plugin_dirs() {
             cmd.arg("--plugin-dirs").arg(dir);
         }
         if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
@@ -1607,6 +1663,35 @@ mod tests {
         assert!(!cfg.has_js_runtime);
         assert_eq!(cfg.probe_timeout_secs, 30);
         assert!(cfg.plugin_dirs.is_empty());
+    }
+
+    #[test]
+    fn bind_sidecar_root_overrides_binary_when_file_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let manifest = crate::sidecar_updates::ToolchainManifest::stub("9.9.9");
+        crate::sidecar_updates::write_toolchain_manifest(root, &manifest).unwrap();
+        let binary = crate::sidecar_updates::toolchain_binary_path(root, &manifest);
+        std::fs::write(&binary, b"fake-ytdlp").unwrap();
+
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        assert_eq!(extractor.effective_binary_path(), PathBuf::from("yt-dlp"));
+        extractor.bind_sidecar_root(root);
+        assert_eq!(extractor.sidecar_binary_for_test(), Some(binary.clone()));
+        assert_eq!(extractor.effective_binary_path(), binary);
+    }
+
+    #[test]
+    fn bind_sidecar_root_ignores_missing_binary_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let manifest = crate::sidecar_updates::ToolchainManifest::stub("9.9.9");
+        crate::sidecar_updates::write_toolchain_manifest(root, &manifest).unwrap();
+
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        extractor.bind_sidecar_root(root);
+        assert!(extractor.sidecar_binary_for_test().is_none());
+        assert_eq!(extractor.effective_binary_path(), PathBuf::from("yt-dlp"));
     }
 
     #[test]

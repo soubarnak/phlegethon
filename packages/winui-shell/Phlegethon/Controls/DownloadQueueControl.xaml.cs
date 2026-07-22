@@ -234,6 +234,12 @@ public sealed partial class DownloadQueueControl : UserControl
             ActiveJobLimitBox, ActiveLimitLabel);
     }
 
+    /// <summary>Update the footer status text (probe errors, ready, etc.).</summary>
+    public void SetStatus(string message)
+    {
+        StatusFooter.Text = message;
+    }
+
     /// <summary>Sync the Active Job Limit field from Core settings.</summary>
     public void SetActiveJobLimitDisplay(int limit)
     {

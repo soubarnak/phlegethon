@@ -1084,6 +1084,7 @@ impl Core {
         std::fs::create_dir_all(&root).map_err(|e| format!("create sidecar root: {e}"))?;
         self.sidecar_runtime_state =
             sidecar_updates::load_sidecar_runtime_state(&root)?;
+        self.extractor.apply_sidecar_root(&root);
         self.sidecar_root = Some(root);
         Ok(())
     }
@@ -1117,26 +1118,30 @@ impl Core {
     pub fn apply_sidecar_updates(&mut self) -> Result<SidecarApplyResult, String> {
         let root = self.require_sidecar_root()?.to_path_buf();
         let transfers_active = self.transfers_active();
-        apply_sidecar_updates(
+        let result = apply_sidecar_updates(
             &root,
             &self.sidecar_update_settings,
             self.sidecar_update_source.as_ref(),
             transfers_active,
             &mut self.sidecar_runtime_state,
-        )
+        )?;
+        self.extractor.apply_sidecar_root(&root);
+        Ok(result)
     }
 
     /// On launch: apply deferred updates and optional on-launch check when idle.
     pub fn apply_sidecar_updates_on_launch(&mut self) -> Result<SidecarApplyResult, String> {
         let root = self.require_sidecar_root()?.to_path_buf();
         let transfers_active = self.transfers_active();
-        apply_sidecar_updates_on_launch(
+        let result = apply_sidecar_updates_on_launch(
             &root,
             &self.sidecar_update_settings,
             self.sidecar_update_source.as_ref(),
             transfers_active,
             &mut self.sidecar_runtime_state,
-        )
+        )?;
+        self.extractor.apply_sidecar_root(&root);
+        Ok(result)
     }
 
     /// Pin a sidecar component to a specific version.

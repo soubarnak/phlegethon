@@ -121,6 +121,12 @@ pub trait ExtractorToolchain: Send + Sync {
         None
     }
 
+    /// Refresh toolchain binary / plugin dirs from an app-managed sidecar root.
+    ///
+    /// Production extractors should pick up `toolchain-manifest.json` +
+    /// `yt-dlp-plugins/` under `root`. Fakes ignore this.
+    fn apply_sidecar_root(&self, _root: &std::path::Path) {}
+
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
     fn download(
         &self,

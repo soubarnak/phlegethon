@@ -19,6 +19,12 @@ public class ProbeResultEventArgs : EventArgs
     public string? SourceName { get; init; }
 }
 
+public class ProbeFailedEventArgs : EventArgs
+{
+    public string Url { get; init; } = "";
+    public string Error { get; init; } = "";
+}
+
 public class JobProgressEventArgs : EventArgs
 {
     public string JobId { get; init; } = "";
@@ -122,6 +128,7 @@ public class EventChannelService : IDisposable
     // -----------------------------------------------------------------------
 
     public event EventHandler<ProbeResultEventArgs>? OnProbeResult;
+    public event EventHandler<ProbeFailedEventArgs>? OnProbeFailed;
     public event EventHandler<JobProgressEventArgs>? OnJobProgress;
     public event EventHandler<JobCompletedEventArgs>? OnJobCompleted;
     public event EventHandler<JobFailedEventArgs>? OnJobFailed;
@@ -178,6 +185,11 @@ public class EventChannelService : IDisposable
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Companion probe error: {ex.Message}");
+                OnProbeFailed?.Invoke(this, new ProbeFailedEventArgs
+                {
+                    Url = probeUrl,
+                    Error = ex.Message,
+                });
             }
         });
         return new CompanionProbeThenConfirm { Url = probeUrl };
@@ -221,7 +233,14 @@ public class EventChannelService : IDisposable
                 }
                 catch (Exception ex)
                 {
+                    // Core also emits ProbeFailed on the event channel; surface here if
+                    // the FFI path fails before that (e.g. JSON parse of error payload).
                     System.Diagnostics.Debug.WriteLine($"Probe error: {ex.Message}");
+                    OnProbeFailed?.Invoke(this, new ProbeFailedEventArgs
+                    {
+                        Url = url,
+                        Error = ex.Message,
+                    });
                 }
             });
         }
@@ -515,6 +534,14 @@ public class EventChannelService : IDisposable
                     Url = ev.GetProperty("url").GetString() ?? "",
                     Items = DeserializeItems(ev.GetProperty("items")),
                     SourceName = ev.TryGetProperty("source_name", out var sn) ? sn.GetString() : null,
+                });
+                break;
+
+            case "ProbeFailed":
+                OnProbeFailed?.Invoke(this, new ProbeFailedEventArgs
+                {
+                    Url = ev.GetProperty("url").GetString() ?? "",
+                    Error = ev.GetProperty("error").GetString() ?? "Probe failed",
                 });
                 break;
 
