@@ -64,5 +64,14 @@
   "discard.cannotUndo": "This cannot be undone.",
   "url.placeholder": "Paste or type a URL… then press Enter or click Enqueue",
   "url.enqueue": "Enqueue",
-  "url.saveTo": "Save to…"
+  "url.saveTo": "Save to…",
+  "probe.media.writeSubs": "Write subs",
+  "probe.media.embedSubs": "Embed subs",
+  "probe.media.writeThumbnail": "Write thumbnail",
+  "probe.media.embedThumbnail": "Embed thumbnail",
+  "probe.media.writeMetadata": "Write metadata",
+  "probe.media.embedMetadata": "Embed metadata",
+  "probe.media.writeChapters": "Write chapters",
+  "probe.media.embedChapters": "Embed chapters",
+  "probe.media.remux": "Remux to mp4"
 }

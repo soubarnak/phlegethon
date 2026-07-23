@@ -9,9 +9,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Phlegethon.Services;
 using Phlegethon.Strings;
-using Windows.Storage.Pickers;
 using Windows.UI.Text;
-using WinRT.Interop;
 
 namespace Phlegethon.Controls;
 
@@ -202,15 +200,15 @@ public sealed partial class ProbeSheetControl : UserControl
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         }
 
-        AddMediaExtraToggle(grid, 0, 0, "Write subs", nameof(MediaExtrasOptions.WriteSubs), _mediaExtras.WriteSubs, true);
-        AddMediaExtraToggle(grid, 1, 0, "Embed subs", nameof(MediaExtrasOptions.EmbedSubs), _mediaExtras.EmbedSubs, embedAllowed);
-        AddMediaExtraToggle(grid, 2, 0, "Write thumbnail", nameof(MediaExtrasOptions.WriteThumbnail), _mediaExtras.WriteThumbnail, true);
-        AddMediaExtraToggle(grid, 3, 0, "Embed thumbnail", nameof(MediaExtrasOptions.EmbedThumbnail), _mediaExtras.EmbedThumbnail, embedAllowed);
-        AddMediaExtraToggle(grid, 0, 1, "Write metadata", nameof(MediaExtrasOptions.WriteMetadata), _mediaExtras.WriteMetadata, true);
-        AddMediaExtraToggle(grid, 1, 1, "Embed metadata", nameof(MediaExtrasOptions.EmbedMetadata), _mediaExtras.EmbedMetadata, embedAllowed);
-        AddMediaExtraToggle(grid, 2, 1, "Write chapters", nameof(MediaExtrasOptions.WriteChapters), _mediaExtras.WriteChapters, true);
-        AddMediaExtraToggle(grid, 3, 1, "Embed chapters", nameof(MediaExtrasOptions.EmbedChapters), _mediaExtras.EmbedChapters, embedAllowed);
-        AddMediaExtraToggle(grid, 0, 2, "Remux to mp4", nameof(MediaExtrasOptions.Remux), _mediaExtras.Remux, embedAllowed);
+        AddMediaExtraToggle(grid, 0, 0, ShellStrings.Get("probe.media.writeSubs"), nameof(MediaExtrasOptions.WriteSubs), _mediaExtras.WriteSubs, true);
+        AddMediaExtraToggle(grid, 1, 0, ShellStrings.Get("probe.media.embedSubs"), nameof(MediaExtrasOptions.EmbedSubs), _mediaExtras.EmbedSubs, embedAllowed);
+        AddMediaExtraToggle(grid, 2, 0, ShellStrings.Get("probe.media.writeThumbnail"), nameof(MediaExtrasOptions.WriteThumbnail), _mediaExtras.WriteThumbnail, true);
+        AddMediaExtraToggle(grid, 3, 0, ShellStrings.Get("probe.media.embedThumbnail"), nameof(MediaExtrasOptions.EmbedThumbnail), _mediaExtras.EmbedThumbnail, embedAllowed);
+        AddMediaExtraToggle(grid, 0, 1, ShellStrings.Get("probe.media.writeMetadata"), nameof(MediaExtrasOptions.WriteMetadata), _mediaExtras.WriteMetadata, true);
+        AddMediaExtraToggle(grid, 1, 1, ShellStrings.Get("probe.media.embedMetadata"), nameof(MediaExtrasOptions.EmbedMetadata), _mediaExtras.EmbedMetadata, embedAllowed);
+        AddMediaExtraToggle(grid, 2, 1, ShellStrings.Get("probe.media.writeChapters"), nameof(MediaExtrasOptions.WriteChapters), _mediaExtras.WriteChapters, true);
+        AddMediaExtraToggle(grid, 3, 1, ShellStrings.Get("probe.media.embedChapters"), nameof(MediaExtrasOptions.EmbedChapters), _mediaExtras.EmbedChapters, embedAllowed);
+        AddMediaExtraToggle(grid, 0, 2, ShellStrings.Get("probe.media.remux"), nameof(MediaExtrasOptions.Remux), _mediaExtras.Remux, embedAllowed);
 
         MediaExtrasPanel.Children.Add(grid);
     }
@@ -430,11 +428,48 @@ public sealed partial class ProbeSheetControl : UserControl
             }),
         };
 
-        ConfirmButton.IsEnabled = count > 0;
+        ConfirmButton.IsEnabled = count > 0 && SelectedItemsHaveQuality();
         UpdateSaveToLabel();
     }
 
-    private void UpdateSaveToLabel()
+    private bool SelectedItemsHaveQuality()
+    {
+        foreach (var g in _groups)
+        {
+            if (!g.IsSelected)
+            {
+                continue;
+            }
+
+            if (string.IsNullOrEmpty(g.SelectedQuality?.Id))
+            {
+                return false;
+            }
+        }
+
+        return _groups.Any(g => g.IsSelected);
+    }
+
+    private object BuildSelectionPayload()
+    {
+        var items = new List<object>();
+        foreach (var g in _groups)
+        {
+            if (!g.IsSelected) continue;
+            items.Add(new
+            {
+                item_id = g.Id,
+                quality_id = g.SelectedQuality?.Id ?? "",
+                title = g.Title,
+            });
+        }
+
+        return _saveToDestination != null
+            ? new { url = _probeUrl, items, destination = _saveToDestination, media_extras = ReadMediaExtrasFromUi() }
+            : new { url = _probeUrl, items, media_extras = ReadMediaExtrasFromUi() };
+    }
+
+    private async void UpdateSaveToLabel()
     {
         var selected = 0;
         foreach (var g in _groups)
@@ -451,27 +486,12 @@ public sealed partial class ProbeSheetControl : UserControl
             return;
         }
 
-        var items = new List<object>();
-        foreach (var g in _groups)
-        {
-            if (!g.IsSelected) continue;
-            items.Add(new
-            {
-                item_id = g.Id,
-                quality_id = g.SelectedQuality?.Id ?? "",
-            });
-        }
-
-        object payload = _saveToDestination != null
-            ? new { url = _probeUrl, items, destination = _saveToDestination, media_extras = ReadMediaExtrasFromUi() }
-            : new { url = _probeUrl, items, media_extras = ReadMediaExtrasFromUi() };
-
-        var selectionJson = System.Text.Json.JsonSerializer.Serialize(payload);
+        var selectionJson = System.Text.Json.JsonSerializer.Serialize(BuildSelectionPayload());
         var requestId = ++_previewRequestId;
         string? pathDisplay = null;
         try
         {
-            pathDisplay = ResolveDestinationPreview(selectionJson);
+            pathDisplay = await Task.Run(() => ResolveDestinationPreview?.Invoke(selectionJson));
         }
         catch (Exception ex)
         {
@@ -493,6 +513,14 @@ public sealed partial class ProbeSheetControl : UserControl
     // -----------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------
+
+    /// <summary>Current probe URL (for cancel / clear pending probe).</summary>
+    public string ProbeUrl => _probeUrl;
+
+    /// <summary>
+    /// Fired when Save-to folder picker fails.
+    /// </summary>
+    public event EventHandler<string>? SaveToFailed;
 
     /// <summary>
     /// Fired when the user cancels the probe sheet.
@@ -569,23 +597,20 @@ public sealed partial class ProbeSheetControl : UserControl
         }
     }
 
-    private async void OnSaveToClick(object sender, RoutedEventArgs e)
+    private void OnSaveToClick(object sender, RoutedEventArgs e)
     {
-        var picker = new FolderPicker
+        try
         {
-            SuggestedStartLocation = PickerLocationId.Downloads,
-            ViewMode = PickerViewMode.List,
-        };
-        picker.FileTypeFilter.Add("*");
-
-        var hwnd = WindowNative.GetWindowHandle(GetParentWindow());
-        InitializeWithWindow.Initialize(picker, hwnd);
-
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder != null)
+            var path = FolderPickerService.PickFolder(GetParentWindow(), ShellStrings.Get("probe.saveTo"));
+            if (!string.IsNullOrEmpty(path))
+            {
+                _saveToDestination = path;
+                UpdateSaveToLabel();
+            }
+        }
+        catch (Exception ex)
         {
-            _saveToDestination = folder.Path;
-            UpdateSaveToLabel();
+            SaveToFailed?.Invoke(this, ex.Message);
         }
     }
 
@@ -611,36 +636,17 @@ public sealed partial class ProbeSheetControl : UserControl
         {
             await EnrichSelectedQualitiesAsync();
 
-            var items = new List<object>();
-            foreach (var g in _groups)
-            {
-                if (g.IsSelected)
-                {
-                    items.Add(new
-                    {
-                        item_id = g.Id,
-                        quality_id = g.SelectedQuality?.Id ?? "",
-                        title = g.Title,
-                    });
-                }
-            }
-
-            if (items.Count == 0)
+            if (!SelectedItemsHaveQuality())
             {
                 return;
             }
 
-            object payload = _saveToDestination != null
-                ? new { url = _probeUrl, items, destination = _saveToDestination, media_extras = ReadMediaExtrasFromUi() }
-                : new { url = _probeUrl, items, media_extras = ReadMediaExtrasFromUi() };
-
-            var selectionJson = System.Text.Json.JsonSerializer.Serialize(payload);
+            var selectionJson = System.Text.Json.JsonSerializer.Serialize(BuildSelectionPayload());
             Confirmed?.Invoke(this, selectionJson);
         }
         finally
         {
-            var selected = _groups.Count(g => g.IsSelected);
-            ConfirmButton.IsEnabled = selected > 0;
+            ConfirmButton.IsEnabled = SelectedItemsHaveQuality();
         }
     }
 

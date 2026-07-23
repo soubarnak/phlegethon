@@ -1635,8 +1635,16 @@ impl Core {
             self.jobs.push(job);
         }
 
+        self.pending_probes.remove(&url_key);
         self.persist_queue_now()?;
         Ok(job_ids)
+    }
+
+    /// Drop a stored probe result for a URL (e.g. user cancelled the probe sheet).
+    pub fn clear_pending_probe(&mut self, url_str: &str) -> Result<(), String> {
+        let url_key = normalize_url(url_str).ok_or_else(|| format!("invalid URL: {url_str}"))?;
+        self.pending_probes.remove(&url_key);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1699,12 +1707,33 @@ impl Core {
             let core = Arc::clone(&core);
             let bucket = global_bucket.clone();
             std::thread::spawn(move || {
-                if let Err(e) = Self::run_transfer_outside_lock(core, job_id, bucket) {
-                    eprintln!("transfer job failed: {e}");
+                if let Err(e) = Self::run_transfer_outside_lock(Arc::clone(&core), job_id.clone(), bucket)
+                {
+                    if let Err(report) = Self::report_transfer_thread_failure(core, &job_id, e) {
+                        eprintln!(
+                            "transfer job failure reporting failed for {job_id}: {report}"
+                        );
+                    }
                 }
             });
         }
         Ok(())
+    }
+
+    /// Mark a background transfer thread failure on the job when still pending.
+    fn report_transfer_thread_failure(
+        core: Arc<Mutex<Self>>,
+        job_id: &str,
+        error: String,
+    ) -> Result<(), String> {
+        let mut core = core.lock().map_err(|e| e.to_string())?;
+        let Some(i) = core.jobs.iter().position(|j| j.id() == job_id) else {
+            return Ok(());
+        };
+        if !core.jobs[i].is_pending() {
+            return Ok(());
+        }
+        core.finalize_failed_job(job_id, i, error)
     }
 
     /// Run a job transfer, releasing the Core mutex during blocking body I/O.

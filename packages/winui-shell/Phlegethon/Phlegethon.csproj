@@ -42,13 +42,17 @@
 
   <Target Name="CopyDownloadCore" AfterTargets="Build">
     <PropertyGroup>
-      <DownloadCoreDll>$(RepoRoot)\target\debug\download_core.dll</DownloadCoreDll>
+      <DownloadCoreConfiguration Condition="'$(Configuration)' == 'Release'">release</DownloadCoreConfiguration>
+      <DownloadCoreConfiguration Condition="'$(DownloadCoreConfiguration)' == ''">debug</DownloadCoreConfiguration>
+      <DownloadCoreDll>$(RepoRoot)\target\$(DownloadCoreConfiguration)\download_core.dll</DownloadCoreDll>
     </PropertyGroup>
+    <Error
+      Condition="!Exists('$(DownloadCoreDll)')"
+      Text="download_core.dll not found at $(DownloadCoreDll). Run scripts/build-core.ps1 first." />
     <Copy
       SourceFiles="$(DownloadCoreDll)"
       DestinationFolder="$(TargetDir)"
-      SkipUnchangedFiles="true"
-      Condition="Exists('$(DownloadCoreDll)')" />
+      SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

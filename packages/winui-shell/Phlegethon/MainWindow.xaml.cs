@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Phlegethon.Controls;
 using Phlegethon.Services;
+using Phlegethon.Strings;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 
@@ -25,6 +26,7 @@ public sealed partial class MainWindow : Window
     private bool _windowActive;
     private bool _desktopNotificationsEnabled = true;
     private SettingsDialog? _openSettingsPanel;
+    private string? _urlSaveToDestination;
 
     private enum DuplicateResolution
     {
@@ -50,7 +52,13 @@ public sealed partial class MainWindow : Window
         _eventService.OnJobFailed += OnJobFailed;
         _eventService.OnJobQueued += OnJobQueued;
         _eventService.OnJobDiscarded += OnJobDiscarded;
+        _eventService.OnJobPaused += OnJobPaused;
+        _eventService.OnJobResumed += OnJobResumed;
+        _eventService.OnJobRetried += OnJobRetried;
+        _eventService.OnProcessPendingError += OnProcessPendingError;
         _companionReceiver.OnCompanionIntent += OnCompanionIntent;
+
+        SaveToButton.Content = ShellStrings.Get("url.saveTo");
 
         _clipboardTimer = new Microsoft.UI.Xaml.DispatcherTimer
         {
@@ -59,7 +67,7 @@ public sealed partial class MainWindow : Window
         _clipboardTimer.Tick += OnClipboardTimerTick;
 
         // Start the event loop background task
-        _ = _eventService.StartEventLoopAsync();
+        _ = InitializeAsync();
         _companionReceiver.Start();
 
         // Register drop handler (global paste uses UrlInput / Add URL dialog).
@@ -71,6 +79,9 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.OpenRequested += OnOpenRequested;
         DownloadQueueView.ReorderRequested += OnReorderRequested;
         DownloadQueueView.ActiveJobLimitChanged += OnActiveJobLimitChanged;
+        DownloadQueueView.PauseRequested += OnPauseRequested;
+        DownloadQueueView.ResumeRequested += OnResumeRequested;
+        DownloadQueueView.RetryRequested += OnRetryRequested;
 
         DownloadQueueView.SetActiveJobLimitDisplay((int)_eventService.Core.GetActiveJobLimit());
 
@@ -99,8 +110,49 @@ public sealed partial class MainWindow : Window
         ProbeSheetView.ResolveMediaExtrasCapabilities = () => _eventService.GetMediaExtrasCapabilities();
         ProbeSheetView.ResolveItemQualitiesAsync = (probeUrl, itemId) =>
             Task.Run(() => _eventService.EnrichProbeItemQualities(probeUrl, itemId));
-        ProbeSheetView.Canceled += (_, _) => OnProbeConfirmed();
+        ProbeSheetView.Canceled += OnProbeCanceled;
         ProbeSheetView.Confirmed += OnProbeSheetConfirmed;
+        ProbeSheetView.SaveToFailed += OnProbeSaveToFailed;
+    }
+
+    private async Task InitializeAsync()
+    {
+        await _eventService.StartEventLoopAsync();
+        try
+        {
+            var snapshots = await Task.Run(() => _eventService.ListJobSnapshots());
+            if (snapshots.Count > 0)
+            {
+                _ = DispatcherQueue.TryEnqueue(() => DownloadQueueView.HydrateFromSnapshots(snapshots));
+            }
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Failed to restore queue: {ex.Message}";
+        }
+    }
+
+    private void OnProbeCanceled(object? sender, EventArgs e)
+    {
+        try
+        {
+            var probeUrl = ProbeSheetView.ProbeUrl;
+            if (!string.IsNullOrEmpty(probeUrl))
+            {
+                _eventService.ClearPendingProbe(probeUrl);
+            }
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Probe cancel failed: {ex.Message}";
+        }
+
+        OnProbeConfirmed();
+    }
+
+    private void OnProbeSaveToFailed(object? sender, string error)
+    {
+        UrlStatusText.Text = $"Save to… failed: {error}";
     }
 
     private async void OnProbeSheetConfirmed(object? sender, string json)
@@ -194,6 +246,12 @@ public sealed partial class MainWindow : Window
 
     private void OnHistoryOpenRequested(object? sender, Controls.HistoryItemViewModel item)
     {
+        if (string.Equals(item.Outcome, "Failed", StringComparison.OrdinalIgnoreCase))
+        {
+            UrlStatusText.Text = "Open is only available for completed downloads.";
+            return;
+        }
+
         try
         {
             OutputFileActions.OpenFile(item.Destination);
@@ -239,8 +297,15 @@ public sealed partial class MainWindow : Window
 
     private async void OnEnqueueClick(object sender, RoutedEventArgs e)
     {
-        await ProcessUrlInputAsync(UrlInput.Text);
-        UrlInput.Text = string.Empty;
+        try
+        {
+            await ProcessUrlInputAsync(UrlInput.Text);
+            UrlInput.Text = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Enqueue failed: {ex.Message}";
+        }
     }
 
     private async void OnUrlInputKeyDown(object sender, KeyRoutedEventArgs e)
@@ -278,9 +343,11 @@ public sealed partial class MainWindow : Window
                 continue;
             }
 
-            _eventService.EnqueueUrl(url);
+            _eventService.EnqueueUrl(url, _urlSaveToDestination);
             enqueued++;
         }
+
+        UpdateUrlSaveToHint();
 
         UrlStatusText.Text = enqueued switch
         {
@@ -288,6 +355,36 @@ public sealed partial class MainWindow : Window
             1 => $"Processing: {urls[0]}",
             _ => $"Processing {enqueued} URLs.",
         };
+    }
+
+    private void OnSaveToClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var path = FolderPickerService.PickFolder(this, ShellStrings.Get("url.saveTo"));
+            if (!string.IsNullOrEmpty(path))
+            {
+                _urlSaveToDestination = path;
+                UpdateUrlSaveToHint();
+            }
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Save to… failed: {ex.Message}";
+        }
+    }
+
+    private void UpdateUrlSaveToHint()
+    {
+        if (string.IsNullOrEmpty(_urlSaveToDestination))
+        {
+            SaveToHintText.Visibility = Visibility.Collapsed;
+            SaveToHintText.Text = "";
+            return;
+        }
+
+        SaveToHintText.Visibility = Visibility.Visible;
+        SaveToHintText.Text = $"Save to: {_urlSaveToDestination}";
     }
 
     private async Task<DuplicateResolution> ResolveDuplicateAsync(string url)
@@ -475,21 +572,28 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async void OnPaste(object sender, RoutedEventArgs e)
     {
-        var dataPackage = Clipboard.GetContent();
-        if (!dataPackage.Contains(StandardDataFormats.Text))
+        try
         {
-            return;
-        }
+            var dataPackage = Clipboard.GetContent();
+            if (!dataPackage.Contains(StandardDataFormats.Text))
+            {
+                return;
+            }
 
-        var text = await dataPackage.GetTextAsync();
-        if (string.IsNullOrWhiteSpace(text))
+            var text = await dataPackage.GetTextAsync();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return;
+            }
+
+            UrlInput.Text = text;
+            await ProcessUrlInputAsync(text);
+            UrlInput.Text = string.Empty;
+        }
+        catch (Exception ex)
         {
-            return;
+            UrlStatusText.Text = $"Paste failed: {ex.Message}";
         }
-
-        UrlInput.Text = text;
-        await ProcessUrlInputAsync(text);
-        UrlInput.Text = string.Empty;
     }
 
     /// <summary>
@@ -497,28 +601,35 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async void OnDrop(object sender, DragEventArgs e)
     {
-        e.AcceptedOperation = DataPackageOperation.Link;
-
-        if (e.DataView.Contains(StandardDataFormats.Text))
+        try
         {
-            var text = await e.DataView.GetTextAsync();
-            UrlInput.Text = text;
-            await ProcessUrlInputAsync(text);
-            UrlInput.Text = string.Empty;
-            return;
-        }
+            e.AcceptedOperation = DataPackageOperation.Link;
 
-        if (e.DataView.Contains(StandardDataFormats.StorageItems))
-        {
-            var items = await e.DataView.GetStorageItemsAsync();
-            foreach (var item in items)
+            if (e.DataView.Contains(StandardDataFormats.Text))
             {
-                if (item is StorageFile file && file.FileType == ".url")
+                var text = await e.DataView.GetTextAsync();
+                UrlInput.Text = text;
+                await ProcessUrlInputAsync(text);
+                UrlInput.Text = string.Empty;
+                return;
+            }
+
+            if (e.DataView.Contains(StandardDataFormats.StorageItems))
+            {
+                var items = await e.DataView.GetStorageItemsAsync();
+                foreach (var item in items)
                 {
-                    var text = await FileIO.ReadTextAsync(file);
-                    await ProcessUrlInputAsync(text);
+                    if (item is StorageFile file && file.FileType == ".url")
+                    {
+                        var text = await FileIO.ReadTextAsync(file);
+                        await ProcessUrlInputAsync(text);
+                    }
                 }
             }
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Drop failed: {ex.Message}";
         }
     }
 
@@ -527,34 +638,41 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async void OnAddUrlClick(object sender, RoutedEventArgs e)
     {
-        var dialog = new ContentDialog
+        try
         {
-            Title = "Add Download URL(s)",
-            Content = new TextBox
+            var dialog = new ContentDialog
             {
-                PlaceholderText = "https://example.com/video.mp4",
-                AcceptsReturn = true,
-                TextWrapping = TextWrapping.Wrap,
-                MinHeight = 96,
-                FontFamily = (FontFamily)Application.Current.Resources["GeistMonoFont"],
-            },
-            PrimaryButtonText = "Add",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Primary,
-            XamlRoot = this.Content.XamlRoot,
-        };
+                Title = "Add Download URL(s)",
+                Content = new TextBox
+                {
+                    PlaceholderText = "https://example.com/video.mp4",
+                    AcceptsReturn = true,
+                    TextWrapping = TextWrapping.Wrap,
+                    MinHeight = 96,
+                    FontFamily = (FontFamily)Application.Current.Resources["GeistMonoFont"],
+                },
+                PrimaryButtonText = "Add",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = this.Content.XamlRoot,
+            };
 
-        var result = await dialog.ShowAsync();
-        if (result != ContentDialogResult.Primary)
-        {
-            return;
+            var result = await dialog.ShowAsync();
+            if (result != ContentDialogResult.Primary)
+            {
+                return;
+            }
+
+            var textBox = (TextBox)dialog.Content;
+            var text = textBox.Text.Trim();
+            if (!string.IsNullOrEmpty(text))
+            {
+                await ProcessUrlInputAsync(text);
+            }
         }
-
-        var textBox = (TextBox)dialog.Content;
-        var text = textBox.Text.Trim();
-        if (!string.IsNullOrEmpty(text))
+        catch (Exception ex)
         {
-            await ProcessUrlInputAsync(text);
+            UrlStatusText.Text = $"Add URL failed: {ex.Message}";
         }
     }
 
@@ -686,6 +804,68 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    private void OnJobPaused(object? sender, JobLifecycleEventArgs args)
+    {
+        _ = DispatcherQueue.TryEnqueue(() => DownloadQueueView.MarkJobPaused(args.JobId));
+    }
+
+    private void OnJobResumed(object? sender, JobLifecycleEventArgs args)
+    {
+        _ = DispatcherQueue.TryEnqueue(() => DownloadQueueView.MarkJobResumed(args.JobId));
+    }
+
+    private void OnJobRetried(object? sender, JobLifecycleEventArgs args)
+    {
+        _ = DispatcherQueue.TryEnqueue(() => DownloadQueueView.MarkJobRetried(args.JobId));
+    }
+
+    private void OnProcessPendingError(object? sender, string error)
+    {
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            UrlStatusText.Text = $"Download engine error: {error}";
+        });
+    }
+
+    private void OnPauseRequested(object? sender, DownloadItemViewModel item)
+    {
+        try
+        {
+            _eventService.PauseJob(item.JobId);
+            DownloadQueueView.MarkJobPaused(item.JobId);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Pause failed: {ex.Message}";
+        }
+    }
+
+    private void OnResumeRequested(object? sender, DownloadItemViewModel item)
+    {
+        try
+        {
+            _eventService.ResumeJob(item.JobId);
+            DownloadQueueView.MarkJobResumed(item.JobId);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Resume failed: {ex.Message}";
+        }
+    }
+
+    private void OnRetryRequested(object? sender, DownloadItemViewModel item)
+    {
+        try
+        {
+            _eventService.RetryJob(item.JobId);
+            DownloadQueueView.MarkJobRetried(item.JobId);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Retry failed: {ex.Message}";
+        }
+    }
+
     private void OnReorderRequested(object? sender, (int FromIndex, int ToIndex) args)
     {
         try
@@ -715,12 +895,25 @@ public sealed partial class MainWindow : Window
     {
         var panel = new SettingsDialog();
         _openSettingsPanel = panel;
-        panel.SetAudioOnlyModeDisplay(_eventService.GetAudioOnlyMode());
-        panel.SetMediaExtrasDefaultsDisplay(_eventService.GetDefaultMediaExtras());
-        panel.SetCookieChannelDisplay(_eventService.GetCookieChannel());
-        panel.SetProxySettingsDisplay(_eventService.GetProxySettings());
-        panel.SetSidecarUpdateSettingsDisplay(_eventService.GetSidecarUpdateSettings());
-        panel.SetFilenameTemplateDisplay(_eventService.GetFilenameTemplate());
+        try
+        {
+            var audioOnly = await Task.Run(() => _eventService.GetAudioOnlyMode());
+            var mediaExtras = await Task.Run(() => _eventService.GetDefaultMediaExtras());
+            var cookies = await Task.Run(() => _eventService.GetCookieChannel());
+            var proxy = await Task.Run(() => _eventService.GetProxySettings());
+            var sidecar = await Task.Run(() => _eventService.GetSidecarUpdateSettings());
+            var template = await Task.Run(() => _eventService.GetFilenameTemplate());
+            panel.SetAudioOnlyModeDisplay(audioOnly);
+            panel.SetMediaExtrasDefaultsDisplay(mediaExtras);
+            panel.SetCookieChannelDisplay(cookies);
+            panel.SetProxySettingsDisplay(proxy);
+            panel.SetSidecarUpdateSettingsDisplay(sidecar);
+            panel.SetFilenameTemplateDisplay(template);
+        }
+        catch (Exception ex)
+        {
+            UrlStatusText.Text = $"Settings load failed: {ex.Message}";
+        }
 
         panel.AudioOnlyModeChanged += OnAudioOnlyModeChanged;
         panel.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
@@ -964,6 +1157,17 @@ public sealed partial class MainWindow : Window
             System.Diagnostics.Debug.WriteLine($"Discard error: {ex.Message}");
             UrlStatusText.Text = $"Discard failed: {ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// Called by App when an unhandled UI exception is swallowed.
+    /// </summary>
+    public void ReportUnhandledError(string message)
+    {
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            UrlStatusText.Text = $"Unexpected error: {message}";
+        });
     }
 
     /// <summary>

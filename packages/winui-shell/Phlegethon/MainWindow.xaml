@@ -25,6 +25,7 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
                     <TextBlock
@@ -59,6 +60,16 @@
 
                     <Button
                         Grid.Column="3"
+                        x:Name="SaveToButton"
+                        Content="Save to…"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize14}"
+                        Height="{ThemeResource GeistButtonHeight}"
+                        Margin="8,0,0,0"
+                        Click="OnSaveToClick" />
+
+                    <Button
+                        Grid.Column="4"
                         x:Name="AddUrlButton"
                         Content="Add URL"
                         FontFamily="{ThemeResource GeistSansFont}"
@@ -72,6 +83,7 @@
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
                     <TextBlock
@@ -84,10 +96,21 @@
                         TextTrimming="CharacterEllipsis"
                         ToolTipService.ToolTip="{Binding ElementName=UrlStatusText, Path=Text}" />
 
-                    <StackPanel
+                    <TextBlock
                         Grid.Column="1"
+                        x:Name="SaveToHintText"
+                        Visibility="Collapsed"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                        TextTrimming="CharacterEllipsis"
+                        Margin="0,0,16,0" />
+
+                    <StackPanel
+                        Grid.Column="2"
                         Orientation="Horizontal"
-                        Spacing="16">
+                        Spacing="16"
+                        HorizontalAlignment="Right">
                         <Button
                             x:Name="SettingsButton"
                             Content="Settings"

@@ -53,8 +53,16 @@ public class HistoryItemViewModel : INotifyPropertyChanged
     public string Outcome
     {
         get => _outcome;
-        set => SetField(ref _outcome, value);
+        set
+        {
+            if (SetField(ref _outcome, value))
+            {
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanOpen)));
+            }
+        }
     }
+
+    public bool CanOpen => !string.Equals(Outcome, "Failed", StringComparison.OrdinalIgnoreCase);
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {

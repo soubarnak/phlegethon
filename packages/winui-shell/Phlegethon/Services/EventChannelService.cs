@@ -4,7 +4,6 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace Phlegethon.Services;
@@ -58,6 +57,35 @@ public class JobDiscardedEventArgs : EventArgs
     public string JobId { get; init; } = "";
 }
 
+public class JobLifecycleEventArgs : EventArgs
+{
+    public string JobId { get; init; } = "";
+}
+
+public class JobSnapshot
+{
+    [JsonPropertyName("job_id")]
+    public string JobId { get; init; } = "";
+
+    [JsonPropertyName("url")]
+    public string Url { get; init; } = "";
+
+    [JsonPropertyName("destination")]
+    public string Destination { get; init; } = "";
+
+    [JsonPropertyName("status")]
+    public string Status { get; init; } = "";
+
+    [JsonPropertyName("bytes_downloaded")]
+    public ulong BytesDownloaded { get; init; }
+
+    [JsonPropertyName("total_bytes")]
+    public ulong? TotalBytes { get; init; }
+
+    [JsonPropertyName("title")]
+    public string Title { get; init; } = "";
+}
+
 // ---------------------------------------------------------------------------
 // Data models matching Rust structs
 // ---------------------------------------------------------------------------
@@ -106,7 +134,6 @@ public class ProbeResult
 public class EventChannelService : IDisposable
 {
     private readonly CoreHandle _core;
-    private readonly Channel<JsonElement> _eventChannel;
     private CancellationTokenSource? _cts;
     private Task? _eventLoopTask;
     private Task? _processLoopTask;
@@ -114,10 +141,6 @@ public class EventChannelService : IDisposable
     public EventChannelService()
     {
         _core = new CoreHandle();
-        _eventChannel = Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(256)
-        {
-            FullMode = BoundedChannelFullMode.DropOldest,
-        });
 
         // Set a default library root
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -125,7 +148,6 @@ public class EventChannelService : IDisposable
         var sidecarRoot = System.IO.Path.Combine(appData, "Phlegethon", "Sidecar");
         _core.SetLibraryRoot(libraryRoot);
         _core.SetSidecarRoot(sidecarRoot);
-        _ = _core.ApplySidecarUpdatesOnLaunchJson();
     }
 
     public CoreHandle Core => _core;
@@ -141,6 +163,10 @@ public class EventChannelService : IDisposable
     public event EventHandler<JobFailedEventArgs>? OnJobFailed;
     public event EventHandler<JobQueuedEventArgs>? OnJobQueued;
     public event EventHandler<JobDiscardedEventArgs>? OnJobDiscarded;
+    public event EventHandler<JobLifecycleEventArgs>? OnJobPaused;
+    public event EventHandler<JobLifecycleEventArgs>? OnJobResumed;
+    public event EventHandler<JobLifecycleEventArgs>? OnJobRetried;
+    public event EventHandler<string>? OnProcessPendingError;
 
     // -----------------------------------------------------------------------
     // URL enqueue
@@ -159,6 +185,7 @@ public class EventChannelService : IDisposable
     public CompanionEnqueueResult HandleCompanionEnqueue(string url)
     {
         var json = _core.Enqueue(url);
+        DispatchEnqueueResult(url, json);
         var doc = JsonDocument.Parse(json);
         var type = doc.RootElement.GetProperty("type").GetString();
 
@@ -168,13 +195,6 @@ public class EventChannelService : IDisposable
             var destination = doc.RootElement.TryGetProperty("destination", out var destEl)
                 ? destEl.GetString() ?? ""
                 : "";
-            OnJobQueued?.Invoke(this, new JobQueuedEventArgs
-            {
-                JobId = jobId,
-                Url = url,
-                Destination = destination,
-                Title = TitleFromUrl(url),
-            });
             return new CompanionEnqueueDirect
             {
                 JobId = jobId,
@@ -233,9 +253,16 @@ public class EventChannelService : IDisposable
     /// Enqueue a URL. If classified as probe_then_confirm, the probe-result
     /// event will fire asynchronously.
     /// </summary>
-    public void EnqueueUrl(string url)
+    public void EnqueueUrl(string url, string? destination = null)
     {
-        var json = _core.Enqueue(url);
+        var json = destination != null
+            ? _core.Enqueue(url, destination)
+            : _core.Enqueue(url);
+        DispatchEnqueueResult(url, json);
+    }
+
+    private void DispatchEnqueueResult(string url, string json)
+    {
         var doc = JsonDocument.Parse(json);
         var type = doc.RootElement.GetProperty("type").GetString();
 
@@ -257,6 +284,21 @@ public class EventChannelService : IDisposable
         {
             StartProbeInBackground(url);
         }
+    }
+
+    public void ClearPendingProbe(string url) => _core.ClearPendingProbe(url);
+
+    public void PauseJob(string jobId) => _core.PauseJob(jobId);
+
+    public void ResumeJob(string jobId) => _core.ResumeJob(jobId);
+
+    public void RetryJob(string jobId) => _core.RetryJob(jobId);
+
+    public IReadOnlyList<JobSnapshot> ListJobSnapshots()
+    {
+        var json = _core.ListJobSnapshotsJson();
+        return System.Text.Json.JsonSerializer.Deserialize<List<JobSnapshot>>(json)
+            ?? new List<JobSnapshot>();
     }
 
     /// <summary>
@@ -281,7 +323,7 @@ public class EventChannelService : IDisposable
         return notifications;
     }
 
-    private static IReadOnlyList<JobQueuedEventArgs> BuildJobQueuedNotifications(string selectionJson, string resultJson)
+    private IReadOnlyList<JobQueuedEventArgs> BuildJobQueuedNotifications(string selectionJson, string resultJson)
     {
         var notifications = new List<JobQueuedEventArgs>();
         try
@@ -290,9 +332,11 @@ public class EventChannelService : IDisposable
             var url = selectionDoc.RootElement.TryGetProperty("url", out var urlEl)
                 ? urlEl.GetString() ?? ""
                 : "";
-            var destination = selectionDoc.RootElement.TryGetProperty("destination", out var destEl)
+            var fallbackDestination = selectionDoc.RootElement.TryGetProperty("destination", out var destEl)
                 ? destEl.GetString() ?? ""
                 : "";
+
+            var snapshots = ListJobSnapshots().ToDictionary(j => j.JobId);
 
             using var resultDoc = JsonDocument.Parse(resultJson);
             if (resultDoc.RootElement.ValueKind == JsonValueKind.Array)
@@ -318,6 +362,9 @@ public class EventChannelService : IDisposable
                     var title = index < titles.Count && !string.IsNullOrWhiteSpace(titles[index])
                         ? titles[index]
                         : TitleFromUrl(url);
+                    var destination = snapshots.TryGetValue(jobId, out var snap)
+                        ? snap.Destination
+                        : fallbackDestination;
                     notifications.Add(new JobQueuedEventArgs
                     {
                         JobId = jobId,
@@ -520,6 +567,18 @@ public class EventChannelService : IDisposable
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
 
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                _ = _core.ApplySidecarUpdatesOnLaunchJson();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Sidecar on-launch error: {ex.Message}");
+            }
+        }, token);
+
         // Event drain loop (~10 Hz)
         _eventLoopTask = Task.Run(async () =>
         {
@@ -533,7 +592,6 @@ public class EventChannelService : IDisposable
                         var doc = JsonDocument.Parse(eventsJson);
                         foreach (var ev in doc.RootElement.EnumerateArray())
                         {
-                            await _eventChannel.Writer.WriteAsync(ev, token);
                             DispatchEvent(ev);
                         }
                     }
@@ -563,6 +621,7 @@ public class EventChannelService : IDisposable
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine($"ProcessPending error: {ex.Message}");
+                    OnProcessPendingError?.Invoke(this, ex.Message);
                 }
                 await Task.Delay(200, token);
             }
@@ -612,6 +671,27 @@ public class EventChannelService : IDisposable
 
             case "JobDiscarded":
                 OnJobDiscarded?.Invoke(this, new JobDiscardedEventArgs
+                {
+                    JobId = ev.GetProperty("job_id").GetString() ?? "",
+                });
+                break;
+
+            case "JobPaused":
+                OnJobPaused?.Invoke(this, new JobLifecycleEventArgs
+                {
+                    JobId = ev.GetProperty("job_id").GetString() ?? "",
+                });
+                break;
+
+            case "JobResumed":
+                OnJobResumed?.Invoke(this, new JobLifecycleEventArgs
+                {
+                    JobId = ev.GetProperty("job_id").GetString() ?? "",
+                });
+                break;
+
+            case "JobRetried":
+                OnJobRetried?.Invoke(this, new JobLifecycleEventArgs
                 {
                     JobId = ev.GetProperty("job_id").GetString() ?? "",
                 });

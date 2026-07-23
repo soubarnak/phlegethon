@@ -52,6 +52,10 @@ public partial class App : Application
     {
         WriteStartupCrash("UnhandledException", e.Exception);
         e.Handled = true;
+        if (Application.Current is App { MainWindow: MainWindow main })
+        {
+            main.ReportUnhandledError(e.Exception.Message);
+        }
     }
 
     private static void WriteStartupCrash(string stage, Exception ex)

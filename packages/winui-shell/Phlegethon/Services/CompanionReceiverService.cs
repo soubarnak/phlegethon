@@ -98,6 +98,14 @@ public sealed class CompanionReceiverService : IDisposable
                     CookiesFromBrowser = null,
                 });
             }
+            else
+            {
+                _events.SetCookieChannel(new CookieChannel
+                {
+                    CookieFile = null,
+                    CookiesFromBrowser = null,
+                });
+            }
 
             var url = request.EffectiveUrl();
             var result = _events.HandleCompanionEnqueue(url);

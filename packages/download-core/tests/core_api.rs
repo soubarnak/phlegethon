@@ -7042,3 +7042,69 @@ fn filename_template_collision_suffix_in_core_module() {
     assert_eq!(basename, "Clip (1).mp4");
 }
 
+#[test]
+fn dispatch_pending_emits_job_failed_on_transfer_thread_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, rx) = make_core(Box::new(FailingHttp));
+    let core = Arc::new(Mutex::new(core));
+    core.lock()
+        .unwrap()
+        .set_library_root(tmp.path().join("library"))
+        .unwrap();
+
+    let job_id = {
+        let mut guard = core.lock().unwrap();
+        enqueue_direct_job_id(&mut guard, "https://example.com/fail.zip")
+    };
+
+    Core::dispatch_pending(Arc::clone(&core)).unwrap();
+
+    let mut failed = false;
+    for _ in 0..50 {
+        for ev in collect_events(&rx) {
+            if let CoreEvent::JobFailed { job_id: id, .. } = ev {
+                if id == job_id {
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        failed,
+        "dispatch_pending transfer thread failure should emit JobFailed"
+    );
+
+    let guard = core.lock().unwrap();
+    let snap = guard
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job should remain visible");
+    assert_eq!(snap.status, "failed");
+}
+
+#[test]
+fn clear_pending_probe_allows_re_probe_after_cancel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=cancel-probe",
+        "Cancel Probe Video",
+        "https://cdn.youtube.com/cancel-probe.mp4",
+        vec![("720p", "720p")],
+    );
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let url = "https://www.youtube.com/watch?v=cancel-probe";
+    core.probe(url).unwrap();
+    assert!(core.find_active_job_for_url(url).is_some());
+
+    core.clear_pending_probe(url).unwrap();
+    assert!(core.find_active_job_for_url(url).is_none());
+}
+

@@ -107,6 +107,7 @@
                                     Height="28"
                                     MinWidth="64"
                                     Padding="8,0"
+                                    IsEnabled="{Binding CanOpen}"
                                     Click="OnOpenClick"
                                     Tag="{Binding}"
                                     ToolTipService.ToolTip="Open file" />

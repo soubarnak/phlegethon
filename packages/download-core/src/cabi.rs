@@ -451,6 +451,61 @@ pub unsafe extern "C" fn core_confirm_probe_selection(
     })
 }
 
+/// Clear a stored pending probe for a URL (probe sheet cancelled).
+///
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_clear_pending_probe(
+    handle: *mut Core,
+    url: *const c_char,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let url_str = cstr_to_str(url);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = &mut *core_guard;
+        match core.clear_pending_probe(url_str) {
+            Ok(()) => 0,
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
+/// List current jobs as a JSON array of [`JobSnapshot`] objects.
+///
+/// On success writes JSON to `out_json_buf`. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_list_job_snapshots_json(
+    handle: *mut Core,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let core_guard = ctx.core.lock().unwrap();
+        let core = &*core_guard;
+        let snapshots = core.list_job_snapshots();
+        match serde_json::to_string(&snapshots) {
+            Ok(s) => {
+                write_str_to_buf(&s, out_json_buf, out_buf_len);
+                0
+            }
+            Err(e) => {
+                let err = format!("serialize job snapshots: {e}");
+                write_str_to_buf(&err, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
 /// Preview the Job Destination path for a probe selection without creating jobs.
 ///
 /// `selection_json` matches [`core_confirm_probe_selection`]: a [`ProbeSelection`]

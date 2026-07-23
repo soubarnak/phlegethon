@@ -72,6 +72,16 @@ internal static class CoreBridge
         IntPtr errorBuf,
         int errorBufLen);
 
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_enqueue_with_destination(
+        IntPtr handle,
+        string url,
+        string destination,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
     // -----------------------------------------------------------------------
     // Probe-then-Confirm
     // -----------------------------------------------------------------------
@@ -108,6 +118,21 @@ internal static class CoreBridge
     public static extern int core_preview_probe_destination(
         IntPtr handle,
         string selectionJson,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_clear_pending_probe(
+        IntPtr handle,
+        string url,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_list_job_snapshots_json(
+        IntPtr handle,
         IntPtr outJsonBuf,
         int outBufLen,
         IntPtr errorBuf,
@@ -585,6 +610,26 @@ public class CoreHandle : IDisposable
     {
         return CallWithJsonResult(
             (h, o, ol, e, el) => CoreBridge.core_enqueue(h, url, o, ol, e, el),
+            _handle);
+    }
+
+    public string Enqueue(string url, string destination)
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) =>
+                CoreBridge.core_enqueue_with_destination(h, url, destination, o, ol, e, el),
+            _handle);
+    }
+
+    public void ClearPendingProbe(string url)
+    {
+        ThrowOnError(CoreBridge.core_clear_pending_probe(_handle, url, IntPtr.Zero, 0));
+    }
+
+    public string ListJobSnapshotsJson()
+    {
+        return CallWithJsonResult(
+            (h, o, ol, e, el) => CoreBridge.core_list_job_snapshots_json(h, o, ol, e, el),
             _handle);
     }
 

@@ -303,6 +303,10 @@ public sealed partial class DownloadQueueControl : UserControl
     /// <summary>Raised when the user reorders a row (fromIndex, toIndex).</summary>
     public event EventHandler<(int FromIndex, int ToIndex)>? ReorderRequested;
 
+    public event EventHandler<DownloadItemViewModel>? PauseRequested;
+    public event EventHandler<DownloadItemViewModel>? ResumeRequested;
+    public event EventHandler<DownloadItemViewModel>? RetryRequested;
+
     /// <summary>
     /// Add or update a job row.
     /// </summary>
@@ -433,7 +437,102 @@ public sealed partial class DownloadQueueControl : UserControl
                 return;
             }
         }
+
+        AddOrUpdateJob(
+            jobId,
+            "Download",
+            $"Failed: {error}",
+            DownloadStatus.Failed,
+            0);
     }
+
+    public void MarkJobPaused(string jobId)
+    {
+        foreach (var item in _items)
+        {
+            if (item.JobId == jobId)
+            {
+                item.Status = DownloadStatus.Paused;
+                UpdateVisualStatus(item);
+                RefreshView();
+                return;
+            }
+        }
+    }
+
+    public void MarkJobResumed(string jobId)
+    {
+        foreach (var item in _items)
+        {
+            if (item.JobId == jobId)
+            {
+                item.Status = DownloadStatus.Queued;
+                item.Subtitle = "Queued";
+                UpdateVisualStatus(item);
+                RefreshView();
+                return;
+            }
+        }
+    }
+
+    public void MarkJobRetried(string jobId)
+    {
+        foreach (var item in _items)
+        {
+            if (item.JobId == jobId)
+            {
+                item.Status = DownloadStatus.Queued;
+                item.Subtitle = "Queued";
+                UpdateVisualStatus(item);
+                RefreshView();
+                return;
+            }
+        }
+    }
+
+    public void HydrateFromSnapshots(IReadOnlyList<JobSnapshot> snapshots)
+    {
+        _items.Clear();
+        foreach (var snap in snapshots)
+        {
+            var status = MapSnapshotStatus(snap.Status);
+            var progress = status == DownloadStatus.Completed
+                ? 100.0
+                : Phlegethon.ProgressDisplay.DisplayPercent(snap.BytesDownloaded, snap.TotalBytes) ?? 0;
+            var subtitle = status switch
+            {
+                DownloadStatus.Failed => "Failed",
+                DownloadStatus.Paused => "Paused",
+                DownloadStatus.Completed => $"Downloaded to {snap.Destination}",
+                DownloadStatus.Downloading => FormatProgress(snap.BytesDownloaded, snap.TotalBytes),
+                _ => string.IsNullOrEmpty(snap.Destination) ? "Queued" : $"Save to {snap.Destination}",
+            };
+            var item = new DownloadItemViewModel
+            {
+                JobId = snap.JobId,
+                Title = snap.Title,
+                Url = snap.Url,
+                Destination = snap.Destination,
+                Subtitle = subtitle,
+                Status = status,
+                ProgressPercent = progress,
+                TotalBytes = snap.TotalBytes,
+            };
+            UpdateVisualStatus(item);
+            _items.Add(item);
+        }
+
+        RefreshView();
+    }
+
+    private static DownloadStatus MapSnapshotStatus(string status) => status switch
+    {
+        "paused" => DownloadStatus.Paused,
+        "failed" => DownloadStatus.Failed,
+        "completed" => DownloadStatus.Completed,
+        "pending" => DownloadStatus.Queued,
+        _ => DownloadStatus.Queued,
+    };
 
     /// <summary>Scroll to and highlight a queue row by job id.</summary>
     public bool FocusJob(string jobId)
@@ -529,25 +628,17 @@ public sealed partial class DownloadQueueControl : UserControl
         {
             case DownloadStatus.Downloading:
             case DownloadStatus.Queued:
-                item.Status = DownloadStatus.Paused;
-                UpdateVisualStatus(item);
+                PauseRequested?.Invoke(this, item);
                 break;
             case DownloadStatus.Paused:
-                item.Status = DownloadStatus.Downloading;
-                UpdateVisualStatus(item);
+                ResumeRequested?.Invoke(this, item);
                 break;
             case DownloadStatus.Failed:
-                // Retry stays local until Core pause/resume/retry wiring lands.
-                item.Status = DownloadStatus.Queued;
-                item.Subtitle = "Queued";
-                UpdateVisualStatus(item);
+                RetryRequested?.Invoke(this, item);
                 break;
             case DownloadStatus.Completed:
-                // Completed uses Discard only (always-confirm flow).
                 break;
         }
-
-        RefreshView();
     }
 
     private void OnDiscardClick(object sender, RoutedEventArgs e)
