@@ -117,13 +117,12 @@
                         Background="Transparent"
                         BorderBrush="{ThemeResource GeistBorderBrush}"
                         BorderThickness="0,0,0,1"
-                        Height="{ThemeResource GeistRowHeight}"
-                        Padding="12,0">
+                        MinHeight="{ThemeResource GeistRowHeight}"
+                        Padding="12,8">
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="80" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
 
@@ -149,7 +148,7 @@
                             <StackPanel
                                 Grid.Column="1"
                                 VerticalAlignment="Center"
-                                Spacing="2">
+                                Spacing="4">
                                 <TextBlock
                                     Text="{Binding Title}"
                                     FontFamily="{ThemeResource GeistSansFont}"
@@ -167,29 +166,19 @@
                                     TextTrimming="CharacterEllipsis"
                                     TextWrapping="NoWrap"
                                     MaxLines="1" />
-                            </StackPanel>
-
-                            <!-- Progress bar -->
-                            <Grid
-                                Grid.Column="2"
-                                VerticalAlignment="Center"
-                                Height="3">
-                                <Border
-                                    Height="3"
-                                    CornerRadius="{ThemeResource GeistProgressTrackRadius}"
+                                <ProgressBar
+                                    Value="{Binding ProgressPercent}"
+                                    Maximum="100"
+                                    Height="8"
+                                    IsIndeterminate="{Binding ProgressIsIndeterminate}"
+                                    Visibility="{Binding ProgressBarVisibility}"
+                                    Foreground="{ThemeResource GeistProgressActiveBrush}"
                                     Background="{ThemeResource GeistGray200}" />
-                                <Border
-                                    x:Name="ProgressFill"
-                                    Width="{Binding ProgressPercent, Converter={StaticResource PercentToWidthConverter}}"
-                                    Height="3"
-                                    CornerRadius="{ThemeResource GeistProgressTrackRadius}"
-                                    Background="{ThemeResource GeistProgressActiveBrush}"
-                                    HorizontalAlignment="Left" />
-                            </Grid>
+                            </StackPanel>
 
                             <!-- Primary action + Discard -->
                             <StackPanel
-                                Grid.Column="3"
+                                Grid.Column="2"
                                 Orientation="Horizontal"
                                 Spacing="6"
                                 VerticalAlignment="Center">
@@ -273,272 +262,59 @@
             VerticalAlignment="Center"
             Visibility="Visible" />
 
-        <!-- Footer status bar -->
+        <!-- Footer: status + active download limit only -->
         <Border
             Grid.Row="3"
             BorderBrush="{ThemeResource GeistBorderBrush}"
             BorderThickness="0,1,0,0"
             Padding="12,6"
             Background="{ThemeResource GeistSurfaceBrush}">
-            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <Grid VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <TextBlock
+                    Grid.Column="0"
                     x:Name="StatusFooter"
                     Text="Ready"
                     FontFamily="{ThemeResource GeistSansFont}"
                     FontSize="{ThemeResource GeistTypeSize12}"
                     Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                    VerticalAlignment="Center" />
-                <TextBlock
-                    x:Name="ActiveLimitLabel"
-                    Text="Active limit"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
                     VerticalAlignment="Center"
-                    Margin="16,0,0,0" />
-                <NumberBox
-                    x:Name="ActiveJobLimitBox"
-                    Minimum="1"
-                    SpinButtonPlacementMode="Inline"
-                    Width="72"
-                    Height="28"
-                    VerticalAlignment="Center"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}" />
-                <Button
-                    Content="Apply"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    VerticalAlignment="Center"
-                    Click="OnActiveJobLimitApply" />
-                <CheckBox
-                    x:Name="AudioOnlyModeBox"
-                    Content="Audio only"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    VerticalAlignment="Center"
-                    Margin="16,0,0,0"
-                    Checked="OnAudioOnlyModeChanged"
-                    Unchecked="OnAudioOnlyModeChanged" />
-                <CheckBox
-                    x:Name="WriteSubsDefaultBox"
-                    Content="Write subs"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    VerticalAlignment="Center"
-                    Margin="16,0,0,0" />
-                <CheckBox
-                    x:Name="WriteThumbnailDefaultBox"
-                    Content="Write thumbnail"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    VerticalAlignment="Center"
-                    Margin="8,0,0,0" />
-                <Button
-                    Content="Apply media defaults"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="8,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnMediaExtrasDefaultsApply" />
-                <TextBlock
-                    Text="Filename template"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                    VerticalAlignment="Center"
-                    Margin="16,0,0,0" />
-                <TextBox
-                    x:Name="FilenameTemplateBox"
-                    PlaceholderText="%(title).200B [%(id)s].%(ext)s"
-                    Width="260"
-                    Height="28"
-                    MinHeight="28"
-                    Padding="8,0"
-                    VerticalAlignment="Center"
-                    VerticalContentAlignment="Center"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}" />
-                <Button
-                    Content="Apply template"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="8,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnFilenameTemplateApply" />
-                <TextBlock
-                    Text="Cookies browser"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                    VerticalAlignment="Center"
-                    Margin="16,0,0,0" />
-                <TextBox
-                    x:Name="CookiesFromBrowserBox"
-                    PlaceholderText="chrome, firefox, edge…"
-                    Width="120"
-                    Height="28"
-                    MinHeight="28"
-                    Padding="8,0"
-                    VerticalAlignment="Center"
-                    VerticalContentAlignment="Center"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}" />
-                <TextBlock
-                    Text="Cookie file"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                    VerticalAlignment="Center"
-                    Margin="8,0,0,0" />
-                <TextBox
-                    x:Name="CookieFileBox"
-                    PlaceholderText="Absolute path (optional)"
-                    Width="180"
-                    Height="28"
-                    MinHeight="28"
-                    Padding="8,0"
-                    VerticalAlignment="Center"
-                    VerticalContentAlignment="Center"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}" />
-                <Button
-                    Content="Apply cookies"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="8,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnCookieChannelApply" />
-                <TextBlock
-                    Text="Proxy URL"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                    VerticalAlignment="Center"
-                    Margin="16,0,0,0" />
-                <TextBox
-                    x:Name="ProxyUrlBox"
-                    PlaceholderText="http://host:port or socks5://host:port"
-                    Width="220"
-                    Height="28"
-                    MinHeight="28"
-                    Padding="8,0"
-                    VerticalAlignment="Center"
-                    VerticalContentAlignment="Center"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}" />
-                <Button
-                    Content="Apply proxy"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="8,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnProxySettingsApply" />
-                <CheckBox
-                    x:Name="CheckSidecarUpdatesOnLaunchBox"
-                    Content="Check sidecar updates on launch"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    VerticalAlignment="Center"
-                    Margin="16,0,0,0"
-                    Checked="OnSidecarUpdateSettingsChanged"
-                    Unchecked="OnSidecarUpdateSettingsChanged" />
-                <Button
-                    Content="Check updates"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="8,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnCheckSidecarUpdates" />
-                <Button
-                    Content="Apply updates"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="8,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnApplySidecarUpdates" />
-                <TextBox
-                    x:Name="ToolchainPinBox"
-                    PlaceholderText="Toolchain pin"
-                    Width="100"
-                    Height="28"
-                    MinHeight="28"
-                    Padding="8,0"
-                    VerticalAlignment="Center"
-                    VerticalContentAlignment="Center"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}" />
-                <Button
-                    Content="Pin toolchain"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="4,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnPinToolchain" />
-                <Button
-                    Content="Rollback toolchain"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="4,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnRollbackToolchain" />
-                <TextBox
-                    x:Name="PluginPinBox"
-                    PlaceholderText="Plugin pin"
-                    Width="90"
-                    Height="28"
-                    MinHeight="28"
-                    Padding="8,0"
-                    VerticalAlignment="Center"
-                    VerticalContentAlignment="Center"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Margin="8,0,0,0" />
-                <Button
-                    Content="Pin plugin"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="4,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnPinPlugin" />
-                <Button
-                    Content="Rollback plugin"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Height="28"
-                    Padding="8,0"
-                    Margin="4,0,0,0"
-                    VerticalAlignment="Center"
-                    Click="OnRollbackPlugin" />
-                <TextBlock
-                    x:Name="SidecarUpdateStatusText"
-                    Text=""
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize12}"
-                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                    VerticalAlignment="Center"
-                    Margin="8,0,0,0" />
-            </StackPanel>
+                    TextTrimming="CharacterEllipsis"
+                    ToolTipService.ToolTip="{Binding ElementName=StatusFooter, Path=Text}" />
+                <StackPanel
+                    Grid.Column="1"
+                    Orientation="Horizontal"
+                    Spacing="8"
+                    VerticalAlignment="Center">
+                    <TextBlock
+                        x:Name="ActiveLimitLabel"
+                        Text="Active limit"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                        VerticalAlignment="Center" />
+                    <NumberBox
+                        x:Name="ActiveJobLimitBox"
+                        Minimum="1"
+                        SpinButtonPlacementMode="Inline"
+                        Width="72"
+                        Height="28"
+                        VerticalAlignment="Center"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}" />
+                    <Button
+                        Content="Apply"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Height="28"
+                        Padding="8,0"
+                        VerticalAlignment="Center"
+                        Click="OnActiveJobLimitApply" />
+                </StackPanel>
+            </Grid>
         </Border>
     </Grid>
 </UserControl>

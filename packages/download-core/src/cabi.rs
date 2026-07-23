@@ -345,6 +345,42 @@ pub unsafe extern "C" fn core_probe(
     })
 }
 
+/// Fetch exact formats for one item in a pending probe (updates stored qualities).
+///
+/// On success writes a JSON array of qualities to `out_json_buf`.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn core_enrich_probe_item_qualities_json(
+    handle: *mut Core,
+    probe_url: *const c_char,
+    item_id: *const c_char,
+    out_json_buf: *mut c_char,
+    out_buf_len: usize,
+    error_buf: *mut c_char,
+    error_buf_len: usize,
+) -> i32 {
+    catch_panic_i32!({
+        let ctx = &*(handle as *mut CoreContext);
+        let probe_url_str = cstr_to_str(probe_url);
+        let item_id_str = cstr_to_str(item_id);
+        let mut core_guard = ctx.core.lock().unwrap();
+        let core = &mut *core_guard;
+
+        match core.enrich_probe_item_qualities(probe_url_str, item_id_str) {
+            Ok(qualities) => {
+                let json = serde_json::to_value(&qualities).unwrap();
+                let s = json.to_string();
+                write_str_to_buf(&s, out_json_buf, out_buf_len);
+                0
+            }
+            Err(e) => {
+                write_str_to_buf(&e, error_buf, error_buf_len);
+                -1
+            }
+        }
+    })
+}
+
 /// Confirm a probe selection and create download jobs.
 ///
 /// `selection_json` is a JSON string:

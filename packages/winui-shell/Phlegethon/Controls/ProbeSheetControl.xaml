@@ -46,15 +46,32 @@
                 </StackPanel>
 
                 <!-- Cancel button -->
-                <Button
-                    Grid.Column="1"
-                    x:Name="CancelButton"
-                    Content="Cancel"
-                    automation:AutomationProperties.Name="Cancel"
-                    FontFamily="{ThemeResource GeistSansFont}"
-                    FontSize="{ThemeResource GeistTypeSize13}"
-                    Height="{ThemeResource GeistButtonHeight}"
-                    Click="OnCancelClick" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button
+                        x:Name="SelectAllButton"
+                        Content="Select all"
+                        automation:AutomationProperties.Name="Select all"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize13}"
+                        Height="{ThemeResource GeistButtonHeight}"
+                        Click="OnSelectAllClick" />
+                    <Button
+                        x:Name="DeselectAllButton"
+                        Content="Deselect all"
+                        automation:AutomationProperties.Name="Deselect all"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize13}"
+                        Height="{ThemeResource GeistButtonHeight}"
+                        Click="OnDeselectAllClick" />
+                    <Button
+                        x:Name="CancelButton"
+                        Content="Cancel"
+                        automation:AutomationProperties.Name="Cancel"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize13}"
+                        Height="{ThemeResource GeistButtonHeight}"
+                        Click="OnCancelClick" />
+                </StackPanel>
             </Grid>
         </Border>
 

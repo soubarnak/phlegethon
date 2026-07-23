@@ -91,6 +91,22 @@ pub trait ExtractorToolchain: Send + Sync {
         proxy: &ProxySettings,
     ) -> Result<ProbeResult, String>;
 
+    /// Fetch exact available formats for one playlist entry (non-flat probe).
+    fn probe_item_qualities(
+        &self,
+        item_url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Result<Vec<Quality>, String> {
+        let result = self.probe(item_url, cookies, proxy)?;
+        result
+            .items
+            .into_iter()
+            .next()
+            .map(|item| item.qualities)
+            .ok_or_else(|| format!("probe returned no items for {item_url}"))
+    }
+
     /// Download media for a Launch Site URL into `dest_dir` via the toolchain.
     ///
     /// `format` is a quality id from probe (e.g. `"720p"`, `"best"`) mapped to

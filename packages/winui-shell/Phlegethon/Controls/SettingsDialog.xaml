@@ -1,0 +1,229 @@
+<UserControl
+    x:Class="Phlegethon.Controls.SettingsDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    MinWidth="480"
+    MaxWidth="560"
+    MaxHeight="520">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Spacing="16" Padding="4">
+            <StackPanel Spacing="4">
+                <TextBlock
+                    Text="Default quality"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize14}"
+                    FontWeight="{ThemeResource GeistTypeWeightMedium}"
+                    Foreground="{ThemeResource GeistTextPrimaryBrush}" />
+                <TextBlock
+                    Text="Audio-only overrides video policy on the probe sheet."
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    TextWrapping="WrapWholeWords" />
+                <CheckBox
+                    x:Name="AudioOnlyModeBox"
+                    Content="Audio only"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Checked="OnAudioOnlyModeChanged"
+                    Unchecked="OnAudioOnlyModeChanged" />
+            </StackPanel>
+
+            <StackPanel Spacing="4">
+                <TextBlock
+                    Text="Media extras defaults"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize14}"
+                    FontWeight="{ThemeResource GeistTypeWeightMedium}"
+                    Foreground="{ThemeResource GeistTextPrimaryBrush}" />
+                <StackPanel Orientation="Horizontal" Spacing="16">
+                    <CheckBox
+                        x:Name="WriteSubsDefaultBox"
+                        Content="Write subs"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}" />
+                    <CheckBox
+                        x:Name="WriteThumbnailDefaultBox"
+                        Content="Write thumbnail"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}" />
+                </StackPanel>
+                <Button
+                    Content="Apply media defaults"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    HorizontalAlignment="Left"
+                    Click="OnMediaExtrasDefaultsApply" />
+            </StackPanel>
+
+            <StackPanel Spacing="4">
+                <TextBlock
+                    Text="Filename template"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize14}"
+                    FontWeight="{ThemeResource GeistTypeWeightMedium}"
+                    Foreground="{ThemeResource GeistTextPrimaryBrush}" />
+                <TextBox
+                    x:Name="FilenameTemplateBox"
+                    PlaceholderText="%(title).200B [%(id)s].%(ext)s"
+                    FontFamily="{ThemeResource GeistMonoFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <Button
+                    Content="Apply template"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    HorizontalAlignment="Left"
+                    Click="OnFilenameTemplateApply" />
+            </StackPanel>
+
+            <StackPanel Spacing="4">
+                <TextBlock
+                    Text="Cookie auth"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize14}"
+                    FontWeight="{ThemeResource GeistTypeWeightMedium}"
+                    Foreground="{ThemeResource GeistTextPrimaryBrush}" />
+                <TextBlock
+                    Text="For logged-in Launch Sites. Use a Netscape cookie file if browser copy fails."
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    TextWrapping="WrapWholeWords" />
+                <TextBox
+                    x:Name="CookiesFromBrowserBox"
+                    PlaceholderText="Browser (chrome, firefox, edge…)"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <TextBox
+                    x:Name="CookieFileBox"
+                    PlaceholderText="Cookie file (absolute path)"
+                    FontFamily="{ThemeResource GeistMonoFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <Button
+                    Content="Apply cookies"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    HorizontalAlignment="Left"
+                    Click="OnCookieChannelApply" />
+            </StackPanel>
+
+            <StackPanel Spacing="4">
+                <TextBlock
+                    Text="Global proxy"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize14}"
+                    FontWeight="{ThemeResource GeistTypeWeightMedium}"
+                    Foreground="{ThemeResource GeistTextPrimaryBrush}" />
+                <TextBlock
+                    Text="HTTP(S) or SOCKS proxy for downloads and yt-dlp probes."
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    TextWrapping="WrapWholeWords" />
+                <TextBox
+                    x:Name="ProxyUrlBox"
+                    PlaceholderText="http://host:port or socks5://host:port"
+                    FontFamily="{ThemeResource GeistMonoFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}" />
+                <Button
+                    Content="Apply proxy"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Height="28"
+                    Padding="8,0"
+                    HorizontalAlignment="Left"
+                    Click="OnProxySettingsApply" />
+            </StackPanel>
+
+            <StackPanel Spacing="4">
+                <TextBlock
+                    Text="Sidecar updates"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize14}"
+                    FontWeight="{ThemeResource GeistTypeWeightMedium}"
+                    Foreground="{ThemeResource GeistTextPrimaryBrush}" />
+                <CheckBox
+                    x:Name="CheckSidecarUpdatesOnLaunchBox"
+                    Content="Check for updates on launch"
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Checked="OnSidecarUpdateSettingsChanged"
+                    Unchecked="OnSidecarUpdateSettingsChanged" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button
+                        Content="Check updates"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Height="28"
+                        Padding="8,0"
+                        Click="OnCheckSidecarUpdates" />
+                    <Button
+                        Content="Apply updates"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Height="28"
+                        Padding="8,0"
+                        Click="OnApplySidecarUpdates" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBox
+                        x:Name="ToolchainPinBox"
+                        PlaceholderText="Toolchain pin"
+                        Width="120"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}" />
+                    <Button
+                        Content="Pin toolchain"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Height="28"
+                        Padding="8,0"
+                        Click="OnPinToolchain" />
+                    <Button
+                        Content="Rollback"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Height="28"
+                        Padding="8,0"
+                        Click="OnRollbackToolchain" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBox
+                        x:Name="PluginPinBox"
+                        PlaceholderText="Plugin pin"
+                        Width="120"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}" />
+                    <Button
+                        Content="Pin plugin"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Height="28"
+                        Padding="8,0"
+                        Click="OnPinPlugin" />
+                    <Button
+                        Content="Rollback"
+                        FontFamily="{ThemeResource GeistSansFont}"
+                        FontSize="{ThemeResource GeistTypeSize12}"
+                        Height="28"
+                        Padding="8,0"
+                        Click="OnRollbackPlugin" />
+                </StackPanel>
+                <TextBlock
+                    x:Name="SidecarUpdateStatusText"
+                    Text=""
+                    FontFamily="{ThemeResource GeistSansFont}"
+                    FontSize="{ThemeResource GeistTypeSize12}"
+                    Foreground="{ThemeResource GeistTextSecondaryBrush}"
+                    TextWrapping="WrapWholeWords" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

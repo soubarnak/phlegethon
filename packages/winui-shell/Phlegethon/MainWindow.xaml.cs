@@ -24,6 +24,7 @@ public sealed partial class MainWindow : Window
     private string? _lastClipboardUrl;
     private bool _windowActive;
     private bool _desktopNotificationsEnabled = true;
+    private SettingsDialog? _openSettingsPanel;
 
     private enum DuplicateResolution
     {
@@ -70,24 +71,8 @@ public sealed partial class MainWindow : Window
         DownloadQueueView.OpenRequested += OnOpenRequested;
         DownloadQueueView.ReorderRequested += OnReorderRequested;
         DownloadQueueView.ActiveJobLimitChanged += OnActiveJobLimitChanged;
-        DownloadQueueView.AudioOnlyModeChanged += OnAudioOnlyModeChanged;
 
         DownloadQueueView.SetActiveJobLimitDisplay((int)_eventService.Core.GetActiveJobLimit());
-        DownloadQueueView.SetAudioOnlyModeDisplay(_eventService.GetAudioOnlyMode());
-        DownloadQueueView.SetMediaExtrasDefaultsDisplay(_eventService.GetDefaultMediaExtras());
-        DownloadQueueView.SetCookieChannelDisplay(_eventService.GetCookieChannel());
-        DownloadQueueView.SetProxySettingsDisplay(_eventService.GetProxySettings());
-        DownloadQueueView.SetSidecarUpdateSettingsDisplay(_eventService.GetSidecarUpdateSettings());
-        DownloadQueueView.SetFilenameTemplateDisplay(_eventService.GetFilenameTemplate());
-        DownloadQueueView.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
-        DownloadQueueView.CookieChannelChanged += OnCookieChannelChanged;
-        DownloadQueueView.ProxySettingsChanged += OnProxySettingsChanged;
-        DownloadQueueView.SidecarUpdateSettingsChanged += OnSidecarUpdateSettingsChanged;
-        DownloadQueueView.CheckSidecarUpdatesRequested += OnCheckSidecarUpdatesRequested;
-        DownloadQueueView.ApplySidecarUpdatesRequested += OnApplySidecarUpdatesRequested;
-        DownloadQueueView.PinSidecarVersionRequested += OnPinSidecarVersionRequested;
-        DownloadQueueView.RollbackSidecarRequested += OnRollbackSidecarRequested;
-        DownloadQueueView.FilenameTemplateChanged += OnFilenameTemplateChanged;
 
         HistoryView.FilterChanged += (_, _) => RefreshHistory();
         HistoryView.RevealRequested += OnHistoryRevealRequested;
@@ -112,22 +97,48 @@ public sealed partial class MainWindow : Window
         };
         ProbeSheetView.ResolveDefaultMediaExtras = () => _eventService.GetDefaultMediaExtras();
         ProbeSheetView.ResolveMediaExtrasCapabilities = () => _eventService.GetMediaExtrasCapabilities();
+        ProbeSheetView.ResolveItemQualitiesAsync = (probeUrl, itemId) =>
+            Task.Run(() => _eventService.EnrichProbeItemQualities(probeUrl, itemId));
         ProbeSheetView.Canceled += (_, _) => OnProbeConfirmed();
-        ProbeSheetView.Confirmed += (_, json) =>
+        ProbeSheetView.Confirmed += OnProbeSheetConfirmed;
+    }
+
+    private async void OnProbeSheetConfirmed(object? sender, string json)
+    {
+        try
         {
-            _ = Task.Run(() =>
+            var notifications = await Task.Run(() => _eventService.ConfirmProbeSelection(json));
+            foreach (var args in notifications)
             {
-                try
-                {
-                    _eventService.ConfirmProbeSelection(json);
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Confirm error: {ex.Message}");
-                }
-            });
+                OnJobQueued(this, args);
+            }
+
+            if (notifications.Count == 0)
+            {
+                throw new InvalidOperationException("Confirm succeeded but no jobs were created.");
+            }
+
             OnProbeConfirmed();
-        };
+            UrlStatusText.Text = $"Downloads queued: {notifications.Count} job(s).";
+        }
+        catch (Exception ex)
+        {
+            var dialog = new ContentDialog
+            {
+                Title = "Could not queue downloads",
+                Content = new TextBlock
+                {
+                    Text = ex.Message,
+                    TextWrapping = TextWrapping.WrapWholeWords,
+                    FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
+                    MaxWidth = 520,
+                },
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = Content.XamlRoot,
+            };
+            _ = await dialog.ShowAsync();
+        }
     }
 
     private bool _historyTabActive;
@@ -583,11 +594,29 @@ public sealed partial class MainWindow : Window
 
     private void OnProbeFailed(object? sender, ProbeFailedEventArgs args)
     {
-        _ = DispatcherQueue.TryEnqueue(() =>
+        _ = DispatcherQueue.TryEnqueue(async () =>
         {
-            var message = TruncateStatus($"Probe failed ({args.Url}): {args.Error}");
+            var full = $"Probe failed ({args.Url}): {args.Error}";
+            var message = TruncateStatus(full);
             UrlStatusText.Text = message;
             DownloadQueueView.SetStatus(message);
+
+            // Dense status line truncates; modal makes network/extractor failures obvious.
+            var dialog = new ContentDialog
+            {
+                Title = "Probe failed",
+                Content = new TextBlock
+                {
+                    Text = full,
+                    TextWrapping = TextWrapping.WrapWholeWords,
+                    FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
+                    MaxWidth = 520,
+                },
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = this.Content.XamlRoot,
+            };
+            _ = await dialog.ShowAsync();
         });
     }
 
@@ -682,6 +711,57 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private async void OnSettingsClick(object sender, RoutedEventArgs e)
+    {
+        var panel = new SettingsDialog();
+        _openSettingsPanel = panel;
+        panel.SetAudioOnlyModeDisplay(_eventService.GetAudioOnlyMode());
+        panel.SetMediaExtrasDefaultsDisplay(_eventService.GetDefaultMediaExtras());
+        panel.SetCookieChannelDisplay(_eventService.GetCookieChannel());
+        panel.SetProxySettingsDisplay(_eventService.GetProxySettings());
+        panel.SetSidecarUpdateSettingsDisplay(_eventService.GetSidecarUpdateSettings());
+        panel.SetFilenameTemplateDisplay(_eventService.GetFilenameTemplate());
+
+        panel.AudioOnlyModeChanged += OnAudioOnlyModeChanged;
+        panel.MediaExtrasDefaultsChanged += OnMediaExtrasDefaultsChanged;
+        panel.CookieChannelChanged += OnCookieChannelChanged;
+        panel.ProxySettingsChanged += OnProxySettingsChanged;
+        panel.SidecarUpdateSettingsChanged += OnSidecarUpdateSettingsChanged;
+        panel.CheckSidecarUpdatesRequested += OnCheckSidecarUpdatesRequested;
+        panel.ApplySidecarUpdatesRequested += OnApplySidecarUpdatesRequested;
+        panel.PinSidecarVersionRequested += OnPinSidecarVersionRequested;
+        panel.RollbackSidecarRequested += OnRollbackSidecarRequested;
+        panel.FilenameTemplateChanged += OnFilenameTemplateChanged;
+
+        var dialog = new ContentDialog
+        {
+            Title = "Settings",
+            Content = panel,
+            CloseButtonText = "Close",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = this.Content.XamlRoot,
+        };
+
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        finally
+        {
+            panel.AudioOnlyModeChanged -= OnAudioOnlyModeChanged;
+            panel.MediaExtrasDefaultsChanged -= OnMediaExtrasDefaultsChanged;
+            panel.CookieChannelChanged -= OnCookieChannelChanged;
+            panel.ProxySettingsChanged -= OnProxySettingsChanged;
+            panel.SidecarUpdateSettingsChanged -= OnSidecarUpdateSettingsChanged;
+            panel.CheckSidecarUpdatesRequested -= OnCheckSidecarUpdatesRequested;
+            panel.ApplySidecarUpdatesRequested -= OnApplySidecarUpdatesRequested;
+            panel.PinSidecarVersionRequested -= OnPinSidecarVersionRequested;
+            panel.RollbackSidecarRequested -= OnRollbackSidecarRequested;
+            panel.FilenameTemplateChanged -= OnFilenameTemplateChanged;
+            _openSettingsPanel = null;
+        }
+    }
+
     private void OnAudioOnlyModeChanged(object? sender, bool enabled)
     {
         try
@@ -761,7 +841,7 @@ public sealed partial class MainWindow : Window
                 + $"; Plugin {result.Plugin.InstalledVersion ?? "none"}"
                 + $" → {result.Plugin.AvailableVersion ?? "none"}"
                 + (result.Plugin.UpdateAvailable ? " (update)" : "");
-            DownloadQueueView.SetSidecarUpdateStatus(message);
+            _openSettingsPanel?.SetSidecarUpdateStatus(message);
             UrlStatusText.Text = "Sidecar update check complete";
         }
         catch (Exception ex)
@@ -775,7 +855,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var result = _eventService.ApplySidecarUpdates();
-            DownloadQueueView.SetSidecarUpdateStatus($"Apply: {result.Outcome}");
+            _openSettingsPanel?.SetSidecarUpdateStatus($"Apply: {result.Outcome}");
             UrlStatusText.Text = $"Sidecar updates: {result.Outcome}";
         }
         catch (Exception ex)
@@ -790,7 +870,7 @@ public sealed partial class MainWindow : Window
         {
             _eventService.PinSidecarVersion(args.Component, args.Version);
             var settings = _eventService.GetSidecarUpdateSettings();
-            DownloadQueueView.SetSidecarUpdateSettingsDisplay(settings);
+            _openSettingsPanel?.SetSidecarUpdateSettingsDisplay(settings);
             UrlStatusText.Text = $"Pinned {args.Component} to {args.Version}";
         }
         catch (Exception ex)

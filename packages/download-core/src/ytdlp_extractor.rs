@@ -17,6 +17,7 @@
 //! This module's unit tests use canned JSON strings.
 
 use crate::cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
+use crate::doh_ytdlp::{run_ytdlp_with_optional_doh_dns, ytdlp_command_with_optional_doh_dns};
 use crate::proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
 use crate::extractor::{
     ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
@@ -273,8 +274,8 @@ impl YtDlpExtractorToolchain {
     /// Build the argv for a yt-dlp probe invocation (test seam).
     ///
     /// `--flat-playlist` lists playlist/channel/user entries without fully
-    /// extracting each video. Per-item qualities are resolved afterward via
-    /// `enrich_playlist_item_qualities`.
+    /// extracting each video. Multi-item probes keep standard quality presets
+    /// from flat parse so the probe sheet opens without N+1 yt-dlp calls.
     /// `--plugin-dirs` is included when configured (Launch Site Extractor Plugins).
     pub(crate) fn probe_args(&self, url: &str, cookies: &CookieChannel, proxy: &ProxySettings) -> Vec<String> {
         self.probe_args_for(url, true, cookies, proxy)
@@ -315,26 +316,24 @@ impl YtDlpExtractorToolchain {
         cookies: &CookieChannel,
         proxy: &ProxySettings,
     ) -> Result<String, String> {
-        let mut cmd = Command::new(self.effective_binary_path());
-        for arg in self.probe_args_for(url, flat_playlist, cookies, proxy) {
-            cmd.arg(arg);
-        }
+        let args = self.probe_args_for(url, flat_playlist, cookies, proxy);
+        let bin = self.effective_binary_path();
 
-        // Add ffmpeg dir to PATH if configured
-        if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
-            cmd.env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    ffmpeg_dir.display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            );
-        }
-
-        let output = cmd
-            .output()
-            .map_err(|e| format!("failed to execute yt-dlp: {e}"))?;
+        // PATH note: ffmpeg dir is inherited by Python child when set on Command;
+        // DoH path builds its own Command — set env there too via wrapper if needed.
+        let output = if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
+            // Prefer direct invoke with PATH when no DoH; DoH helper does not take env.
+            // Re-apply ffmpeg PATH for direct path inside helper by extending process PATH briefly.
+            let old_path = std::env::var("PATH").unwrap_or_default();
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            let new_path = format!("{}{}{}", ffmpeg_dir.display(), sep, old_path);
+            std::env::set_var("PATH", &new_path);
+            let out = run_ytdlp_with_optional_doh_dns(&bin, &args, url, proxy);
+            std::env::set_var("PATH", old_path);
+            out?
+        } else {
+            run_ytdlp_with_optional_doh_dns(&bin, &args, url, proxy)?
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -352,72 +351,6 @@ impl YtDlpExtractorToolchain {
         }
 
         Ok(stdout)
-    }
-
-    /// Probe a single video URL and return selectable qualities.
-    fn probe_item_qualities(
-        &self,
-        item_url: &str,
-        cookies: &CookieChannel,
-        proxy: &ProxySettings,
-    ) -> Vec<Quality> {
-        match self.run_probe_json(item_url, false, cookies, proxy) {
-            Ok(json) => match serde_json::from_str::<YtDlpVideoInfo>(&json) {
-                Ok(info) => {
-                    let qualities = self.formats_to_qualities(&info.formats.unwrap_or_default());
-                    if qualities.is_empty() {
-                        launch_site_standard_qualities()
-                    } else {
-                        qualities
-                    }
-                }
-                Err(_) => launch_site_standard_qualities(),
-            },
-            Err(_) => launch_site_standard_qualities(),
-        }
-    }
-
-    /// Resolve real per-video qualities for flat playlist entries (parallel).
-    fn enrich_playlist_item_qualities(
-        &self,
-        items: &mut [MediaItem],
-        cookies: &CookieChannel,
-        proxy: &ProxySettings,
-    ) {
-        use std::sync::Mutex;
-
-        if items.is_empty() {
-            return;
-        }
-
-        let results = Mutex::new(Vec::new());
-        let workers = 4.min(items.len());
-        let chunk = items.len().div_ceil(workers);
-
-        std::thread::scope(|scope| {
-            for worker in 0..workers {
-                let start = worker * chunk;
-                if start >= items.len() {
-                    break;
-                }
-                let end = (start + chunk).min(items.len());
-                let batch: Vec<(usize, String)> = (start..end)
-                    .map(|idx| (idx, items[idx].url.clone()))
-                    .collect();
-
-                scope.spawn(|| {
-                    let mut local = Vec::with_capacity(batch.len());
-                    for (idx, item_url) in batch {
-                        local.push((idx, self.probe_item_qualities(&item_url, cookies, proxy)));
-                    }
-                    results.lock().unwrap().extend(local);
-                });
-            }
-        });
-
-        for (idx, qualities) in results.into_inner().unwrap() {
-            items[idx].qualities = qualities;
-        }
     }
 
     /// Test-only alias for `parse_probe_result` — used by integration tests.
@@ -688,13 +621,25 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         // Run yt-dlp
         let json = self.run_probe(url, cookies, proxy)?;
 
-        // Parse into ProbeResult
-        let mut result = self.parse_probe_result(&json, url)?;
-        if result.items.len() > 1 {
-            self.enrich_playlist_item_qualities(&mut result.items, cookies, proxy);
-        }
+        // Parse into ProbeResult — flat playlist entries already carry standard qualities.
+        // Skip per-item enrich for multi-item channels so the probe sheet opens quickly.
+        self.parse_probe_result(&json, url)
+    }
 
-        Ok(result)
+    fn probe_item_qualities(
+        &self,
+        item_url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Result<Vec<Quality>, String> {
+        let json = self.run_probe_json(item_url, false, cookies, proxy)?;
+        let result = self.parse_probe_result(&json, item_url)?;
+        result
+            .items
+            .into_iter()
+            .next()
+            .map(|item| item.qualities)
+            .ok_or_else(|| format!("probe returned no items for {item_url}"))
     }
 
     fn download(
@@ -715,33 +660,37 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         let out_tmpl = dest_dir.join(output_template);
         let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
 
-        let mut cmd = Command::new(self.effective_binary_path());
-        cmd.arg("--no-warnings")
-            .arg("--no-overwrites")
-            .arg("-f")
-            .arg(&format_selector)
-            .arg("-o")
-            .arg(&out_tmpl)
-            .arg("--print")
-            .arg("after_move:filepath")
-            .arg("--no-playlist")
-            .arg(url);
-
+        let mut args = vec![
+            "--no-warnings".to_string(),
+            "--no-overwrites".to_string(),
+            "-f".to_string(),
+            format_selector,
+            "-o".to_string(),
+            out_tmpl.display().to_string(),
+            "--print".to_string(),
+            "after_move:filepath".to_string(),
+            "--no-playlist".to_string(),
+        ];
         for arg in ytdlp_media_extras_args(media_extras, ffmpeg_present) {
-            cmd.arg(arg);
+            args.push(arg);
         }
-
-        append_ytdlp_cookie_args(&mut cmd, cookies);
-        append_ytdlp_proxy_args(&mut cmd, proxy);
-
+        args.extend(ytdlp_cookie_args(cookies));
+        args.extend(ytdlp_proxy_args(proxy));
         for dir in self.effective_plugin_dirs() {
-            cmd.arg("--plugin-dirs").arg(dir);
+            args.push("--plugin-dirs".to_string());
+            args.push(dir.display().to_string());
         }
         if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
-            cmd.arg("--ffmpeg-location").arg(ffmpeg_dir);
+            args.push("--ffmpeg-location".to_string());
+            args.push(ffmpeg_dir.display().to_string());
         }
+        args.push(url.to_string());
 
-        match run_command_interruptible(cmd, stop, Duration::from_millis(50))? {
+        let bin = self.effective_binary_path();
+        let (cmd, _doh_guard) = ytdlp_command_with_optional_doh_dns(&bin, &args, url, proxy)?;
+        let result = run_command_interruptible(cmd, stop, Duration::from_millis(50));
+
+        match result? {
             InterruptibleOutput::Stopped => Ok(ExtractorDownloadOutcome::Stopped),
             InterruptibleOutput::Finished {
                 status,
@@ -978,11 +927,6 @@ fn item_id_prefix(extractor_key: &str) -> &'static str {
     } else {
         "item"
     }
-}
-
-/// Default quality list for flat playlist entries before per-item enrichment.
-fn default_flat_qualities() -> Vec<Quality> {
-    launch_site_standard_qualities()
 }
 
 /// Common resolution presets for Launch Sites when formats are not yet known.
@@ -2092,6 +2036,26 @@ mod tests {
     }
 
     #[test]
+    fn multi_item_flat_playlist_uses_standard_qualities_without_enrich() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .parse_probe_result(
+                canned_xhamster_user_json(),
+                "https://xhamster.com/creators/example-creator",
+            )
+            .unwrap();
+
+        assert!(result.items.len() > 1, "expected multi-item channel probe");
+        for item in &result.items {
+            assert!(
+                item.qualities.iter().any(|q| q.id == "1080p"),
+                "flat playlist should keep standard qualities without per-item enrich: {:?}",
+                item.qualities
+            );
+        }
+    }
+
+    #[test]
     fn parse_xhamster_user_flat_urls_without_ids_returns_multi_item_probe() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let result = extractor
@@ -2755,5 +2719,49 @@ mod tests {
         );
         let keys = keys.unwrap();
         assert!(keys.contains(&"Youtube"));
+    }
+
+    #[test]
+    fn doh_override_map_detects_xhamster_sinkhole_when_dns_diverges() {
+        let host = "xhamster.com";
+        let Ok(doh_ips) = crate::doh_dns::resolve_a_records(host) else {
+            // Offline CI — skip.
+            return;
+        };
+        let diverges = crate::doh_dns::system_dns_diverges_from_doh(host, &doh_ips);
+        let map = crate::doh_proxy::doh_override_map_for_url(
+            "https://xhamster.com/creators/your-eshita",
+        )
+        .expect("DoH map lookup");
+        if diverges {
+            let map = map.expect("expected DoH override when system DNS diverges");
+            assert!(map.contains_key("xhamster.com"));
+        } else {
+            assert!(map.is_none(), "no override when DNS agrees");
+        }
+    }
+
+    /// Live: creator channel must return multiple items when yt-dlp is on PATH.
+    /// DoH CONNECT proxy unblocks ISP sinkhole DNS (browser works, bare yt-dlp RST).
+    #[test]
+    #[ignore = "live network + yt-dlp"]
+    fn live_xhamster_creator_probe_lists_videos() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let result = extractor
+            .probe(
+                "https://xhamster.com/creators/your-eshita",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
+            .expect("probe should succeed via DoH override when needed");
+        assert!(
+            result.items.len() > 1,
+            "creator channel should list multiple videos, got {}",
+            result.items.len()
+        );
+        assert!(result
+            .items
+            .iter()
+            .all(|i| !i.url.is_empty() && !i.qualities.is_empty()));
     }
 }

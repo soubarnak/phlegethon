@@ -16,6 +16,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Phlegethon.Services;
 
@@ -79,6 +80,16 @@ internal static class CoreBridge
     public static extern int core_probe(
         IntPtr handle,
         string url,
+        IntPtr outJsonBuf,
+        int outBufLen,
+        IntPtr errorBuf,
+        int errorBufLen);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    public static extern int core_enrich_probe_item_qualities_json(
+        IntPtr handle,
+        string probeUrl,
+        string itemId,
         IntPtr outJsonBuf,
         int outBufLen,
         IntPtr errorBuf,
@@ -458,23 +469,57 @@ public class CoreHandle : IDisposable
     // Safe invocation helpers
     // -----------------------------------------------------------------------
 
-    private const int BufSize = 65536;
+    // Probe playlists (40+ items) can exceed 64 KiB; Rust writes UTF-8 JSON.
+    private const int JsonBufSize = 4 * 1024 * 1024;
+    private const int SmallBufSize = 65536;
+
+    private static string PtrToStringUtf8(IntPtr ptr)
+    {
+        if (ptr == IntPtr.Zero)
+        {
+            return string.Empty;
+        }
+
+        var len = 0;
+        while (Marshal.ReadByte(ptr, len) != 0)
+        {
+            len++;
+        }
+
+        if (len == 0)
+        {
+            return string.Empty;
+        }
+
+        var bytes = new byte[len];
+        Marshal.Copy(ptr, bytes, 0, len);
+        return Encoding.UTF8.GetString(bytes);
+    }
 
     private static unsafe string CallWithJsonResult(Func<IntPtr, IntPtr, int, IntPtr, int, int> fn, IntPtr handle)
     {
-        byte* outBuf = stackalloc byte[BufSize];
-        byte* errBuf = stackalloc byte[1024];
-        var outPtr = new IntPtr(outBuf);
-        var errPtr = new IntPtr(errBuf);
-
-        int result = fn(handle, outPtr, BufSize, errPtr, 1024);
-        if (result != 0)
+        var outBytes = new byte[JsonBufSize];
+        var errBytes = new byte[1024];
+        fixed (byte* outBuf = outBytes)
+        fixed (byte* errBuf = errBytes)
         {
-            var errMsg = Marshal.PtrToStringAnsi(errPtr) ?? "unknown error";
-            throw new InvalidOperationException($"Core call failed: {errMsg}");
-        }
+            var outPtr = new IntPtr(outBuf);
+            var errPtr = new IntPtr(errBuf);
 
-        return Marshal.PtrToStringAnsi(outPtr) ?? "{}";
+            int result = fn(handle, outPtr, JsonBufSize, errPtr, 1024);
+            if (result != 0)
+            {
+                var errMsg = PtrToStringUtf8(errPtr);
+                if (string.IsNullOrEmpty(errMsg))
+                {
+                    errMsg = "unknown error";
+                }
+
+                throw new InvalidOperationException($"Core call failed: {errMsg}");
+            }
+
+            return PtrToStringUtf8(outPtr);
+        }
     }
 
     private static unsafe string CallWithJsonResult(
@@ -482,19 +527,58 @@ public class CoreHandle : IDisposable
         IntPtr handle,
         string arg1)
     {
-        byte* outBuf = stackalloc byte[BufSize];
-        byte* errBuf = stackalloc byte[1024];
-        var outPtr = new IntPtr(outBuf);
-        var errPtr = new IntPtr(errBuf);
-
-        int result = fn(handle, arg1, outPtr, BufSize, errPtr, 1024);
-        if (result != 0)
+        var outBytes = new byte[JsonBufSize];
+        var errBytes = new byte[1024];
+        fixed (byte* outBuf = outBytes)
+        fixed (byte* errBuf = errBytes)
         {
-            var errMsg = Marshal.PtrToStringAnsi(errPtr) ?? "unknown error";
-            throw new InvalidOperationException($"Core call failed: {errMsg}");
-        }
+            var outPtr = new IntPtr(outBuf);
+            var errPtr = new IntPtr(errBuf);
 
-        return Marshal.PtrToStringAnsi(outPtr) ?? "{}";
+            int result = fn(handle, arg1, outPtr, JsonBufSize, errPtr, 1024);
+            if (result != 0)
+            {
+                var errMsg = PtrToStringUtf8(errPtr);
+                if (string.IsNullOrEmpty(errMsg))
+                {
+                    errMsg = "unknown error";
+                }
+
+                throw new InvalidOperationException($"Core call failed: {errMsg}");
+            }
+
+            return PtrToStringUtf8(outPtr);
+        }
+    }
+
+    private static unsafe string CallWithJsonResult(
+        Func<IntPtr, string, string, IntPtr, int, IntPtr, int, int> fn,
+        IntPtr handle,
+        string arg1,
+        string arg2)
+    {
+        var outBytes = new byte[JsonBufSize];
+        var errBytes = new byte[1024];
+        fixed (byte* outBuf = outBytes)
+        fixed (byte* errBuf = errBytes)
+        {
+            var outPtr = new IntPtr(outBuf);
+            var errPtr = new IntPtr(errBuf);
+
+            int result = fn(handle, arg1, arg2, outPtr, JsonBufSize, errPtr, 1024);
+            if (result != 0)
+            {
+                var errMsg = PtrToStringUtf8(errPtr);
+                if (string.IsNullOrEmpty(errMsg))
+                {
+                    errMsg = "unknown error";
+                }
+
+                throw new InvalidOperationException($"Core call failed: {errMsg}");
+            }
+
+            return PtrToStringUtf8(outPtr);
+        }
     }
 
     public string Enqueue(string url)
@@ -509,6 +593,16 @@ public class CoreHandle : IDisposable
         return CallWithJsonResult(
             (h, o, ol, e, el) => CoreBridge.core_probe(h, url, o, ol, e, el),
             _handle);
+    }
+
+    public string EnrichProbeItemQualities(string probeUrl, string itemId)
+    {
+        return CallWithJsonResult(
+            (h, a1, a2, o, ol, e, el) =>
+                CoreBridge.core_enrich_probe_item_qualities_json(h, a1, a2, o, ol, e, el),
+            _handle,
+            probeUrl,
+            itemId);
     }
 
     public string ConfirmProbeSelection(string selectionJson)
@@ -711,12 +805,13 @@ public class CoreHandle : IDisposable
     {
         unsafe
         {
-            byte* outBuf = stackalloc byte[BufSize];
+            byte* outBuf = stackalloc byte[SmallBufSize];
             var outPtr = new IntPtr(outBuf);
-            int result = CoreBridge.core_get_filename_template(_handle, outPtr, BufSize);
+            int result = CoreBridge.core_get_filename_template(_handle, outPtr, SmallBufSize);
             if (result != 0)
                 throw new InvalidOperationException("Failed to read Filename Template from Core");
-            return Marshal.PtrToStringAnsi(outPtr) ?? "%(title).200B [%(id)s].%(ext)s";
+            var template = PtrToStringUtf8(outPtr);
+            return string.IsNullOrEmpty(template) ? "%(title).200B [%(id)s].%(ext)s" : template;
         }
     }
 
@@ -737,11 +832,12 @@ public class CoreHandle : IDisposable
     {
         unsafe
         {
-            byte* outBuf = stackalloc byte[BufSize];
+            byte* outBuf = stackalloc byte[SmallBufSize];
             var outPtr = new IntPtr(outBuf);
-            int result = CoreBridge.url_normalize_json(url, outPtr, BufSize);
+            int result = CoreBridge.url_normalize_json(url, outPtr, SmallBufSize);
             if (result != 0) return null;
-            var json = Marshal.PtrToStringAnsi(outPtr) ?? "null";
+            var json = PtrToStringUtf8(outPtr);
+            if (string.IsNullOrEmpty(json)) json = "null";
             return System.Text.Json.JsonSerializer.Deserialize<string?>(json);
         }
     }
@@ -750,11 +846,12 @@ public class CoreHandle : IDisposable
     {
         unsafe
         {
-            byte* outBuf = stackalloc byte[BufSize];
+            byte* outBuf = stackalloc byte[SmallBufSize];
             var outPtr = new IntPtr(outBuf);
-            int result = CoreBridge.url_split_json(text, outPtr, BufSize);
+            int result = CoreBridge.url_split_json(text, outPtr, SmallBufSize);
             if (result != 0) return Array.Empty<string>();
-            var json = Marshal.PtrToStringAnsi(outPtr) ?? "[]";
+            var json = PtrToStringUtf8(outPtr);
+            if (string.IsNullOrEmpty(json)) json = "[]";
             return System.Text.Json.JsonSerializer.Deserialize<List<string>>(json)
                 ?? new List<string>();
         }

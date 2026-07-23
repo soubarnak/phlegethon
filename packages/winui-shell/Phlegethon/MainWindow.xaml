@@ -81,12 +81,22 @@
                         FontFamily="{ThemeResource GeistSansFont}"
                         FontSize="{ThemeResource GeistTypeSize12}"
                         Foreground="{ThemeResource GeistTextSecondaryBrush}"
-                        TextTrimming="CharacterEllipsis" />
+                        TextTrimming="CharacterEllipsis"
+                        ToolTipService.ToolTip="{Binding ElementName=UrlStatusText, Path=Text}" />
 
                     <StackPanel
                         Grid.Column="1"
                         Orientation="Horizontal"
                         Spacing="16">
+                        <Button
+                            x:Name="SettingsButton"
+                            Content="Settings"
+                            FontFamily="{ThemeResource GeistSansFont}"
+                            FontSize="{ThemeResource GeistTypeSize12}"
+                            Height="28"
+                            Padding="8,0"
+                            Click="OnSettingsClick" />
+
                         <CheckBox
                             x:Name="ClipboardWatcherBox"
                             Content="Watch clipboard"

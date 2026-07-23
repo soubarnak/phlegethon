@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -9,6 +10,7 @@ using Microsoft.UI.Xaml.Media;
 using Phlegethon.Services;
 using Phlegethon.Strings;
 using Windows.Storage.Pickers;
+using Windows.UI.Text;
 using WinRT.Interop;
 
 namespace Phlegethon.Controls;
@@ -33,6 +35,7 @@ public class MediaGroupViewModel
     public List<QualityViewModel> Qualities { get; set; } = new();
     public bool IsSelected { get; set; }
     public bool IsArchived { get; set; }
+    public bool QualitiesEnriched { get; set; }
     public QualityViewModel? SelectedQuality { get; set; }
 }
 
@@ -46,6 +49,7 @@ public sealed partial class ProbeSheetControl : UserControl
 {
     private string _probeUrl = "";
     private readonly List<MediaGroupViewModel> _groups = new();
+    private readonly Dictionary<string, CheckBox> _rowCheckBoxes = new();
     private string? _saveToDestination;
     private int _previewRequestId;
     private MediaExtrasOptions _mediaExtras = new();
@@ -69,6 +73,9 @@ public sealed partial class ProbeSheetControl : UserControl
     /// <summary>Report ffmpeg availability for embed/remux toggles.</summary>
     public Func<MediaExtrasCapabilities>? ResolveMediaExtrasCapabilities { get; set; }
 
+    /// <summary>Fetch exact formats for one probe row (updates Core pending probe).</summary>
+    public Func<string, string, Task<List<Quality>>>? ResolveItemQualitiesAsync { get; set; }
+
     public ProbeSheetControl()
     {
         this.InitializeComponent();
@@ -78,6 +85,10 @@ public sealed partial class ProbeSheetControl : UserControl
     private void ApplyLocalizedStrings()
     {
         ProbeTitleText.Text = ShellStrings.Get("probe.title");
+        SelectAllButton.Content = ShellStrings.Get("probe.selectAll");
+        AutomationProperties.SetName(SelectAllButton, ShellStrings.Get("probe.selectAll"));
+        DeselectAllButton.Content = ShellStrings.Get("probe.deselectAll");
+        AutomationProperties.SetName(DeselectAllButton, ShellStrings.Get("probe.deselectAll"));
         CancelButton.Content = ShellStrings.Get("probe.cancel");
         AutomationProperties.SetName(CancelButton, ShellStrings.Get("probe.cancel"));
         SaveToButton.Content = ShellStrings.Get("probe.saveTo");
@@ -109,6 +120,7 @@ public sealed partial class ProbeSheetControl : UserControl
         _probeUrl = url;
         _saveToDestination = null;
         _groups.Clear();
+        _rowCheckBoxes.Clear();
         ItemsPanel.Children.Clear();
         UpdateSaveToLabel();
 
@@ -136,7 +148,7 @@ public sealed partial class ProbeSheetControl : UserControl
 
             foreach (var q in item.Qualities)
             {
-                group.Qualities.Add(new QualityViewModel { Id = q.Id, Label = q.Label });
+                group.Qualities.Add(new QualityViewModel { Id = q.Id, Label = FormatQualityLabel(q) });
             }
 
             if (group.Qualities.Count > 0)
@@ -166,7 +178,7 @@ public sealed partial class ProbeSheetControl : UserControl
             Text = ShellStrings.Get("probe.mediaOptions"),
             FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
             FontSize = 12,
-            FontWeight = (Windows.UI.Text.FontWeight)Application.Current.Resources["GeistTypeWeightMedium"],
+            FontWeight = GeistFontWeight("GeistTypeWeightMedium"),
             Foreground = (Brush)Application.Current.Resources["GeistTextPrimaryBrush"],
         };
         MediaExtrasPanel.Children.Add(title);
@@ -282,13 +294,14 @@ public sealed partial class ProbeSheetControl : UserControl
         checkBox.Unchecked += (_, _) => { group.IsSelected = false; UpdateSelectionSummary(); };
         Grid.SetColumn(checkBox, 0);
         grid.Children.Add(checkBox);
+        _rowCheckBoxes[group.Id] = checkBox;
 
         var titleBlock = new TextBlock
         {
             Text = group.Title,
             FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
             FontSize = 14,
-            FontWeight = (Windows.UI.Text.FontWeight)Application.Current.Resources["GeistTypeWeightMedium"],
+            FontWeight = GeistFontWeight("GeistTypeWeightMedium"),
             Foreground = (Brush)Application.Current.Resources["GeistTextPrimaryBrush"],
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
@@ -330,13 +343,14 @@ public sealed partial class ProbeSheetControl : UserControl
             var qualityCombo = new ComboBox
             {
                 VerticalAlignment = VerticalAlignment.Center,
-                MinWidth = 90,
+                MinWidth = 140,
                 Height = 28,
                 FontFamily = (FontFamily)Application.Current.Resources["GeistSansFont"],
                 FontSize = 12,
                 PlaceholderText = ShellStrings.Get("probe.quality"),
                 ItemsSource = group.Qualities,
                 SelectedItem = group.SelectedQuality,
+                DisplayMemberPath = nameof(QualityViewModel.Label),
             };
             AutomationProperties.SetName(
                 qualityCombo,
@@ -347,6 +361,10 @@ public sealed partial class ProbeSheetControl : UserControl
                 {
                     group.SelectedQuality = (QualityViewModel)args.AddedItems[0];
                 }
+            };
+            qualityCombo.DropDownOpened += async (_, _) =>
+            {
+                await EnrichQualitiesIfNeededAsync(group, qualityCombo);
             };
             Grid.SetColumn(qualityCombo, 2);
             grid.Children.Add(qualityCombo);
@@ -496,6 +514,61 @@ public sealed partial class ProbeSheetControl : UserControl
         Canceled?.Invoke(this, EventArgs.Empty);
     }
 
+    private void OnSelectAllClick(object sender, RoutedEventArgs e)
+    {
+        SetAllSelected(true);
+    }
+
+    private void OnDeselectAllClick(object sender, RoutedEventArgs e)
+    {
+        SetAllSelected(false);
+    }
+
+    private void SetAllSelected(bool selected)
+    {
+        foreach (var group in _groups)
+        {
+            group.IsSelected = selected;
+            if (_rowCheckBoxes.TryGetValue(group.Id, out var box))
+            {
+                box.IsChecked = selected;
+            }
+        }
+
+        UpdateSelectionSummary();
+    }
+
+    private async Task EnrichQualitiesIfNeededAsync(MediaGroupViewModel group, ComboBox qualityCombo)
+    {
+        if (group.QualitiesEnriched || ResolveItemQualitiesAsync == null || string.IsNullOrEmpty(_probeUrl))
+        {
+            return;
+        }
+
+        qualityCombo.IsEnabled = false;
+        try
+        {
+            var qualities = await ResolveItemQualitiesAsync(_probeUrl, group.Id);
+            if (qualities.Count == 0)
+            {
+                return;
+            }
+
+            ApplyQualities(group, qualities);
+            qualityCombo.ItemsSource = null;
+            qualityCombo.ItemsSource = group.Qualities;
+            qualityCombo.SelectedItem = group.SelectedQuality;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Quality enrich error: {ex.Message}");
+        }
+        finally
+        {
+            qualityCombo.IsEnabled = true;
+        }
+    }
+
     private async void OnSaveToClick(object sender, RoutedEventArgs e)
     {
         var picker = new FolderPicker
@@ -526,40 +599,121 @@ public sealed partial class ProbeSheetControl : UserControl
         throw new InvalidOperationException("No parent window for folder picker");
     }
 
-    private async void OnConfirmClick(object sender, RoutedEventArgs e)
+    private void OnConfirmClick(object sender, RoutedEventArgs e)
     {
-        var items = new List<object>();
-        foreach (var g in _groups)
+        _ = ConfirmSelectionAsync();
+    }
+
+    private async Task ConfirmSelectionAsync()
+    {
+        ConfirmButton.IsEnabled = false;
+        try
         {
-            if (g.IsSelected)
+            await EnrichSelectedQualitiesAsync();
+
+            var items = new List<object>();
+            foreach (var g in _groups)
             {
-                items.Add(new
+                if (g.IsSelected)
                 {
-                    item_id = g.Id,
-                    quality_id = g.SelectedQuality?.Id ?? "",
-                });
+                    items.Add(new
+                    {
+                        item_id = g.Id,
+                        quality_id = g.SelectedQuality?.Id ?? "",
+                        title = g.Title,
+                    });
+                }
             }
+
+            if (items.Count == 0)
+            {
+                return;
+            }
+
+            object payload = _saveToDestination != null
+                ? new { url = _probeUrl, items, destination = _saveToDestination, media_extras = ReadMediaExtrasFromUi() }
+                : new { url = _probeUrl, items, media_extras = ReadMediaExtrasFromUi() };
+
+            var selectionJson = System.Text.Json.JsonSerializer.Serialize(payload);
+            Confirmed?.Invoke(this, selectionJson);
+        }
+        finally
+        {
+            var selected = _groups.Count(g => g.IsSelected);
+            ConfirmButton.IsEnabled = selected > 0;
+        }
+    }
+
+    private async Task EnrichSelectedQualitiesAsync()
+    {
+        if (ResolveItemQualitiesAsync == null || string.IsNullOrEmpty(_probeUrl))
+        {
+            return;
         }
 
-        object payload = _saveToDestination != null
-            ? new { url = _probeUrl, items, destination = _saveToDestination, media_extras = ReadMediaExtrasFromUi() }
-            : new { url = _probeUrl, items, media_extras = ReadMediaExtrasFromUi() };
-
-        var selectionJson = System.Text.Json.JsonSerializer.Serialize(payload);
-        Confirmed?.Invoke(this, selectionJson);
-
-        var locationNote = _saveToDestination != null
-            ? $"\nSave to: {_saveToDestination}"
-              + (items.Count > 1 ? "\n(each item under its own subfolder)" : "")
-            : "";
-
-        var dialog = new ContentDialog
+        foreach (var group in _groups)
         {
-            Title = "Downloading",
-            Content = $"{items.Count} item(s) added to queue.{locationNote}",
-            CloseButtonText = "OK",
-            XamlRoot = this.XamlRoot,
+            if (!group.IsSelected || group.QualitiesEnriched)
+            {
+                continue;
+            }
+
+            try
+            {
+                var qualities = await ResolveItemQualitiesAsync(_probeUrl, group.Id);
+                if (qualities.Count == 0)
+                {
+                    continue;
+                }
+
+                ApplyQualities(group, qualities);
+            }
+            catch (Exception)
+            {
+            }
+        }
+    }
+
+    private void ApplyQualities(MediaGroupViewModel group, List<Quality> qualities)
+    {
+        var previousId = group.SelectedQuality?.Id;
+        group.Qualities.Clear();
+        foreach (var q in qualities)
+        {
+            group.Qualities.Add(new QualityViewModel
+            {
+                Id = q.Id,
+                Label = FormatQualityLabel(q),
+            });
+        }
+
+        var defaultId = ResolveDefaultQuality?.Invoke(group.Qualities);
+        group.SelectedQuality = group.Qualities.FirstOrDefault(q => q.Id == previousId)
+            ?? group.Qualities.FirstOrDefault(q => q.Id == defaultId)
+            ?? group.Qualities.FirstOrDefault();
+        group.QualitiesEnriched = true;
+    }
+
+    private static string FormatQualityLabel(Quality q)
+    {
+        if (q.SizeBytes is > 0)
+        {
+            var mb = q.SizeBytes.Value / (1024.0 * 1024.0);
+            return $"{q.Label} ({mb:0.#} MB)";
+        }
+
+        return q.Label;
+    }
+
+    private static FontWeight GeistFontWeight(string resourceKey)
+    {
+        var value = Application.Current.Resources[resourceKey];
+        return value switch
+        {
+            double weight => new FontWeight((ushort)weight),
+            int weight => new FontWeight((ushort)weight),
+            FontWeight weight => weight,
+            _ => new FontWeight(400),
         };
-        await dialog.ShowAsync();
     }
 }

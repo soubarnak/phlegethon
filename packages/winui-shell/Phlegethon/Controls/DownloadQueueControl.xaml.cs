@@ -29,6 +29,8 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     private double _progressPercent;
     private ulong? _totalBytes;
     private DownloadStatus _status = DownloadStatus.Queued;
+    private Visibility _progressBarVisibility = Visibility.Collapsed;
+    private bool _progressIsIndeterminate;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -116,20 +118,61 @@ public class DownloadItemViewModel : INotifyPropertyChanged
     public double ProgressPercent
     {
         get => _progressPercent;
-        set => SetField(ref _progressPercent, value);
+        set
+        {
+            if (SetField(ref _progressPercent, value))
+            {
+                UpdateProgressPresentation();
+            }
+        }
     }
 
     /// <summary>Known total size when Core reports it (sort by size).</summary>
     public ulong? TotalBytes
     {
         get => _totalBytes;
-        set => SetField(ref _totalBytes, value);
+        set
+        {
+            if (SetField(ref _totalBytes, value))
+            {
+                UpdateProgressPresentation();
+            }
+        }
+    }
+
+    public Visibility ProgressBarVisibility
+    {
+        get => _progressBarVisibility;
+        private set => SetField(ref _progressBarVisibility, value);
+    }
+
+    public bool ProgressIsIndeterminate
+    {
+        get => _progressIsIndeterminate;
+        private set => SetField(ref _progressIsIndeterminate, value);
     }
 
     public DownloadStatus Status
     {
         get => _status;
-        set => SetField(ref _status, value);
+        set
+        {
+            if (SetField(ref _status, value))
+            {
+                UpdateProgressPresentation();
+            }
+        }
+    }
+
+    private void UpdateProgressPresentation()
+    {
+        var show = _status is DownloadStatus.Queued
+            or DownloadStatus.Downloading
+            or DownloadStatus.Completed
+            || (_status == DownloadStatus.Paused && (_progressPercent > 0 || (_totalBytes ?? 0) > 0));
+        ProgressBarVisibility = show ? Visibility.Visible : Visibility.Collapsed;
+        ProgressIsIndeterminate = _status is DownloadStatus.Queued or DownloadStatus.Downloading
+            && (!_totalBytes.HasValue || _totalBytes.Value == 0);
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
@@ -245,121 +288,6 @@ public sealed partial class DownloadQueueControl : UserControl
     {
         ActiveJobLimitBox.Value = limit;
     }
-
-    public void SetAudioOnlyModeDisplay(bool enabled)
-    {
-        AudioOnlyModeBox.IsChecked = enabled;
-    }
-
-    public void SetMediaExtrasDefaultsDisplay(MediaExtrasOptions options)
-    {
-        WriteSubsDefaultBox.IsChecked = options.WriteSubs;
-        WriteThumbnailDefaultBox.IsChecked = options.WriteThumbnail;
-    }
-
-    public void SetCookieChannelDisplay(CookieChannel channel)
-    {
-        CookiesFromBrowserBox.Text = channel.CookiesFromBrowser ?? string.Empty;
-        CookieFileBox.Text = channel.CookieFile ?? string.Empty;
-    }
-
-    public void SetProxySettingsDisplay(ProxySettings settings)
-    {
-        ProxyUrlBox.Text = settings.Url ?? string.Empty;
-    }
-
-    public void SetSidecarUpdateSettingsDisplay(SidecarUpdateSettings settings)
-    {
-        CheckSidecarUpdatesOnLaunchBox.IsChecked = settings.CheckOnLaunch;
-        ToolchainPinBox.Text = settings.ToolchainPin ?? string.Empty;
-        PluginPinBox.Text = settings.PluginPin ?? string.Empty;
-    }
-
-    public void SetSidecarUpdateStatus(string message)
-    {
-        SidecarUpdateStatusText.Text = message;
-    }
-
-    public void SetFilenameTemplateDisplay(string template)
-    {
-        FilenameTemplateBox.Text = template;
-    }
-
-    private void OnFilenameTemplateApply(object sender, RoutedEventArgs e)
-    {
-        var template = FilenameTemplateBox.Text.Trim();
-        if (!string.IsNullOrEmpty(template))
-            FilenameTemplateChanged?.Invoke(this, template);
-    }
-
-    private void OnMediaExtrasDefaultsApply(object sender, RoutedEventArgs e)
-    {
-        MediaExtrasDefaultsChanged?.Invoke(this, new MediaExtrasOptions
-        {
-            WriteSubs = WriteSubsDefaultBox.IsChecked == true,
-            WriteThumbnail = WriteThumbnailDefaultBox.IsChecked == true,
-        });
-    }
-
-    private void OnCookieChannelApply(object sender, RoutedEventArgs e)
-    {
-        var browser = CookiesFromBrowserBox.Text.Trim();
-        var file = CookieFileBox.Text.Trim();
-        CookieChannelChanged?.Invoke(this, new CookieChannel
-        {
-            CookiesFromBrowser = string.IsNullOrEmpty(browser) ? null : browser,
-            CookieFile = string.IsNullOrEmpty(file) ? null : file,
-        });
-    }
-
-    private void OnProxySettingsApply(object sender, RoutedEventArgs e)
-    {
-        var url = ProxyUrlBox.Text.Trim();
-        ProxySettingsChanged?.Invoke(this, new ProxySettings
-        {
-            Url = string.IsNullOrEmpty(url) ? null : url,
-        });
-    }
-
-    private void OnSidecarUpdateSettingsChanged(object sender, RoutedEventArgs e)
-    {
-        SidecarUpdateSettingsChanged?.Invoke(this, new SidecarUpdateSettings
-        {
-            CheckOnLaunch = CheckSidecarUpdatesOnLaunchBox.IsChecked == true,
-            ToolchainPin = string.IsNullOrWhiteSpace(ToolchainPinBox.Text)
-                ? null
-                : ToolchainPinBox.Text.Trim(),
-            PluginPin = string.IsNullOrWhiteSpace(PluginPinBox.Text)
-                ? null
-                : PluginPinBox.Text.Trim(),
-        });
-    }
-
-    private void OnCheckSidecarUpdates(object sender, RoutedEventArgs e) =>
-        CheckSidecarUpdatesRequested?.Invoke(this, EventArgs.Empty);
-
-    private void OnApplySidecarUpdates(object sender, RoutedEventArgs e) =>
-        ApplySidecarUpdatesRequested?.Invoke(this, EventArgs.Empty);
-
-    private void OnPinToolchain(object sender, RoutedEventArgs e)
-    {
-        var version = ToolchainPinBox.Text.Trim();
-        if (!string.IsNullOrEmpty(version))
-            PinSidecarVersionRequested?.Invoke(this, ("toolchain", version));
-    }
-
-    private void OnRollbackToolchain(object sender, RoutedEventArgs e) =>
-        RollbackSidecarRequested?.Invoke(this, "toolchain");
-
-    private void OnPinPlugin(object sender, RoutedEventArgs e)
-    {
-        var version = PluginPinBox.Text.Trim();
-        if (!string.IsNullOrEmpty(version))
-            PinSidecarVersionRequested?.Invoke(this, ("plugin", version));
-    }
-
-    private void OnRollbackPlugin(object sender, RoutedEventArgs e) =>
-        RollbackSidecarRequested?.Invoke(this, "plugin");
 
     public int ActiveJobLimitValue => (int)ActiveJobLimitBox.Value;
 
@@ -682,42 +610,8 @@ public sealed partial class DownloadQueueControl : UserControl
         ActiveJobLimitChanged?.Invoke(this, ActiveJobLimitValue);
     }
 
-    private void OnAudioOnlyModeChanged(object sender, RoutedEventArgs e)
-    {
-        AudioOnlyModeChanged?.Invoke(this, AudioOnlyModeBox.IsChecked == true);
-    }
-
     /// <summary>Raised when the user applies a new Active Job Limit.</summary>
     public event EventHandler<int>? ActiveJobLimitChanged;
-
-    /// <summary>Raised when the user toggles audio-only mode.</summary>
-    public event EventHandler<bool>? AudioOnlyModeChanged;
-
-    /// <summary>Raised when the user applies media extras defaults.</summary>
-    public event EventHandler<MediaExtrasOptions>? MediaExtrasDefaultsChanged;
-
-    /// <summary>Raised when the user applies cookie auth channel settings.</summary>
-    public event EventHandler<CookieChannel>? CookieChannelChanged;
-
-    /// <summary>Raised when the user applies global proxy settings.</summary>
-    public event EventHandler<ProxySettings>? ProxySettingsChanged;
-
-    /// <summary>Raised when sidecar update settings change.</summary>
-    public event EventHandler<SidecarUpdateSettings>? SidecarUpdateSettingsChanged;
-
-    /// <summary>Raised when the user requests a manual sidecar update check.</summary>
-    public event EventHandler? CheckSidecarUpdatesRequested;
-
-    /// <summary>Raised when the user requests applying sidecar updates.</summary>
-    public event EventHandler? ApplySidecarUpdatesRequested;
-
-    /// <summary>Raised when the user pins a sidecar component version.</summary>
-    public event EventHandler<(string Component, string Version)>? PinSidecarVersionRequested;
-
-    /// <summary>Raised when the user rolls back a sidecar component.</summary>
-    public event EventHandler<string>? RollbackSidecarRequested;
-
-    public event EventHandler<string>? FilenameTemplateChanged;
 
     // -----------------------------------------------------------------------
     // Helpers

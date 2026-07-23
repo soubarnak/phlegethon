@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -72,8 +73,14 @@ public class MediaItem
 
 public class Quality
 {
+    [JsonPropertyName("id")]
     public string Id { get; init; } = "";
+
+    [JsonPropertyName("label")]
     public string Label { get; init; } = "";
+
+    [JsonPropertyName("size_bytes")]
+    public ulong? SizeBytes { get; init; }
 }
 
 public class ProbeResult
@@ -176,19 +183,50 @@ public class EventChannelService : IDisposable
         }
 
         var probeUrl = doc.RootElement.GetProperty("url").GetString() ?? url;
+        StartProbeInBackground(probeUrl);
+        return new CompanionProbeThenConfirm { Url = probeUrl };
+    }
+
+    private void StartProbeInBackground(string url)
+    {
         _ = Task.Run(() =>
         {
             try
             {
-                _core.Probe(probeUrl);
+                var probeJson = _core.Probe(url);
+                DispatchProbeJson(url, probeJson);
             }
             catch (Exception ex)
             {
-                // ProbeFailed arrives via the event channel from Core.
-                System.Diagnostics.Debug.WriteLine($"Companion probe error: {ex.Message}");
+                OnProbeFailed?.Invoke(this, new ProbeFailedEventArgs
+                {
+                    Url = url,
+                    Error = ex.Message,
+                });
             }
         });
-        return new CompanionProbeThenConfirm { Url = probeUrl };
+    }
+
+    private void DispatchProbeJson(string fallbackUrl, string probeJson)
+    {
+        using var probeDoc = JsonDocument.Parse(probeJson);
+        var root = probeDoc.RootElement;
+        var urlFromResult = root.TryGetProperty("url", out var urlEl)
+            ? urlEl.GetString() ?? fallbackUrl
+            : fallbackUrl;
+        var sourceName = root.TryGetProperty("source_name", out var snEl)
+            ? snEl.GetString()
+            : null;
+        var items = root.TryGetProperty("items", out var itemsEl)
+            ? DeserializeItems(itemsEl)
+            : new List<MediaItem>();
+
+        OnProbeResult?.Invoke(this, new ProbeResultEventArgs
+        {
+            Url = urlFromResult,
+            Items = items,
+            SourceName = sourceName,
+        });
     }
 
     /// <summary>
@@ -217,64 +255,86 @@ public class EventChannelService : IDisposable
         }
         else if (type == "probe_then_confirm")
         {
-            // The core's probe() call is already queued via enqueue -> classification
-            // We need to explicitly probe now
-            _ = Task.Run(() =>
-            {
-                try
-                {
-                    var probeJson = _core.Probe(url);
-                    var probeDoc = JsonDocument.Parse(probeJson);
-                    // The event will come through the event channel
-                }
-                catch (Exception ex)
-                {
-                    // ProbeFailed arrives via the event channel from Core.
-                    System.Diagnostics.Debug.WriteLine($"Probe error: {ex.Message}");
-                }
-            });
+            StartProbeInBackground(url);
         }
     }
 
     /// <summary>
-    /// Confirm a probe selection and notify listeners about created jobs.
+    /// Fetch exact formats for one probe item and update Core pending probe state.
     /// </summary>
-    public string ConfirmProbeSelection(string selectionJson)
+    public List<Quality> EnrichProbeItemQualities(string probeUrl, string itemId)
+    {
+        var json = _core.EnrichProbeItemQualities(probeUrl, itemId);
+        return System.Text.Json.JsonSerializer.Deserialize<List<Quality>>(
+            json,
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            ?? new List<Quality>();
+    }
+
+    /// <summary>
+    /// Confirm a probe selection. Returns job-queued notifications for the UI thread.
+    /// </summary>
+    public IReadOnlyList<JobQueuedEventArgs> ConfirmProbeSelection(string selectionJson)
     {
         var resultJson = _core.ConfirmProbeSelection(selectionJson);
+        var notifications = BuildJobQueuedNotifications(selectionJson, resultJson);
+        return notifications;
+    }
+
+    private static IReadOnlyList<JobQueuedEventArgs> BuildJobQueuedNotifications(string selectionJson, string resultJson)
+    {
+        var notifications = new List<JobQueuedEventArgs>();
         try
         {
             using var selectionDoc = JsonDocument.Parse(selectionJson);
             var url = selectionDoc.RootElement.TryGetProperty("url", out var urlEl)
                 ? urlEl.GetString() ?? ""
                 : "";
-                    var destination = selectionDoc.RootElement.TryGetProperty("destination", out var destEl)
-                        ? destEl.GetString() ?? ""
-                        : "";
+            var destination = selectionDoc.RootElement.TryGetProperty("destination", out var destEl)
+                ? destEl.GetString() ?? ""
+                : "";
 
-                    using var resultDoc = JsonDocument.Parse(resultJson);
-                    if (resultDoc.RootElement.ValueKind == JsonValueKind.Array)
+            using var resultDoc = JsonDocument.Parse(resultJson);
+            if (resultDoc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                var titles = new List<string>();
+                if (selectionDoc.RootElement.TryGetProperty("items", out var itemsEl)
+                    && itemsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in itemsEl.EnumerateArray())
                     {
-                        foreach (var idEl in resultDoc.RootElement.EnumerateArray())
-                        {
-                            var jobId = idEl.GetString() ?? "";
-                            if (string.IsNullOrEmpty(jobId)) continue;
-                            OnJobQueued?.Invoke(this, new JobQueuedEventArgs
-                            {
-                                JobId = jobId,
-                                Url = url,
-                                Destination = destination,
-                                Title = TitleFromUrl(url),
-                            });
-                        }
+                        var title = item.TryGetProperty("title", out var titleEl)
+                            ? titleEl.GetString() ?? ""
+                            : "";
+                        titles.Add(title);
                     }
+                }
+
+                var index = 0;
+                foreach (var idEl in resultDoc.RootElement.EnumerateArray())
+                {
+                    var jobId = idEl.GetString() ?? "";
+                    if (string.IsNullOrEmpty(jobId)) continue;
+                    var title = index < titles.Count && !string.IsNullOrWhiteSpace(titles[index])
+                        ? titles[index]
+                        : TitleFromUrl(url);
+                    notifications.Add(new JobQueuedEventArgs
+                    {
+                        JobId = jobId,
+                        Url = url,
+                        Destination = destination,
+                        Title = title,
+                    });
+                    index++;
+                }
+            }
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"Confirm queue notify error: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"BuildJobQueuedNotifications error: {ex.Message}");
         }
 
-        return resultJson;
+        return notifications;
     }
 
     /// <summary>
@@ -519,20 +579,8 @@ public class EventChannelService : IDisposable
         switch (type)
         {
             case "ProbeResult":
-                OnProbeResult?.Invoke(this, new ProbeResultEventArgs
-                {
-                    Url = ev.GetProperty("url").GetString() ?? "",
-                    Items = DeserializeItems(ev.GetProperty("items")),
-                    SourceName = ev.TryGetProperty("source_name", out var sn) ? sn.GetString() : null,
-                });
-                break;
-
             case "ProbeFailed":
-                OnProbeFailed?.Invoke(this, new ProbeFailedEventArgs
-                {
-                    Url = ev.GetProperty("url").GetString() ?? "",
-                    Error = ev.GetProperty("error").GetString() ?? "Probe failed",
-                });
+                // Probe UI is driven from StartProbeInBackground (Probe FFI return JSON).
                 break;
 
             case "JobProgress":

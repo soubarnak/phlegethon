@@ -8,6 +8,9 @@ mod cabi;
 mod classification;
 mod cookie_channel;
 mod disk_space;
+mod doh_dns;
+mod doh_proxy;
+mod doh_ytdlp;
 mod download_archive;
 mod media_extras;
 mod quality_policy;
@@ -1416,6 +1419,43 @@ impl Core {
                 Err(err)
             }
         }
+    }
+
+    /// Fetch exact formats for one item from a pending probe and update stored qualities.
+    pub fn enrich_probe_item_qualities(
+        &mut self,
+        probe_url: &str,
+        item_id: &str,
+    ) -> Result<Vec<Quality>, String> {
+        let url_key = normalize_url(probe_url).ok_or_else(|| "invalid URL".to_string())?;
+        let item_url = {
+            let probe = self.pending_probes.get(&url_key).ok_or_else(|| {
+                format!(
+                    "no pending probe for {}. Call probe() first.",
+                    url_key
+                )
+            })?;
+            let item = probe
+                .items
+                .iter()
+                .find(|i| i.id == item_id)
+                .ok_or_else(|| format!("item '{item_id}' not found in probe result for {url_key}"))?;
+            item.url.clone()
+        };
+
+        let qualities = self.extractor.probe_item_qualities(
+            &item_url,
+            &self.cookie_channel,
+            &self.proxy_settings,
+        )?;
+
+        if let Some(probe) = self.pending_probes.get_mut(&url_key) {
+            if let Some(item) = probe.items.iter_mut().find(|i| i.id == item_id) {
+                item.qualities = qualities.clone();
+            }
+        }
+
+        Ok(qualities)
     }
 
     /// Preview where [`Self::confirm_probe_selection`] will place Job
