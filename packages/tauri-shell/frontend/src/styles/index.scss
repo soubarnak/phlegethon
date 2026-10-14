@@ -74,6 +74,12 @@ body {
     min-height: 0;
     display: flex;
     flex-direction: column;
+
+    // Carbon hides inactive panels with the `hidden` attribute; our
+    // display:flex must not override it.
+    &[hidden] {
+      display: none;
+    }
   }
 }
 
@@ -125,9 +131,7 @@ body {
 
 .ph-urlbar__actions {
   display: flex;
-  flex-direction: column;
-  gap: $spacing-03;
-  align-items: stretch;
+  align-items: flex-start;
   padding-top: 1.5rem; // align with the TextArea below its label
 }
 
@@ -136,11 +140,16 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: $spacing-03 $spacing-05;
-  min-height: 1.5rem;
+  gap: $spacing-03;
+  min-height: 2rem;
 
   .cds--toggle {
     margin-left: auto;
+  }
+
+  // Carbon stacks the toggle label above the switch; keep the row compact.
+  .cds--toggle__label-text {
+    margin-bottom: 0;
   }
 }
 
@@ -226,6 +235,12 @@ body {
   color: var(--cds-text-error);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.ph-queue__hint {
+  display: block;
+  margin-top: $spacing-02;
+  color: var(--cds-text-secondary);
 }
 
 .ph-queue__tags {

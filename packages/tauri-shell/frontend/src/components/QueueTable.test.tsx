@@ -45,6 +45,14 @@ describe("QueueTable", () => {
     expect(within(screen.getByTestId("queue-row-dl")).getByText(/1\.0 MB\/s/)).toBeInTheDocument();
     expect(within(screen.getByTestId("queue-row-pa")).getByText("Paused")).toBeInTheDocument();
     expect(within(screen.getByTestId("queue-row-fa")).getByTestId("job-error")).toHaveTextContent("HTTP 403");
+    // A tagged error shows its message without the [code] and adds the hint.
+    const tagged = row({ job_id: "tg", title: "Tagged", status: "failed", last_error: "[needs_browser_cookies] yt-dlp failed: HTTP Error 403", queue_index: 9 });
+    const { unmount } = render(<QueueTable jobs={[tagged]} actions={actions()} hasAnyJobs />);
+    const err = screen.getAllByTestId("job-error").at(-1)!;
+    expect(err).toHaveTextContent("yt-dlp failed: HTTP Error 403");
+    expect(err).not.toHaveTextContent("[needs_browser_cookies]");
+    expect(err).toHaveTextContent(/Cloudflare/);
+    unmount();
     expect(within(screen.getByTestId("queue-row-ok")).getByText("Completed")).toBeInTheDocument();
     expect(within(screen.getByTestId("queue-row-gx")).getByText("Generic extraction")).toBeInTheDocument();
   });

@@ -36,6 +36,7 @@ import {
   applyQueueView,
 } from "@/lib/queueView";
 import { displayProgressPercent, estimateEtaSeconds, formatBytes, formatEta, formatRate } from "@/lib/progress";
+import { errorHint, parseCoreError } from "@/lib/errors";
 
 export interface QueueActions {
   pause: (jobId: string) => void;
@@ -91,6 +92,17 @@ function statusLabel(status: JobStatus): string {
     case "failed":
       return t("queue.status.failed");
   }
+}
+
+function JobError({ raw }: { raw: string }) {
+  const parsed = parseCoreError(raw);
+  const hint = errorHint(parsed.code);
+  return (
+    <span className="ph-queue__error" data-testid="job-error" title={raw}>
+      {parsed.message}
+      {hint && <span className="ph-queue__hint">{hint}</span>}
+    </span>
+  );
 }
 
 function tierTag(tier: ExtractionTier | null) {
@@ -306,9 +318,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                                 {job.url}
                               </span>
                               {job.status === "failed" && job.last_error && (
-                                <span className="ph-queue__error" data-testid="job-error">
-                                  {job.last_error}
-                                </span>
+                                <JobError raw={job.last_error} />
                               )}
                             </div>
                           </TableCell>
@@ -327,7 +337,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                                 hideLabel
                                 label={t("queue.progressFor", { title: job.title })}
                                 helperText={helper || (job.status === "pending" ? t("queue.status.queued") : "")}
-                                value={job.status === "completed" ? 100 : pct ?? undefined}
+                                value={job.status === "completed" ? 100 : job.status === "pending" ? 0 : pct ?? undefined}
                                 max={100}
                                 status={progressStatus}
                               />

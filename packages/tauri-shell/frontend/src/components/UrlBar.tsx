@@ -113,9 +113,9 @@ export function UrlBar({
         <Button kind="primary" renderIcon={Add} disabled={busy || !text.trim()} onClick={() => void submit()}>
           {t("url.add")}
         </Button>
-        <FolderPicker onPicked={(p) => onDestinationChange(p)} />
       </div>
       <div className="ph-urlbar__meta">
+        <FolderPicker size="sm" onPicked={(p) => onDestinationChange(p)} />
         {destination ? (
           <Tag
             className="ph-dest-tag"
