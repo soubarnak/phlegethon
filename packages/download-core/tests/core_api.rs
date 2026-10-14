@@ -6672,9 +6672,7 @@ fn toolchain_catalog(tmp: &tempfile::TempDir, version: &str, bytes: &[u8]) -> Up
         toolchain_latest: Some(version.to_string()),
         toolchain_versions: std::collections::HashMap::from([(
             version.to_string(),
-            CatalogVersionEntry {
-                source_path: binary,
-            },
+            CatalogVersionEntry::local(binary),
         )]),
         ..Default::default()
     }

@@ -16,6 +16,7 @@ mod quality_policy;
 mod event;
 mod extractor;
 mod filename_template;
+pub mod github_release_source;
 mod http;
 mod integrity;
 mod job;
@@ -44,6 +45,7 @@ pub use toolchain_discovery::{
 
 pub use cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
 pub use proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
+pub use github_release_source::{select_asset as select_ytdlp_release_asset, GitHubReleaseUpdateSource};
 pub use sidecar_updates::{
     apply_sidecar_updates, apply_sidecar_updates_on_launch, check_sidecar_updates,
     rollback_sidecar_component, toolchain_binary_path, write_toolchain_manifest,
@@ -1715,6 +1717,57 @@ impl Core {
     /// Replace the sidecar update source (acceptance tests).
     pub fn set_sidecar_update_source(&mut self, source: Arc<dyn SidecarUpdateSource>) {
         self.sidecar_update_source = source;
+    }
+
+    /// Active update source (shells clone it to do network work off the lock).
+    pub fn sidecar_update_source(&self) -> Arc<dyn SidecarUpdateSource> {
+        Arc::clone(&self.sidecar_update_source)
+    }
+
+    /// [`Self::check_sidecar_updates`] with the Core mutex released during the lookup.
+    pub fn check_sidecar_updates_outside_lock(
+        core: Arc<Mutex<Self>>,
+    ) -> Result<SidecarUpdateCheckResult, String> {
+        let (root, settings, source) = {
+            let guard = core.lock().map_err(|e| e.to_string())?;
+            (
+                guard.require_sidecar_root()?.to_path_buf(),
+                guard.sidecar_update_settings.clone(),
+                Arc::clone(&guard.sidecar_update_source),
+            )
+        };
+        check_sidecar_updates(&root, &settings, source.as_ref())
+    }
+
+    /// Download the latest toolchain release off the lock, then swap it in.
+    ///
+    /// Returns `BlockedMidTransfer` without downloading when transfers are
+    /// active; `NothingToApply` when the installed version is current.
+    pub fn install_toolchain_latest(core: Arc<Mutex<Self>>) -> Result<SidecarApplyResult, String> {
+        let (root, settings, source) = {
+            let guard = core.lock().map_err(|e| e.to_string())?;
+            if guard.transfers_active() {
+                return Ok(SidecarApplyResult {
+                    outcome: SidecarApplyOutcome::BlockedMidTransfer,
+                    applied: Vec::new(),
+                });
+            }
+            (
+                guard.require_sidecar_root()?.to_path_buf(),
+                guard.sidecar_update_settings.clone(),
+                Arc::clone(&guard.sidecar_update_source),
+            )
+        };
+        // Network work (release lookup + asset download + checksum) outside the lock.
+        let prefetched = sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref())?;
+        if prefetched.is_none() {
+            return Ok(SidecarApplyResult {
+                outcome: SidecarApplyOutcome::NothingToApply,
+                applied: Vec::new(),
+            });
+        }
+        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        guard.apply_sidecar_updates()
     }
 
     fn transfers_active(&self) -> bool {
