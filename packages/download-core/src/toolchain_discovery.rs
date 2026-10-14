@@ -551,6 +551,8 @@ pub fn run_command_with_deadline_polling(
         return Ok(CommandOutcome::Stopped);
     }
     let program = cmd.get_program().to_string_lossy().into_owned();
+    // Output is always captured here; callers must not have to remember to pipe it.
+    cmd_prepare(cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn {program}: {e}"))?;

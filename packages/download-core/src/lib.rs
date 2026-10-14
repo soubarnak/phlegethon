@@ -32,7 +32,8 @@ mod storage;
 pub mod toolchain_discovery;
 pub mod ytdlp_extractor;
 pub use plugin_sidecar::{
-    install_plugin_package, load_manifest, needs_update, plugin_dirs_path, write_manifest,
+    bundled_manifest, ensure_bundled_plugins, install_plugin_package, load_manifest, needs_update,
+    plugin_dirs_path, version_is_newer, write_manifest, BundledInstall,
     PluginManifest, MANIFEST_FILENAME, PLUGIN_DIRS_REL, PLUGIN_PACKAGE_NAME,
 };
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};

@@ -133,6 +133,11 @@ fn build_ureq_agent(proxy: &ProxySettings) -> Result<ureq::Agent, String> {
     if let Some(url) = proxy.url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let proxy_cfg = ureq::Proxy::new(url).map_err(|e| format!("proxy {url}: {e}"))?;
         builder = builder.proxy(proxy_cfg);
+    } else {
+        // No proxy configured in the app: honour HTTPS_PROXY / HTTP_PROXY / ALL_PROXY like
+        // yt-dlp, curl and browsers do. Without this, plain downloads and the page sniffer
+        // fail on machines that only reach the internet through an environment proxy.
+        builder = builder.try_proxy_from_env(true);
     }
     Ok(builder.build())
 }
@@ -147,6 +152,7 @@ impl ProdHttpBackend {
             client: RwLock::new(
                 build_ureq_agent(proxy).unwrap_or_else(|_| {
                     ureq::AgentBuilder::new()
+                        .try_proxy_from_env(true)
                         .timeout_connect(std::time::Duration::from_secs(10))
                         .timeout_read(std::time::Duration::from_secs(30))
                         .build()

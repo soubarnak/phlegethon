@@ -305,8 +305,7 @@ impl YtDlpExtractorToolchain {
                 Duration::from_millis(20),
             ) {
                 Ok(CommandOutcome::Finished { status, stdout, .. }) if status.success() => {
-                    let text = String::from_utf8_lossy(&stdout).to_ascii_lowercase();
-                    text.contains("chrome") && !text.contains("no impersonate target")
+                    chrome_impersonation_listed(&String::from_utf8_lossy(&stdout))
                 }
                 _ => false,
             };
@@ -1092,6 +1091,17 @@ enum InterruptibleOutput {
         stderr: Vec<u8>,
     },
     Stopped,
+}
+
+/// Does `yt-dlp --list-impersonate-targets` list a usable Chrome target?
+///
+/// Without curl_cffi yt-dlp still prints the table, but every row says
+/// `(unavailable)`, and passing `--impersonate chrome` then aborts the whole run.
+fn chrome_impersonation_listed(listing: &str) -> bool {
+    listing.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.trim_start().starts_with("chrome") && !line.contains("unavailable")
+    })
 }
 
 /// Spawn `cmd`, poll `stop`, and hard-kill the child when stop is requested.
@@ -3120,5 +3130,70 @@ mod tests {
             .items
             .iter()
             .all(|i| !i.url.is_empty() && !i.qualities.is_empty()));
+    }
+
+    /// Regression: the probe used to fail with "missing stdout pipe" on every real
+    /// yt-dlp because the process runner did not capture output itself. This goes
+    /// through an actual child process rather than the in-memory fake.
+    #[cfg(unix)]
+    #[test]
+    fn probe_runs_a_real_child_process_and_parses_its_json() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("yt-dlp");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$*" in
+  *--help*) echo "  --impersonate TARGET   --js-runtimes RUNTIME" ;;
+  *--list-impersonate-targets*) echo "no impersonate targets" ;;
+  *--version*) echo "2099.01.01" ;;
+  *) cat <<'JSON'
+{"_type":"video","id":"abc123","title":"Real Process Video","extractor_key":"Youtube","extractor":"youtube",
+ "webpage_url":"https://www.youtube.com/watch?v=abc123","duration":12,
+ "formats":[{"format_id":"18","height":360,"ext":"mp4","vcodec":"avc1","acodec":"mp4a"},
+            {"format_id":"22","height":720,"ext":"mp4","vcodec":"avc1","acodec":"mp4a"}]}
+JSON
+  ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let toolchain = YtDlpExtractorToolchain::new(YtDlpConfig {
+            binary_path: script.clone(),
+            launcher: Some(YtDlpLauncher::Binary { path: script }),
+            ..YtDlpConfig::default()
+        });
+        let result = toolchain
+            .probe(
+                "https://www.youtube.com/watch?v=abc123",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
+            .expect("probe through a real process succeeds");
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].title, "Real Process Video");
+        assert!(result.items[0].qualities.len() >= 2, "{:?}", result.items[0].qualities);
+        assert_eq!(result.extractor_key.as_deref(), Some("Youtube"));
+    }
+
+    #[test]
+    fn impersonation_listing_distinguishes_available_from_unavailable() {
+        let with_curl_cffi = "[info] Available impersonate targets\n\
+            Client          OS           Source\n\
+            --------------------------------------\n\
+            Chrome-133      Macos-15     curl_cffi\n\
+            Safari-17.2     Ios-17.2     curl_cffi\n";
+        let without = "[info] Available impersonate targets\n\
+            Client    OS   Source\n\
+            --------------------------------------------\n\
+            Tor       -    curl_cffi>=0.11 (unavailable)\n\
+            Chrome    -    curl_cffi (unavailable)\n";
+        assert!(chrome_impersonation_listed(with_curl_cffi));
+        assert!(!chrome_impersonation_listed(without));
+        assert!(!chrome_impersonation_listed(""));
+        assert!(!chrome_impersonation_listed("Safari  -  curl_cffi\n"));
     }
 }

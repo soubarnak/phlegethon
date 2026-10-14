@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "xhamster-video",
+      "site": "xhamster",
+      "kind": "single",
+      "url": "https://xhamster.com/videos/your-eshita-indian-bangla-beautiful-girl-with-office-boss-viral-sex-video-xhg2PUz",
+      "expect": { "tiers": ["dedicated"], "extractor_key_prefix": "XHamster", "min_items": 1, "min_qualities": 3 },
+      "notes": "Supplied by the product owner. Launch Site, upstream yt-dlp extractor."
+    },
+    {
+      "id": "xhamster-creator",
+      "site": "xhamster",
+      "kind": "listing",
+      "url": "https://xhamster.com/creators/your-eshita",
+      "expect": { "tiers": ["dedicated"], "extractor_key_prefix": "XHamster", "min_items": 2 },
+      "notes": "Supplied by the product owner. yt-dlp's XHamsterUser extractor lists the creator's videos; qualities are presets until the item is enriched."
+    },
+    {
+      "id": "luxuretv-video",
+      "site": "luxuretv",
+      "kind": "single",
+      "url": "https://en.luxuretv.com/videos/music-sucks-but-love-the-one-on-the-left-511995.html",
+      "expect": {
+        "tiers": ["dedicated"],
+        "extractor_key_prefix": "LuxureTV",
+        "min_items": 1,
+        "min_qualities": 1,
+        "blocked_error": "needs_browser_cookies"
+      },
+      "notes": "Supplied by the product owner. Behind a Cloudflare managed challenge: without browser cookies the probe fails with needs_browser_cookies (reported as BLOCKED). With cookies, run with --cookies-from-browser <browser> for the real check. The host the owner typed, en.luxure.tv, is not this site."
+    },
+    {
+      "id": "xxxbp-video",
+      "site": "xxxbp",
+      "kind": "single",
+      "url": "https://xxxbp.tv/video/793979/first-time-sex-with-old-couple",
+      "expect": { "tiers": ["dedicated"], "extractor_key_prefix": "XxxbpTV", "min_items": 1, "min_qualities": 3 },
+      "notes": "Supplied by the product owner. The plugin reads api.xxxbp.tv/hls: 144p to 360p mp4 plus HLS, about 25 minutes."
+    },
+    {
+      "id": "xxxbp-listing",
+      "site": "xxxbp",
+      "kind": "listing",
+      "url": "https://xxxbp.tv/updates",
+      "expect": { "tiers": ["dedicated"], "extractor_key_prefix": "XxxbpTVList", "min_items": 5 },
+      "notes": "Latest uploads. Listings page as /updates/N; the plugin reads the first five pages."
+    },
+    {
+      "id": "youtube-video",
+      "site": "youtube",
+      "kind": "single",
+      "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      "expect": { "tiers": ["dedicated"], "extractor_key_prefix": "Youtube", "min_items": 1, "min_qualities": 2 },
+      "notes": "Placeholder (the first YouTube upload). Replace with a video you care about. Needs a JavaScript runtime (node 22 or newer, or deno) for the full quality list."
+    },
+    {
+      "id": "youtube-playlist",
+      "site": "youtube",
+      "kind": "listing",
+      "url": "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+      "expect": { "tiers": ["dedicated"], "extractor_key_prefix": "Youtube", "min_items": 2 },
+      "notes": "Placeholder public playlist. Replace with your own."
+    },
+    {
+      "id": "generic-page",
+      "site": "generic",
+      "kind": "generic-page",
+      "url": "https://samplelib.com/sample-mp4.html",
+      "expect": { "tiers": ["generic_extractor", "page_sniff"], "min_items": 1 },
+      "notes": "A site with no dedicated extractor. Either yt-dlp's generic extractor or the Core page scan must find the sample videos; the result carries a warning."
+    },
+    {
+      "id": "direct-file",
+      "site": "generic",
+      "kind": "direct-file",
+      "url": "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+      "expect": { "tiers": ["direct_file"], "min_items": 1 },
+      "notes": "A URL that serves the file itself: no yt-dlp, plain resumable HTTP."
+    }
+  ]
+}
