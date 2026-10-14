@@ -46,7 +46,17 @@ fn install_in_tree_launch_site_plugins_into_sidecar() {
         .is_file());
 
     let loaded = load_manifest(&sidecar).unwrap();
-    assert_eq!(loaded.version, "0.1.0");
+    assert_eq!(loaded.version, "0.2.0");
     assert!(loaded.extractors.contains(&"LuxureTV".to_string()));
     assert!(loaded.extractors.contains(&"XxxbpTV".to_string()));
+}
+
+/// The in-tree `plugins-manifest.json` and the Rust default must not drift apart.
+#[test]
+fn in_tree_manifest_matches_rust_default() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../extractor-plugins/plugins-manifest.json");
+    let on_disk: PluginManifest =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(on_disk, PluginManifest::launch_sites_default());
 }

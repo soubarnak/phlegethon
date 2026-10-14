@@ -35,7 +35,7 @@ pub struct PluginManifest {
     pub version: String,
     /// Package directory name under `yt-dlp-plugins/`.
     pub package: String,
-    /// Extractor IE keys this package provides (e.g. `"LuxureTV"`, `"XxxbpTV"`).
+    /// Extractor IE keys this package provides (e.g. `"LuxureTV"`, `"XxxbpTVList"`).
     pub extractors: Vec<String>,
 }
 
@@ -43,9 +43,12 @@ impl PluginManifest {
     /// Canonical manifest for the in-tree Launch Site plugin package.
     pub fn launch_sites_default() -> Self {
         Self {
-            version: "0.1.0".to_string(),
+            version: "0.2.0".to_string(),
             package: PLUGIN_PACKAGE_NAME.to_string(),
-            extractors: vec!["LuxureTV".to_string(), "XxxbpTV".to_string()],
+            extractors: ["LuxureTV", "LuxureTVList", "XxxbpTV", "XxxbpTVList"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         }
     }
 }
@@ -193,9 +196,10 @@ mod tests {
         write_manifest(tmp.path(), &manifest).unwrap();
         let loaded = load_manifest(tmp.path()).unwrap();
         assert_eq!(loaded, manifest);
-        assert_eq!(loaded.version, "0.1.0");
+        assert_eq!(loaded.version, "0.2.0");
         assert!(loaded.extractors.contains(&"LuxureTV".to_string()));
         assert!(loaded.extractors.contains(&"XxxbpTV".to_string()));
+        assert!(loaded.extractors.contains(&"XxxbpTVList".to_string()));
     }
 
     #[test]
@@ -208,8 +212,8 @@ mod tests {
     #[test]
     fn needs_update_when_versions_differ() {
         let installed = PluginManifest::launch_sites_default();
-        assert!(needs_update(&installed, "0.2.0"));
-        assert!(!needs_update(&installed, "0.1.0"));
+        assert!(needs_update(&installed, "0.3.0"));
+        assert!(!needs_update(&installed, "0.2.0"));
     }
 
     #[test]
@@ -237,7 +241,7 @@ mod tests {
             .is_file());
 
         let loaded = load_manifest(&sidecar).unwrap();
-        assert_eq!(loaded.version, "0.1.0");
+        assert_eq!(loaded.version, "0.2.0");
     }
 
     #[test]
@@ -268,7 +272,7 @@ mod tests {
             b"v2-updated",
         )
         .unwrap();
-        manifest.version = "0.2.0".to_string();
+        manifest.version = "0.3.0".to_string();
         install_plugin_package(&sidecar, &source_v2, &manifest).unwrap();
 
         let content = fs::read_to_string(
@@ -281,7 +285,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(content, "v2-updated");
-        assert_eq!(load_manifest(&sidecar).unwrap().version, "0.2.0");
+        assert_eq!(load_manifest(&sidecar).unwrap().version, "0.3.0");
     }
 
     #[test]

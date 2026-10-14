@@ -51,6 +51,15 @@ def _abs(page_url: str, media_url: str) -> str:
     return urljoin(page_url, media_url)
 
 
+_PREVIEW_MARKERS = ('_preview.', '/preview/', '/previews/', '/thumb', '_thumb.', '-preview.')
+
+
+def looks_like_preview(url: str) -> bool:
+    """Hover previews and thumbnails are never the main video."""
+    lower = url.lower()
+    return any(marker in lower for marker in _PREVIEW_MARKERS)
+
+
 def _height_from_label(label: str | None, url: str) -> int | None:
     for candidate in (label or '', url):
         m = _HEIGHT_RE.search(candidate)
@@ -99,7 +108,7 @@ def extract_formats(webpage: str, page_url: str) -> list[dict[str, Any]]:
 
     def add(url: str, **kwargs: Any) -> None:
         abs_url = _abs(page_url, url.strip())
-        if not abs_url.startswith('http') or abs_url in seen:
+        if not abs_url.startswith('http') or abs_url in seen or looks_like_preview(abs_url):
             return
         seen.add(abs_url)
         formats.append(_format_entry(abs_url, **kwargs))
@@ -198,3 +207,154 @@ def build_info_dict(
     for fmt in info['formats']:
         fmt.setdefault('http_headers', {})['Referer'] = page_url
     return info
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare
+# ---------------------------------------------------------------------------
+
+_CLOUDFLARE_MARKERS = (
+    'just a moment...',
+    'challenges.cloudflare.com',
+    'cf-chl-',
+    '_cf_chl_opt',
+    'attention required! | cloudflare',
+    'checking if the site connection is secure',
+)
+
+
+def is_cloudflare_challenge(webpage: str | None) -> bool:
+    """True for Cloudflare's JS / managed-challenge interstitial."""
+    if not webpage:
+        return False
+    head = webpage[:20000].lower()
+    hits = sum(marker in head for marker in _CLOUDFLARE_MARKERS)
+    return hits >= 2 or ('just a moment...' in head and 'cloudflare' in head)
+
+
+CLOUDFLARE_HELP = (
+    'is protected by a Cloudflare challenge. Open the site in your browser once, '
+    'then pass those cookies to yt-dlp (--cookies-from-browser <browser>, or Settings > '
+    'Cookies in Phlegethon) and retry; the cf_clearance cookie is tied to the browser '
+    'and network, so use the same machine.'
+)
+
+
+# ---------------------------------------------------------------------------
+# xxxbp.tv
+# ---------------------------------------------------------------------------
+
+XXXBP_API_URL = 'https://api.xxxbp.tv/hls'
+_XXXBP_TITLE_SUFFIX_RE = re.compile(r'\s*[-|–]\s*XXX\s?BP(?:[\s.]*TV)?\s*$', re.IGNORECASE)
+_XXXBP_CARD_RE = re.compile(
+    r'<a\s+[^>]*?href=["\'](?P<href>(?:https?://(?:www\.)?xxxbp\.tv)?/video/(?P<id>\d+)/(?P<slug>[^"\'/?#]+))["\'][^>]*>',
+    re.IGNORECASE,
+)
+_TITLE_ATTR_RE = re.compile(r'title=["\'](?P<title>[^"\']*)["\']', re.IGNORECASE)
+
+
+def clean_xxxbp_title(title: str | None) -> str | None:
+    if not title:
+        return None
+    cleaned = _XXXBP_TITLE_SUFFIX_RE.sub('', title).strip()
+    return cleaned or None
+
+
+def xxxbp_api_formats(payload: dict[str, Any], referer: str) -> tuple[list[dict[str, Any]], str | None]:
+    """Turn the ``api.xxxbp.tv/hls`` JSON into progressive formats and the HLS master URL.
+
+    The payload is ``{"master": <m3u8>, "links": [{"src": <m3u8>, "title": "720p"}],
+    "mp4": [{"src": <mp4>, "title": "720p"}]}``. Progressive mp4 files are preferred
+    over HLS: they download without ffmpeg and resume cleanly.
+    """
+    formats: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in payload.get('mp4') or []:
+        if not isinstance(item, dict):
+            continue
+        src = (item.get('src') or '').strip()
+        title = str(item.get('title') or '')
+        if not src.startswith('http') or src in seen:
+            continue
+        seen.add(src)
+        height = _height_from_label(title, src)
+        fmt: dict[str, Any] = {
+            'url': src,
+            'format_id': f'mp4-{height}p' if height else 'mp4',
+            'format_note': title or None,
+            'ext': 'mp4',
+            'protocol': 'https',
+            'vcodec': 'avc1',
+            'acodec': 'mp4a',
+            'source_preference': 1,
+            'http_headers': {'Referer': referer},
+        }
+        if height:
+            fmt['height'] = height
+            fmt['width'] = int(height * 16 / 9)
+        formats.append(fmt)
+    master = (payload.get('master') or '').strip() or None
+    return formats, master if master and master.startswith('http') else None
+
+
+def xxxbp_listing_entries(html: str) -> list[dict[str, str]]:
+    """Video cards on a listing page, in page order, without duplicates."""
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for m in _XXXBP_CARD_RE.finditer(html):
+        video_id = m.group('id')
+        if video_id in seen:
+            continue
+        seen.add(video_id)
+        title_m = _TITLE_ATTR_RE.search(m.group(0))
+        entries.append({
+            'id': video_id,
+            'slug': m.group('slug'),
+            'url': f'https://xxxbp.tv/video/{video_id}/{m.group("slug")}',
+            'title': (title_m.group('title').strip() if title_m else '') or m.group('slug').replace('-', ' '),
+        })
+    return entries
+
+
+def split_page_number(path: str) -> tuple[str, int]:
+    """``updates/3`` -> (``updates``, 3); ``model/some-name`` -> (that, 1)."""
+    m = re.fullmatch(r'(?P<base>.+?)/(?P<page>\d+)', path.strip('/'))
+    if m:
+        return m.group('base'), int(m.group('page'))
+    return path.strip('/'), 1
+
+
+# ---------------------------------------------------------------------------
+# luxuretv
+# ---------------------------------------------------------------------------
+
+_LUXURE_VIDEO_LINK_RE = re.compile(
+    r'''href=["'](?P<url>(?:https?://(?:www\.|en\.)?luxuretv\.com)?/videos?/[^"'#?]*?-(?P<id>\d+)(?:\.html)?)["']''',
+    re.IGNORECASE,
+)
+_REL_NEXT_RE = re.compile(
+    r'''<(?:a|link)\b[^>]*\brel=["']next["'][^>]*\bhref=["'](?P<href>[^"']+)["']|'''
+    r'''<(?:a|link)\b[^>]*\bhref=["'](?P<href2>[^"']+)["'][^>]*\brel=["']next["']''',
+    re.IGNORECASE,
+)
+
+
+def luxure_listing_links(html: str, page_url: str) -> list[dict[str, str]]:
+    """Video links on a luxuretv listing page (best effort, see LuxureTVListIE)."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for m in _LUXURE_VIDEO_LINK_RE.finditer(html):
+        video_id = m.group('id')
+        if video_id in seen:
+            continue
+        seen.add(video_id)
+        out.append({'id': video_id, 'url': urljoin(page_url, m.group('url'))})
+    return out
+
+
+def next_page_link(html: str, page_url: str) -> str | None:
+    m = _REL_NEXT_RE.search(html)
+    if not m:
+        return None
+    href = m.group('href') or m.group('href2')
+    return urljoin(page_url, href) if href else None
