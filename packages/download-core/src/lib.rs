@@ -1719,6 +1719,11 @@ impl Core {
         self.sidecar_update_source = source;
     }
 
+    /// Shared HTTP backend (shells reuse it for the release update source).
+    pub fn http_backend(&self) -> Arc<dyn HttpBackend> {
+        Arc::clone(&self.http)
+    }
+
     /// Active update source (shells clone it to do network work off the lock).
     pub fn sidecar_update_source(&self) -> Arc<dyn SidecarUpdateSource> {
         Arc::clone(&self.sidecar_update_source)

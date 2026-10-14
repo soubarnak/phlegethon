@@ -4,16 +4,17 @@
 
 mod companion;
 
-use crossbeam_channel::TryRecvError;
 use download_core::{
-    ArchiveEntry, ArchiveOutcome, Core, CoreEvent, EnqueueOutcome, JobSignals,
-    ProbeDestinationPreview, ProbeSelection, ProdHttpBackend,
+    ArchiveEntry, ArchiveOutcome, Core, CoreEvent, EnqueueOptions, EnqueueOutcome,
+    GitHubReleaseUpdateSource, JobSignals, PlatformInfo, ProbeDestinationPreview, ProbeSelection,
+    ProbeTierSettings, ProdHttpBackend, ToolchainStatus,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{Manager, State};
+use std::time::{Duration, Instant};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_dialog::DialogExt;
 
@@ -21,40 +22,51 @@ use tauri_plugin_dialog::DialogExt;
 // App state
 // ---------------------------------------------------------------------------
 
+/// How long a Toolchain status snapshot is reused before re-probing tools.
+const TOOLCHAIN_STATUS_TTL: Duration = Duration::from_secs(30);
+/// Upper bound for buffered events awaiting `poll_events` (legacy polling path).
+const EVENT_BUFFER_CAP: usize = 2048;
+
 struct AppState {
     core: Arc<Mutex<Core>>,
     job_signals: Arc<JobSignals>,
-    event_rx: Mutex<crossbeam_channel::Receiver<CoreEvent>>,
+    /// Core event receiver; taken by the drain thread in `setup`.
+    event_rx: Mutex<Option<crossbeam_channel::Receiver<CoreEvent>>>,
+    /// Summaries kept for `poll_events` after they were pushed as `core-event`.
+    event_buffer: Mutex<Vec<EventSummary>>,
     library_root: Mutex<Option<PathBuf>>,
     process_pending_busy: AtomicBool,
+    toolchain_status_cache: Mutex<Option<(Instant, ToolchainStatus)>>,
 }
 
 impl AppState {
     fn new() -> Self {
         let http = Box::new(ProdHttpBackend::new());
-        let ytdlp_bin = std::env::var_os("YTDLP_PATH")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("yt-dlp"));
-        let config = download_core::YtDlpConfig {
-            binary_path: ytdlp_bin,
-            ..download_core::YtDlpConfig::default()
-        }
-        .with_sidecar_plugins(dirs_data_dir());
+        let sidecar_root = dirs_data_dir();
+        // Sidecar manifest → YTDLP_PATH → PATH → python3 -m yt_dlp, plus JS runtime.
+        let config = download_core::YtDlpConfig::discover(Some(&sidecar_root));
         let extractor = Box::new(download_core::YtDlpExtractorToolchain::new(config));
         let job_signals = Arc::new(JobSignals::default());
-        let (core, rx) = Core::new_with_clock_and_signals(
+        let (mut core, rx) = Core::new_with_clock_and_signals(
             http,
             extractor,
             Arc::new(download_core::SystemClock::new()),
             job_signals.clone(),
         );
+        // Toolchain releases come from GitHub; plugin versions from the local catalog.
+        core.set_sidecar_update_source(Arc::new(GitHubReleaseUpdateSource::new(
+            core.http_backend(),
+            PlatformInfo::current(),
+        )));
 
         Self {
             core: Arc::new(Mutex::new(core)),
             job_signals,
-            event_rx: Mutex::new(rx),
+            event_rx: Mutex::new(Some(rx)),
+            event_buffer: Mutex::new(Vec::new()),
             library_root: Mutex::new(None),
             process_pending_busy: AtomicBool::new(false),
+            toolchain_status_cache: Mutex::new(None),
         }
     }
 }
@@ -121,6 +133,12 @@ enum EventSummary {
     JobDiscarded {
         job_id: String,
     },
+    JobMirrorFailover {
+        job_id: String,
+        previous_url: String,
+        next_url: String,
+        error: String,
+    },
 }
 
 fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
@@ -160,8 +178,46 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
             job_id: job_id.clone(),
         }),
         CoreEvent::ProbeResult { .. } | CoreEvent::ProbeFailed { .. } => None,
-        CoreEvent::JobMirrorFailover { .. } => None,
+        CoreEvent::JobMirrorFailover {
+            job_id,
+            previous_url,
+            next_url,
+            error,
+        } => Some(EventSummary::JobMirrorFailover {
+            job_id: job_id.clone(),
+            previous_url: previous_url.clone(),
+            next_url: next_url.clone(),
+            error: error.clone(),
+        }),
     }
+}
+
+/// Forward Core events to the webview as `core-event` and keep a copy for `poll_events`.
+fn start_event_drain(app: tauri::AppHandle, rx: crossbeam_channel::Receiver<CoreEvent>) {
+    std::thread::spawn(move || {
+        while let Ok(evt) = rx.recv() {
+            let Some(summary) = event_to_summary(&evt) else { continue };
+            if let Err(err) = app.emit("core-event", &summary) {
+                log::warn!("failed to emit core-event: {err}");
+            }
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut buf) = state.event_buffer.lock() {
+                    if buf.len() >= EVENT_BUFFER_CAP {
+                        let overflow = buf.len() + 1 - EVENT_BUFFER_CAP;
+                        buf.drain(..overflow);
+                    }
+                    buf.push(summary);
+                }
+            }
+        }
+    });
+}
+
+fn core_handle(app: &tauri::AppHandle) -> Result<Arc<Mutex<Core>>, String> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "app state not ready".to_string())?;
+    Ok(Arc::clone(&state.core))
 }
 
 // ---------------------------------------------------------------------------
@@ -196,21 +252,223 @@ fn enqueue_url(
     state: State<AppState>,
     url: String,
     destination: Option<String>,
+    force_direct: Option<bool>,
 ) -> Result<EnqueueResult, String> {
     ensure_library_root(&state)?;
     let dest = parse_optional_destination(destination);
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    let outcome = core.enqueue(&url, dest)?;
+    let outcome = core.enqueue_with_options(
+        &url,
+        dest,
+        EnqueueOptions {
+            force_direct: force_direct.unwrap_or(false),
+        },
+    )?;
     Ok(outcome.into())
 }
 
+/// Probe with the Core mutex released while yt-dlp / the page sniffer run.
 #[tauri::command]
-fn probe_url(
-    state: State<AppState>,
+async fn probe_url(
+    app: tauri::AppHandle,
     url: String,
 ) -> Result<download_core::ProbeResult, String> {
+    {
+        let state = app.state::<AppState>();
+        ensure_library_root(&state)?;
+    }
+    let core = core_handle(&app)?;
+    tauri::async_runtime::spawn_blocking(move || Core::probe_outside_lock(core, &url))
+        .await
+        .map_err(|e| format!("probe task failed: {e}"))?
+}
+
+#[tauri::command]
+fn cancel_probe(state: State<AppState>, url: String) -> Result<bool, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.cancel_probe(&url))
+}
+
+#[tauri::command]
+fn clear_pending_probe(state: State<AppState>, url: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.probe(&url)
+    core.clear_pending_probe(&url)
+}
+
+/// Exact formats for one probe item (flat playlist entries start with presets).
+#[tauri::command]
+async fn enrich_probe_item_qualities(
+    app: tauri::AppHandle,
+    probe_url: String,
+    item_id: String,
+) -> Result<Vec<download_core::Quality>, String> {
+    let core = core_handle(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        Core::enrich_probe_item_qualities_outside_lock(core, &probe_url, &item_id)
+    })
+    .await
+    .map_err(|e| format!("enrich task failed: {e}"))?
+}
+
+#[tauri::command]
+fn get_probe_tier_settings(state: State<AppState>) -> Result<ProbeTierSettings, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.probe_tier_settings())
+}
+
+#[tauri::command]
+fn set_probe_tier_settings(
+    state: State<AppState>,
+    settings: ProbeTierSettings,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_probe_tier_settings(settings)
+}
+
+/// Detected yt-dlp / ffmpeg / JS runtime state; cached for a short while.
+#[tauri::command]
+async fn get_toolchain_status(
+    app: tauri::AppHandle,
+    force: Option<bool>,
+) -> Result<ToolchainStatus, String> {
+    if !force.unwrap_or(false) {
+        if let Some(status) = cached_toolchain_status(&app) {
+            return Ok(status);
+        }
+    }
+    let core = core_handle(&app)?;
+    let status = tauri::async_runtime::spawn_blocking(move || -> Result<ToolchainStatus, String> {
+        // `--version` probes run subprocesses; snapshot the extractor handle, not the lock.
+        let guard = core.lock().map_err(|e| e.to_string())?;
+        Ok(guard.toolchain_status())
+    })
+    .await
+    .map_err(|e| format!("toolchain status task failed: {e}"))??;
+    store_toolchain_status(&app, Some(status.clone()));
+    Ok(status)
+}
+
+fn cached_toolchain_status(app: &tauri::AppHandle) -> Option<ToolchainStatus> {
+    let state = app.try_state::<AppState>()?;
+    let cache = state.toolchain_status_cache.lock().ok()?;
+    let (at, status) = cache.as_ref()?;
+    (at.elapsed() < TOOLCHAIN_STATUS_TTL).then(|| status.clone())
+}
+
+fn store_toolchain_status(app: &tauri::AppHandle, status: Option<ToolchainStatus>) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut cache) = state.toolchain_status_cache.lock() {
+            *cache = status.map(|s| (Instant::now(), s));
+        }
+    }
+}
+
+/// Download the latest yt-dlp release into the sidecar and activate it.
+#[tauri::command]
+async fn install_toolchain_latest(
+    app: tauri::AppHandle,
+) -> Result<download_core::SidecarApplyResult, String> {
+    let core = core_handle(&app)?;
+    let result = tauri::async_runtime::spawn_blocking(move || Core::install_toolchain_latest(core))
+        .await
+        .map_err(|e| format!("install task failed: {e}"))??;
+    store_toolchain_status(&app, None);
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_default_quality_policy(
+    state: State<AppState>,
+) -> Result<download_core::DefaultQualityPolicy, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.default_quality_policy())
+}
+
+#[tauri::command]
+fn set_default_quality_policy(
+    state: State<AppState>,
+    policy: download_core::DefaultQualityPolicy,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_default_quality_policy(policy)
+}
+
+#[tauri::command]
+fn get_global_bandwidth_cap(state: State<AppState>) -> Result<Option<u64>, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    Ok(core.global_bandwidth_cap())
+}
+
+/// `cap` in bytes per second; `None` or 0 removes the cap.
+#[tauri::command]
+fn set_global_bandwidth_cap(state: State<AppState>, cap: Option<u64>) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    match cap.filter(|c| *c > 0) {
+        Some(cap) => core.set_global_bandwidth_cap(cap),
+        None => core.remove_global_bandwidth_cap(),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_job_bandwidth_cap(
+    state: State<AppState>,
+    job_id: String,
+    cap: Option<u64>,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    match cap.filter(|c| *c > 0) {
+        Some(cap) => core.set_job_bandwidth_cap(&job_id, cap),
+        None => core.remove_job_bandwidth_cap(&job_id),
+    }
+}
+
+#[tauri::command]
+fn get_job_bandwidth_cap(state: State<AppState>, job_id: String) -> Result<Option<u64>, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    core.job_bandwidth_cap(&job_id)
+}
+
+#[tauri::command]
+fn add_job_mirror(state: State<AppState>, job_id: String, url: String) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.add_job_mirror(&job_id, url)
+}
+
+#[tauri::command]
+fn job_mirrors(state: State<AppState>, job_id: String) -> Result<Vec<String>, String> {
+    let core = state.core.lock().map_err(|e| e.to_string())?;
+    core.job_mirrors(&job_id)
+}
+
+#[tauri::command]
+fn set_job_expected_hash(
+    state: State<AppState>,
+    job_id: String,
+    algorithm: String,
+    digest: String,
+) -> Result<(), String> {
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.set_job_expected_hash(&job_id, &algorithm, &digest)
+}
+
+/// Render the Filename Template with sample values for the settings preview.
+#[tauri::command]
+fn preview_filename_template(template: String) -> Result<String, String> {
+    let trimmed = template.trim();
+    if trimmed.is_empty() {
+        return Err("Filename Template cannot be empty".to_string());
+    }
+    Ok(download_core::render_template(
+        trimmed,
+        &download_core::TemplateVars {
+            title: "Example Video Title",
+            id: "dQw4w9WgXcQ",
+            uploader: Some("Example Channel"),
+            upload_date: Some("20260101"),
+            ext: "mp4",
+        },
+    ))
 }
 
 #[tauri::command]
@@ -523,12 +781,15 @@ fn set_sidecar_update_settings(
     core.set_sidecar_update_settings(settings)
 }
 
+/// Check installed vs available sidecar versions (network lookup off the lock).
 #[tauri::command]
-fn check_sidecar_updates(
-    state: State<AppState>,
+async fn check_sidecar_updates(
+    app: tauri::AppHandle,
 ) -> Result<download_core::SidecarUpdateCheckResult, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
-    core.check_sidecar_updates()
+    let core = core_handle(&app)?;
+    tauri::async_runtime::spawn_blocking(move || Core::check_sidecar_updates_outside_lock(core))
+        .await
+        .map_err(|e| format!("update check task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -617,22 +878,12 @@ fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
         .and_then(|_| window.show().map_err(|e| e.to_string()))
 }
 
+/// Legacy polling path: events are pushed as `core-event`; this drains the
+/// buffered copies for frontends that still poll.
 #[tauri::command]
 fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
-    let rx = state.event_rx.lock().map_err(|e| e.to_string())?;
-    let mut events = Vec::new();
-    loop {
-        match rx.try_recv() {
-            Ok(evt) => {
-                if let Some(summary) = event_to_summary(&evt) {
-                    events.push(summary);
-                }
-            }
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Disconnected) => break,
-        }
-    }
-    Ok(events)
+    let mut buf = state.event_buffer.lock().map_err(|e| e.to_string())?;
+    Ok(std::mem::take(&mut *buf))
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +932,23 @@ fn remove_history_entry(
 fn history_len(state: State<AppState>) -> Result<usize, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.history_len())
+}
+
+/// Remove all history entries, or only `"Completed"` / `"Failed"` ones.
+#[tauri::command]
+fn clear_history(state: State<AppState>, outcome: Option<String>) -> Result<usize, String> {
+    let filter = match outcome.as_deref() {
+        None | Some("") | Some("All") => None,
+        Some("Completed") => Some(ArchiveOutcome::Completed),
+        Some("Failed") => Some(ArchiveOutcome::Failed),
+        Some(other) => {
+            return Err(format!(
+                "unknown outcome '{other}', expected 'Completed', 'Failed' or none"
+            ))
+        }
+    };
+    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    core.clear_history(filter)
 }
 
 // ---------------------------------------------------------------------------
@@ -748,15 +1016,35 @@ pub fn run() {
             let sidecar_root = dirs_data_dir();
             {
                 let mut core = state.core.lock().unwrap();
-                let _ = core.set_sidecar_root(sidecar_root);
-                let _ = core.set_library_root(root.clone());
-                let _ = core.apply_sidecar_updates_on_launch();
+                if let Err(err) = core.set_sidecar_root(sidecar_root) {
+                    log::warn!("sidecar root: {err}");
+                }
+                if let Err(err) = core.set_library_root(root.clone()) {
+                    log::warn!("library root: {err}");
+                }
             }
             {
                 let mut stored = state.library_root.lock().unwrap();
                 *stored = Some(root.clone());
             }
             let _ = persist_library_root_preference(&root);
+
+            // Push Core events to the webview instead of making it poll.
+            if let Some(rx) = state.event_rx.lock().unwrap().take() {
+                start_event_drain(app.handle().clone(), rx);
+            }
+
+            // Deferred / on-launch sidecar updates may hit the network: never on the UI thread.
+            {
+                let core = Arc::clone(&state.core);
+                std::thread::spawn(move || {
+                    if let Ok(mut guard) = core.lock() {
+                        if let Err(err) = guard.apply_sidecar_updates_on_launch() {
+                            log::warn!("sidecar update on launch: {err}");
+                        }
+                    }
+                });
+            }
 
             companion::start_companion_receiver(app.handle().clone());
 
@@ -765,6 +1053,24 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             enqueue_url,
             probe_url,
+            cancel_probe,
+            clear_pending_probe,
+            enrich_probe_item_qualities,
+            get_probe_tier_settings,
+            set_probe_tier_settings,
+            get_toolchain_status,
+            install_toolchain_latest,
+            get_default_quality_policy,
+            set_default_quality_policy,
+            get_global_bandwidth_cap,
+            set_global_bandwidth_cap,
+            set_job_bandwidth_cap,
+            get_job_bandwidth_cap,
+            add_job_mirror,
+            job_mirrors,
+            set_job_expected_hash,
+            preview_filename_template,
+            clear_history,
             confirm_probe_selection,
             preview_probe_destination,
             get_library_root,
