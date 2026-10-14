@@ -4,7 +4,7 @@
 //! Platform shells consume this library via its public command/event API.
 
 mod bandwidth;
-mod classification;
+pub mod classification;
 mod cookie_channel;
 mod disk_space;
 mod doh_dns;
@@ -21,6 +21,7 @@ mod integrity;
 mod job;
 mod job_signals;
 mod mirror_set;
+pub mod page_sniffer;
 mod transfer;
 mod url_input;
 mod proxy_settings;
@@ -48,14 +49,19 @@ pub use sidecar_updates::{
 pub use bandwidth::{Clock, ManualClock, SystemClock, TransferProgress};
 pub use event::CoreEvent;
 pub use extractor::{
-    ExtractorDownloadOutcome, ExtractorToolchain, FakeExtractorToolchain, ItemSelection,
-    MediaItem, ProbeResult, ProbeSelection, Quality,
+    is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain,
+    FakeExtractorToolchain, ItemSelection, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult,
+    ProbeSelection, ProbeTierSettings, Quality, DEFAULT_PROBE_TIMEOUT_SECS,
+};
+pub use page_sniffer::{
+    FakePageSniffer, HtmlPageSniffer, PageSniffer, SniffOutcome, SniffSource, SniffedKind,
+    SniffedMedia,
 };
 pub use filename_template::{
     media_item_raw_id, prepare_extractor_output, render_template, resolve_collision,
     sanitize_filename, TemplateVars, DEFAULT_FILENAME_TEMPLATE,
 };
-pub use http::{FetchResult, HttpBackend, ProdHttpBackend};
+pub use http::{FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
 pub use disk_space::{
     disk_space_margin_bytes, required_free_bytes, FreeSpaceLookup, SystemFreeSpace,
 };
@@ -90,10 +96,19 @@ pub struct JobSnapshot {
     pub job_id: String,
     pub url: String,
     pub destination: String,
+    /// `pending` | `downloading` | `paused` | `failed` | `completed`.
     pub status: String,
     pub bytes_downloaded: u64,
     pub total_bytes: Option<u64>,
     pub title: String,
+    /// Final file path once Completed.
+    pub path: Option<String>,
+    /// True when the Extractor Toolchain (yt-dlp) fetches this job.
+    pub is_extractor: bool,
+    pub extraction_tier: Option<ExtractionTier>,
+    pub last_error: Option<String>,
+    /// Position in the Core queue (what `reorder_job` indices refer to).
+    pub queue_index: usize,
 }
 
 /// Match for a URL already active or queued in Core.
@@ -167,6 +182,294 @@ pub struct Core {
     job_signals: Arc<job_signals::JobSignals>,
     free_space: Arc<dyn disk_space::FreeSpaceLookup>,
     download_archive: DownloadArchive,
+    /// Core-native page sniffer (tier 3 of the non-Launch-Site fallback chain).
+    sniffer: Arc<dyn PageSniffer>,
+    /// Settings-backed fallback-chain policy.
+    probe_tier_settings: ProbeTierSettings,
+    /// Cancel flags for in-flight probes, keyed by normalized URL.
+    probe_cancels: HashMap<String, Arc<AtomicBool>>,
+}
+
+/// Options for [`Core::enqueue_with_options`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnqueueOptions {
+    /// Skip classification and create a plain HTTP job for the URL itself
+    /// ("Try plain download" after a failed probe).
+    #[serde(default)]
+    pub force_direct: bool,
+}
+
+/// Everything a probe needs, captured under the Core lock so the network work
+/// can run without it. Build with [`Core::plan_probe`] (or
+/// [`ProbePlan::standalone`] for tools), run with [`ProbePlan::run`], then hand
+/// the outcome to [`Core::finish_probe`].
+pub struct ProbePlan {
+    url: String,
+    launch_site: bool,
+    extractor: Arc<dyn ExtractorToolchain>,
+    sniffer: Arc<dyn PageSniffer>,
+    cookies: CookieChannel,
+    proxy: ProxySettings,
+    settings: ProbeTierSettings,
+    cancel: Arc<AtomicBool>,
+}
+
+impl ProbePlan {
+    /// A plan outside of a [`Core`] (CLI / examples / live checks).
+    pub fn standalone(
+        url: &str,
+        extractor: Arc<dyn ExtractorToolchain>,
+        sniffer: Arc<dyn PageSniffer>,
+        settings: ProbeTierSettings,
+        cookies: CookieChannel,
+        proxy: ProxySettings,
+    ) -> Result<Self, String> {
+        let url = normalize_url(url).ok_or_else(|| "invalid URL".to_string())?;
+        let parsed = url::Url::parse(&url).map_err(|_| "invalid URL".to_string())?;
+        Ok(Self {
+            launch_site: classification::is_launch_site(&parsed),
+            url,
+            extractor,
+            sniffer,
+            cookies,
+            proxy,
+            settings,
+            cancel: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Normalized URL this plan probes.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Whether the URL is one of the four Launch Sites (dedicated extractor or fail).
+    pub fn is_launch_site(&self) -> bool {
+        self.launch_site
+    }
+
+    /// Shared cancel flag; set it to abort [`Self::run`] between tiers.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    fn check_cancel(&self) -> Result<(), String> {
+        if self.cancel.load(Ordering::Acquire) {
+            Err("probe cancelled".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn policy(&self) -> ProbePolicy {
+        ProbePolicy {
+            allow_generic: !self.launch_site && self.settings.allow_generic,
+            timeout: Duration::from_secs(self.settings.probe_timeout_secs),
+            cancel: Some(Arc::clone(&self.cancel)),
+        }
+    }
+
+    /// Run the probe. Blocking network work; call without holding the Core lock.
+    ///
+    /// Launch Sites: the dedicated yt-dlp extractor or an explicit error
+    /// (spec §6.4, never a silent generic fallback). Other URLs fall through:
+    ///
+    /// 0. HEAD says non-HTML → one `DirectFile` item.
+    /// 1. yt-dlp dedicated extractor → `Dedicated`.
+    /// 2. yt-dlp generic extractor (when allowed) → `GenericExtractor` + warning.
+    /// 3. Core page sniffer finds media in the HTML → `PageSniff` + warning.
+    /// 4. Otherwise an error naming what each tier reported.
+    pub fn run(&self) -> Result<ProbeResult, String> {
+        let policy = self.policy();
+
+        if self.launch_site {
+            let result = self
+                .extractor
+                .probe_with_policy(&self.url, &self.cookies, &self.proxy, &policy)?;
+            if !result.tier.is_dedicated() {
+                return Err(format!(
+                    "unsupported Launch Site: '{}' resolved via yt-dlp's generic extractor",
+                    self.url
+                ));
+            }
+            return Ok(result);
+        }
+
+        // Tier 0: a cheap HEAD tells a file from a page before spawning yt-dlp.
+        if self.settings.allow_direct_fallback {
+            if let Ok(SniffOutcome::Binary {
+                content_type,
+                content_length,
+                final_url,
+                filename,
+            }) = self.sniffer.sniff_head(&self.url, &self.proxy)
+            {
+                return Ok(direct_file_result(
+                    &self.url,
+                    &content_type,
+                    content_length,
+                    &final_url,
+                    filename,
+                ));
+            }
+        }
+        self.check_cancel()?;
+
+        // Tiers 1 + 2: one yt-dlp run; the extractor key tells dedicated from generic.
+        let ytdlp_error = match self
+            .extractor
+            .probe_with_policy(&self.url, &self.cookies, &self.proxy, &policy)
+        {
+            Ok(mut result) if !result.items.is_empty() => {
+                if result.tier == ExtractionTier::GenericExtractor {
+                    result.warnings.push(
+                        "yt-dlp has no dedicated extractor for this site; the results come \
+                         from its generic extractor and the quality list may be incomplete."
+                            .to_string(),
+                    );
+                }
+                return Ok(result);
+            }
+            Ok(_) => format!("yt-dlp returned no media items for {}", self.url),
+            Err(err) => err,
+        };
+        self.check_cancel()?;
+
+        // Tier 3: Core's own HTML sniffer.
+        let mut sniff_note = String::new();
+        if self.settings.allow_page_sniff {
+            match self.sniffer.sniff(&self.url, &self.proxy) {
+                Ok(SniffOutcome::Page { title, media }) if !media.is_empty() => {
+                    let items = page_sniffer::media_items_from_sniff(
+                        &self.url,
+                        title.as_deref(),
+                        media,
+                    );
+                    let source_name = if items.len() > 1 { title } else { None };
+                    return Ok(ProbeResult {
+                        url: self.url.clone(),
+                        items,
+                        source_name,
+                        tier: ExtractionTier::PageSniff,
+                        extractor_key: None,
+                        warnings: vec![format!(
+                            "yt-dlp could not extract this page ({ytdlp_error}); media URLs \
+                             found in the page HTML are offered instead."
+                        )],
+                    });
+                }
+                Ok(SniffOutcome::Binary {
+                    content_type,
+                    content_length,
+                    final_url,
+                    filename,
+                }) if self.settings.allow_direct_fallback => {
+                    return Ok(direct_file_result(
+                        &self.url,
+                        &content_type,
+                        content_length,
+                        &final_url,
+                        filename,
+                    ));
+                }
+                Ok(_) => sniff_note = "; page sniff: no media URLs found in the HTML".to_string(),
+                Err(err) => sniff_note = format!("; page sniff: {err}"),
+            }
+        }
+
+        Err(format!(
+            "no downloadable media found for {}. yt-dlp: {ytdlp_error}{sniff_note}",
+            self.url
+        ))
+    }
+}
+
+/// One-item `DirectFile` probe result for a URL that serves a non-HTML body.
+fn direct_file_result(
+    url: &str,
+    content_type: &str,
+    content_length: Option<u64>,
+    final_url: &str,
+    filename: Option<String>,
+) -> ProbeResult {
+    use sha2::{Digest, Sha256};
+    let name = filename
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| job::filename_from_url(final_url));
+    let container = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .filter(|ext| !ext.is_empty() && ext.len() <= 5);
+    let digest = Sha256::digest(final_url.as_bytes());
+    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    ProbeResult {
+        url: url.to_string(),
+        items: vec![MediaItem {
+            id: format!("file-{hex}"),
+            title: name,
+            url: final_url.to_string(),
+            qualities: vec![Quality {
+                id: "file".to_string(),
+                label: match content_length {
+                    Some(n) => format!("Original file ({})", human_bytes(n)),
+                    None => "Original file".to_string(),
+                },
+                size_bytes: content_length,
+                container,
+            }],
+            archived: false,
+            uploader: None,
+            upload_date: None,
+            fetch_kind: MediaFetchKind::DirectHttp,
+            qualities_are_presets: false,
+            referer: None,
+        }],
+        source_name: None,
+        tier: ExtractionTier::DirectFile,
+        extractor_key: None,
+        warnings: vec![format!("Server reports {content_type}; downloading as a plain file.")],
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Everything an enrich call needs; see [`Core::enrich_probe_item_qualities_outside_lock`].
+pub struct EnrichPlan {
+    url_key: String,
+    item_id: String,
+    item_url: String,
+    fetch_kind: MediaFetchKind,
+    existing: Vec<Quality>,
+    extractor: Arc<dyn ExtractorToolchain>,
+    cookies: CookieChannel,
+    proxy: ProxySettings,
+}
+
+impl EnrichPlan {
+    /// Blocking network work; call without the Core lock.
+    pub fn run(&self) -> Result<Vec<Quality>, String> {
+        match self.fetch_kind {
+            // Plain files have exactly the qualities the sniffer found.
+            MediaFetchKind::DirectHttp => Ok(self.existing.clone()),
+            MediaFetchKind::Extractor => {
+                self.extractor
+                    .probe_item_qualities(&self.item_url, &self.cookies, &self.proxy)
+            }
+        }
+    }
 }
 
 enum UnlockedTransferPlan {
@@ -217,6 +520,7 @@ enum UnlockedTransferPlan {
         live_bytes: Arc<AtomicU64>,
         event_tx: crossbeam_channel::Sender<CoreEvent>,
         total_for_progress: Option<u64>,
+        referer: Option<String>,
     },
 }
 
@@ -335,6 +639,7 @@ impl UnlockedTransferPlan {
                 live_bytes,
                 event_tx,
                 total_for_progress,
+                referer,
             } => {
                 let result = run_extractor_fetch(ExtractorFetchParams {
                     extractor,
@@ -350,6 +655,7 @@ impl UnlockedTransferPlan {
                     event_tx,
                     job_id,
                     total_for_progress,
+                    referer,
                 });
                 transfer_active.store(false, Ordering::Release);
                 UnlockedTransferOutcome::Extracted {
@@ -378,6 +684,7 @@ struct ExtractorFetchParams {
     event_tx: crossbeam_channel::Sender<CoreEvent>,
     job_id: String,
     total_for_progress: Option<u64>,
+    referer: Option<String>,
 }
 
 /// Run an Extractor Toolchain download on a worker thread and emit
@@ -398,11 +705,12 @@ fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownload
         event_tx,
         job_id,
         total_for_progress,
+        referer,
     } = params;
     let (result_tx, result_rx) = mpsc::channel();
     let dest_worker = dest.clone();
     std::thread::spawn(move || {
-        let outcome = extractor.download(
+        let outcome = extractor.download_with_referer(
             &url,
             &format,
             &dest_worker,
@@ -411,6 +719,7 @@ fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownload
             &cookies,
             &proxy,
             &output_spec,
+            referer.as_deref(),
         );
         let _ = result_tx.send(outcome);
     });
@@ -567,8 +876,11 @@ impl Core {
         free_space: Arc<dyn disk_space::FreeSpaceLookup>,
     ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
         let (tx, rx) = crossbeam_channel::unbounded();
+        let http: Arc<dyn HttpBackend> = Arc::from(http);
+        let sniffer: Arc<dyn PageSniffer> =
+            Arc::new(page_sniffer::HtmlPageSniffer::new(Arc::clone(&http)));
         let core = Self {
-            http: Arc::from(http),
+            http,
             extractor: Arc::from(extractor),
             library_root: None,
             jobs: Vec::new(),
@@ -593,6 +905,9 @@ impl Core {
             job_signals,
             free_space,
             download_archive: DownloadArchive::default(),
+            sniffer,
+            probe_tier_settings: ProbeTierSettings::default(),
+            probe_cancels: HashMap::new(),
         };
         (core, rx)
     }
@@ -698,6 +1013,7 @@ impl Core {
         self.http.apply_proxy_settings(&self.proxy_settings);
         self.sidecar_update_settings = storage::load_sidecar_update_settings(&root)?;
         self.filename_template = storage::load_filename_template(&root)?;
+        self.probe_tier_settings = storage::load_probe_tier_settings(&root)?;
         self.download_archive = download_archive::DownloadArchive::load(&root)?;
         self.library_root = Some(root);
         self.last_progress_flush = Instant::now();
@@ -735,6 +1051,7 @@ impl Core {
                 &self.proxy_settings,
                 &self.sidecar_update_settings,
                 &self.filename_template,
+                &self.probe_tier_settings,
             );
             storage::save_queue(root, &queue)?;
         }
@@ -810,6 +1127,7 @@ impl Core {
         error: String,
     ) -> Result<(), String> {
         self.jobs[job_index].mark_failed();
+        self.jobs[job_index].set_last_error(Some(error.clone()));
         self.event_tx
             .send(CoreEvent::JobFailed {
                 job_id: job_id.to_string(),
@@ -859,6 +1177,16 @@ impl Core {
         url_str: &str,
         destination: Option<PathBuf>,
     ) -> Result<EnqueueOutcome, String> {
+        self.enqueue_with_options(url_str, destination, EnqueueOptions::default())
+    }
+
+    /// [`Self::enqueue`] with [`EnqueueOptions`] (e.g. force a plain download).
+    pub fn enqueue_with_options(
+        &mut self,
+        url_str: &str,
+        destination: Option<PathBuf>,
+        options: EnqueueOptions,
+    ) -> Result<EnqueueOutcome, String> {
         let url_str = normalize_url(url_str).ok_or_else(|| "invalid URL".to_string())?;
         let parsed = url::Url::parse(&url_str).map_err(|_| "invalid URL".to_string())?;
         let root = self
@@ -870,14 +1198,22 @@ impl Core {
             Self::require_absolute_destination(dest)?;
         }
 
-        match classification::classify(&parsed) {
+        let kind = if options.force_direct {
+            classification::Kind::EnqueueDirect
+        } else {
+            classification::classify(&parsed)
+        };
+        match kind {
             classification::Kind::EnqueueDirect => {
-                let job = match destination {
+                let mut job = match destination {
                     Some(dest) => {
                         job::Job::new_with_source_at(url_str.clone(), dest, None)
                     }
                     None => job::Job::new(url_str.clone(), root.clone()),
                 };
+                if options.force_direct {
+                    job.set_extraction_tier(ExtractionTier::DirectFile);
+                }
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
                 self.register_job_signals(&job);
@@ -993,6 +1329,7 @@ impl Core {
             .ok_or_else(|| format!("job {job_id} not found"))?;
 
         job.retry()?;
+        job.set_last_error(None);
 
         self.event_tx
             .send(CoreEvent::JobRetried {
@@ -1086,25 +1423,39 @@ impl Core {
     pub fn list_job_snapshots(&self) -> Vec<JobSnapshot> {
         self.jobs
             .iter()
-            .map(|job| {
+            .enumerate()
+            .map(|(queue_index, job)| {
                 let title = job
-                    .source()
+                    .media_title()
+                    .or(job.source())
                     .map(str::to_string)
                     .unwrap_or_else(|| job.filename().to_string());
+                let status = match job.state() {
+                    JobState::Pending if job.transfer_active().load(Ordering::Acquire) => {
+                        "downloading"
+                    }
+                    JobState::Pending => "pending",
+                    JobState::Paused => "paused",
+                    JobState::Failed => "failed",
+                    JobState::Completed => "completed",
+                };
                 JobSnapshot {
                     job_id: job.id().to_string(),
                     url: job.url().to_string(),
                     destination: job.destination().display().to_string(),
-                    status: match job.state() {
-                        JobState::Pending => "pending",
-                        JobState::Paused => "paused",
-                        JobState::Failed => "failed",
-                        JobState::Completed => "completed",
-                    }
-                    .to_string(),
+                    status: status.to_string(),
                     bytes_downloaded: job.bytes_downloaded_snapshot(),
                     total_bytes: job.total_bytes(),
                     title,
+                    path: if job.is_completed() {
+                        Some(job.final_path().display().to_string())
+                    } else {
+                        None
+                    },
+                    is_extractor: job.extractor_format().is_some(),
+                    extraction_tier: job.extraction_tier(),
+                    last_error: job.last_error().map(str::to_string),
+                    queue_index,
                 }
             })
             .collect()
@@ -1641,40 +1992,70 @@ impl Core {
     // Probe-then-Confirm
     // -----------------------------------------------------------------------
 
-    /// Probe a URL using the Extractor Toolchain.
+    /// Probe a URL (synchronous; holds `&mut self` for the whole network call).
     ///
-    /// Returns discovered items + qualities and emits a `CoreEvent::ProbeResult`
-    /// event.  The probe result is stored internally so that
-    /// [`confirm_probe_selection`] can validate and create jobs from the
-    /// selection.
+    /// Shells should prefer [`Self::probe_outside_lock`]. This method keeps the
+    /// simple API for tests and tools: plan → run → finish.
     ///
-    /// Errors (unknown URL, toolchain failure) produce a `ProbeFailed` event
-    /// instead and return the error.
+    /// Emits `CoreEvent::ProbeResult` on success (result stored for
+    /// [`Self::confirm_probe_selection`]) or `CoreEvent::ProbeFailed`.
     pub fn probe(&mut self, url: &str) -> Result<ProbeResult, String> {
-        let url = normalize_url(url).ok_or_else(|| "invalid URL".to_string())?;
-        match self.extractor.probe(&url, &self.cookie_channel, &self.proxy_settings) {
+        let plan = self.plan_probe(url)?;
+        let outcome = plan.run();
+        self.finish_probe(plan.url(), outcome)
+    }
+
+    /// Probe with the Core mutex released during the network work.
+    pub fn probe_outside_lock(core: Arc<Mutex<Self>>, url: &str) -> Result<ProbeResult, String> {
+        let plan = {
+            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            guard.plan_probe(url)?
+        };
+        let outcome = plan.run();
+        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        guard.finish_probe(plan.url(), outcome)
+    }
+
+    /// Capture everything a probe needs (settings, toolchain, cancel flag).
+    pub fn plan_probe(&mut self, url: &str) -> Result<ProbePlan, String> {
+        let plan = ProbePlan::standalone(
+            url,
+            Arc::clone(&self.extractor),
+            Arc::clone(&self.sniffer),
+            self.probe_tier_settings,
+            self.cookie_channel.clone(),
+            self.proxy_settings.clone(),
+        )?;
+        self.probe_cancels
+            .insert(plan.url().to_string(), plan.cancel_flag());
+        Ok(plan)
+    }
+
+    /// Record a probe outcome: archive marks, pending store, events.
+    pub fn finish_probe(
+        &mut self,
+        url: &str,
+        outcome: Result<ProbeResult, String>,
+    ) -> Result<ProbeResult, String> {
+        self.probe_cancels.remove(url);
+        match outcome {
             Ok(mut result) => {
                 self.mark_archived_probe_items(&mut result.items);
-
-                // Store for subsequent confirm
                 self.pending_probes
-                    .insert(url.clone(), result.clone());
-
-                // Emit event
+                    .insert(url.to_string(), result.clone());
                 self.event_tx
                     .send(CoreEvent::ProbeResult {
-                        url: url.clone(),
+                        url: url.to_string(),
                         items: result.items.clone(),
                         source_name: result.source_name.clone(),
                     })
                     .map_err(|_| "event channel closed".to_string())?;
-
                 Ok(result)
             }
             Err(err) => {
                 self.event_tx
                     .send(CoreEvent::ProbeFailed {
-                        url: url.clone(),
+                        url: url.to_string(),
                         error: err.clone(),
                     })
                     .map_err(|_| "event channel closed".to_string())?;
@@ -1683,41 +2064,94 @@ impl Core {
         }
     }
 
+    /// Ask an in-flight probe to stop between tiers. Returns whether one was found.
+    pub fn cancel_probe(&self, url: &str) -> bool {
+        let Some(key) = normalize_url(url) else { return false };
+        match self.probe_cancels.get(&key) {
+            Some(flag) => {
+                flag.store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Current fallback-chain settings.
+    pub fn probe_tier_settings(&self) -> ProbeTierSettings {
+        self.probe_tier_settings
+    }
+
+    /// Update and persist fallback-chain settings.
+    pub fn set_probe_tier_settings(&mut self, settings: ProbeTierSettings) -> Result<(), String> {
+        settings.validate()?;
+        self.probe_tier_settings = settings;
+        self.persist_queue_now()
+    }
+
+    /// Replace the page sniffer (tests inject [`FakePageSniffer`]).
+    pub fn set_page_sniffer(&mut self, sniffer: Arc<dyn PageSniffer>) {
+        self.sniffer = sniffer;
+    }
+
     /// Fetch exact formats for one item from a pending probe and update stored qualities.
     pub fn enrich_probe_item_qualities(
         &mut self,
         probe_url: &str,
         item_id: &str,
     ) -> Result<Vec<Quality>, String> {
-        let url_key = normalize_url(probe_url).ok_or_else(|| "invalid URL".to_string())?;
-        let item_url = {
-            let probe = self.pending_probes.get(&url_key).ok_or_else(|| {
-                format!(
-                    "no pending probe for {}. Call probe() first.",
-                    url_key
-                )
-            })?;
-            let item = probe
-                .items
-                .iter()
-                .find(|i| i.id == item_id)
-                .ok_or_else(|| format!("item '{item_id}' not found in probe result for {url_key}"))?;
-            item.url.clone()
+        let plan = self.plan_enrich(probe_url, item_id)?;
+        let qualities = plan.run()?;
+        Ok(self.finish_enrich(&plan, qualities))
+    }
+
+    /// [`Self::enrich_probe_item_qualities`] with the mutex released during yt-dlp.
+    pub fn enrich_probe_item_qualities_outside_lock(
+        core: Arc<Mutex<Self>>,
+        probe_url: &str,
+        item_id: &str,
+    ) -> Result<Vec<Quality>, String> {
+        let plan = {
+            let guard = core.lock().map_err(|e| e.to_string())?;
+            guard.plan_enrich(probe_url, item_id)?
         };
+        let qualities = plan.run()?;
+        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        Ok(guard.finish_enrich(&plan, qualities))
+    }
 
-        let qualities = self.extractor.probe_item_qualities(
-            &item_url,
-            &self.cookie_channel,
-            &self.proxy_settings,
-        )?;
+    fn plan_enrich(&self, probe_url: &str, item_id: &str) -> Result<EnrichPlan, String> {
+        let url_key = normalize_url(probe_url).ok_or_else(|| "invalid URL".to_string())?;
+        let probe = self.pending_probes.get(&url_key).ok_or_else(|| {
+            format!(
+                "no pending probe for {}. Call probe() first.",
+                url_key
+            )
+        })?;
+        let item = probe
+            .items
+            .iter()
+            .find(|i| i.id == item_id)
+            .ok_or_else(|| format!("item '{item_id}' not found in probe result for {url_key}"))?;
+        Ok(EnrichPlan {
+            url_key,
+            item_id: item_id.to_string(),
+            item_url: item.url.clone(),
+            fetch_kind: item.fetch_kind,
+            existing: item.qualities.clone(),
+            extractor: Arc::clone(&self.extractor),
+            cookies: self.cookie_channel.clone(),
+            proxy: self.proxy_settings.clone(),
+        })
+    }
 
-        if let Some(probe) = self.pending_probes.get_mut(&url_key) {
-            if let Some(item) = probe.items.iter_mut().find(|i| i.id == item_id) {
+    fn finish_enrich(&mut self, plan: &EnrichPlan, qualities: Vec<Quality>) -> Vec<Quality> {
+        if let Some(probe) = self.pending_probes.get_mut(&plan.url_key) {
+            if let Some(item) = probe.items.iter_mut().find(|i| i.id == plan.item_id) {
                 item.qualities = qualities.clone();
+                item.qualities_are_presets = false;
             }
         }
-
-        Ok(qualities)
+        qualities
     }
 
     /// Preview where [`Self::confirm_probe_selection`] will place Job
@@ -1877,17 +2311,37 @@ impl Core {
                 })?;
 
             let job_source = Self::probe_job_source(probe, item);
+            // Sniffed variants carry their own URL in the quality id.
+            let (quality_id, quality_url) = page_sniffer::split_quality_url(&sel.quality_id);
+            let media_url = quality_url
+                .map(str::to_string)
+                .unwrap_or_else(|| item.url.clone());
 
             let mut job = if let Some(ref dest_parent) = destination {
-                job::Job::new_with_source_at(item.url.clone(), dest_parent.clone(), job_source)
+                job::Job::new_with_source_at(media_url.clone(), dest_parent.clone(), job_source)
             } else {
-                job::Job::new_with_source(item.url.clone(), root.clone(), job_source)
+                job::Job::new_with_source(media_url.clone(), root.clone(), job_source)
             };
-            // Launch Site media is fetched by yt-dlp, not plain HTTP of the page URL.
-            job.set_extractor_format(&sel.quality_id);
             job.set_media_extras(media_extras);
             job.set_media_identity(item.id.clone(), item.title.clone());
-            self.apply_extractor_filename(&mut job, item, quality);
+            job.set_extraction_tier(probe.tier);
+            job.set_referer(item.referer.clone());
+            match item.fetch_kind {
+                MediaFetchKind::Extractor => {
+                    // Media behind an extractor is fetched by yt-dlp, not plain HTTP of the page URL.
+                    job.set_extractor_format(quality_id);
+                    self.apply_extractor_filename(&mut job, item, quality);
+                }
+                MediaFetchKind::DirectHttp => {
+                    // A plain file: Core's HTTP backend fetches `media_url` itself.
+                    if probe.tier == ExtractionTier::DirectFile {
+                        let name = sanitize_filename(&item.title);
+                        if !name.is_empty() {
+                            job.set_filename(name);
+                        }
+                    }
+                }
+            }
             if let Some(size) = quality.size_bytes {
                 job.set_total_bytes(Some(size));
             }
@@ -2110,6 +2564,7 @@ impl Core {
                 live_bytes,
                 event_tx: self.event_tx.clone(),
                 total_for_progress,
+                referer: self.jobs[i].referer().map(str::to_string),
             }));
         }
 
@@ -2618,6 +3073,19 @@ impl Core {
             .ok_or_else(|| format!("no history entry for media_id '{media_id}'"))?;
         if let Some(root) = &self.library_root {
             self.download_archive.save(root)?;
+        }
+        Ok(removed)
+    }
+
+    /// Remove every archive entry (or only those with `outcome`). Files stay on disk.
+    pub fn clear_history(&mut self, outcome: Option<ArchiveOutcome>) -> Result<usize, String> {
+        let removed = self
+            .download_archive
+            .remove_where(|entry| outcome.as_ref().is_none_or(|o| &entry.outcome == o));
+        if removed > 0 {
+            if let Some(root) = &self.library_root {
+                self.download_archive.save(root)?;
+            }
         }
         Ok(removed)
     }

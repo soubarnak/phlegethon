@@ -1,6 +1,7 @@
 //! Job struct — state machine per download job.
 
 use crate::integrity::ExpectedHash;
+use crate::extractor::ExtractionTier;
 use crate::media_extras::MediaExtrasOptions;
 use crate::mirror_set::MirrorSet;
 use crate::storage::{PersistedJob, PersistedJobState};
@@ -120,6 +121,12 @@ pub struct Job {
     media_uploader: Option<String>,
     /// Upload date from probe (filename template variable).
     media_upload_date: Option<String>,
+    /// Which probe tier produced this job (None for plain enqueue).
+    extraction_tier: Option<ExtractionTier>,
+    /// Last failure message (cleared on Retry).
+    last_error: Option<String>,
+    /// Page URL sent as `Referer` when fetching this job's media.
+    referer: Option<String>,
 }
 
 impl Job {
@@ -199,6 +206,9 @@ impl Job {
             ytdlp_output_spec: None,
             media_uploader: None,
             media_upload_date: None,
+            extraction_tier: None,
+            last_error: None,
+            referer: None,
         }
     }
 
@@ -227,6 +237,9 @@ impl Job {
             ytdlp_output_spec: persisted.ytdlp_output_spec,
             media_uploader: persisted.media_uploader,
             media_upload_date: persisted.media_upload_date,
+            extraction_tier: persisted.extraction_tier,
+            last_error: persisted.last_error,
+            referer: persisted.referer,
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -265,7 +278,34 @@ impl Job {
             ytdlp_output_spec: self.ytdlp_output_spec.clone(),
             media_uploader: self.media_uploader.clone(),
             media_upload_date: self.media_upload_date.clone(),
+            extraction_tier: self.extraction_tier,
+            last_error: self.last_error.clone(),
+            referer: self.referer.clone(),
         }
+    }
+
+    pub fn extraction_tier(&self) -> Option<ExtractionTier> {
+        self.extraction_tier
+    }
+
+    pub fn set_extraction_tier(&mut self, tier: ExtractionTier) {
+        self.extraction_tier = Some(tier);
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    pub fn set_last_error(&mut self, error: Option<String>) {
+        self.last_error = error;
+    }
+
+    pub fn referer(&self) -> Option<&str> {
+        self.referer.as_deref()
+    }
+
+    pub fn set_referer(&mut self, referer: Option<String>) {
+        self.referer = referer;
     }
 
     /// Mark this job to download via the Extractor Toolchain (yt-dlp).

@@ -23,8 +23,119 @@
 use crate::cookie_channel::CookieChannel;
 use crate::media_extras::MediaExtrasOptions;
 use crate::proxy_settings::ProxySettings;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Which path produced a probe result.
+///
+/// Launch Sites always resolve as [`ExtractionTier::Dedicated`] or fail; other
+/// URLs fall through the chain `DirectFile` → yt-dlp (`Dedicated` /
+/// `GenericExtractor`) → `PageSniff`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionTier {
+    /// yt-dlp resolved a site-specific extractor.
+    Dedicated,
+    /// yt-dlp fell back to its `Generic` extractor (allowed for non-Launch Sites).
+    GenericExtractor,
+    /// Core's own HTML sniffer found media URLs on the page.
+    PageSniff,
+    /// The URL itself serves a non-HTML body; download it as a plain file.
+    DirectFile,
+}
+
+impl ExtractionTier {
+    pub fn is_dedicated(self) -> bool {
+        matches!(self, ExtractionTier::Dedicated)
+    }
+}
+
+/// How a probed item is fetched on confirm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaFetchKind {
+    /// Download through the Extractor Toolchain (yt-dlp) using a quality id.
+    #[default]
+    Extractor,
+    /// Download `MediaItem::url` as a plain HTTP(S) file.
+    DirectHttp,
+}
+
+/// Per-probe knobs for the Extractor Toolchain.
+#[derive(Debug, Clone)]
+pub struct ProbePolicy {
+    /// Accept results from yt-dlp's `Generic` extractor instead of hard-failing.
+    pub allow_generic: bool,
+    /// Kill the toolchain when a probe runs longer than this.
+    pub timeout: Duration,
+    /// Set by the shell to abort an in-flight probe.
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Default for ProbePolicy {
+    fn default() -> Self {
+        Self {
+            allow_generic: false,
+            timeout: Duration::from_secs(DEFAULT_PROBE_TIMEOUT_SECS),
+            cancel: None,
+        }
+    }
+}
+
+/// Default probe timeout in seconds.
+pub const DEFAULT_PROBE_TIMEOUT_SECS: u64 = 45;
+
+/// Settings-backed policy for the non-Launch-Site fallback chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProbeTierSettings {
+    /// Allow yt-dlp's generic extractor for sites it has no dedicated extractor for.
+    #[serde(default = "default_true")]
+    pub allow_generic: bool,
+    /// Run Core's HTML page sniffer when yt-dlp finds nothing.
+    #[serde(default = "default_true")]
+    pub allow_page_sniff: bool,
+    /// Treat a non-HTML response as a plain file download.
+    #[serde(default = "default_true")]
+    pub allow_direct_fallback: bool,
+    /// Probe timeout in seconds.
+    #[serde(default = "default_probe_timeout_secs")]
+    pub probe_timeout_secs: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_probe_timeout_secs() -> u64 {
+    DEFAULT_PROBE_TIMEOUT_SECS
+}
+
+impl Default for ProbeTierSettings {
+    fn default() -> Self {
+        Self {
+            allow_generic: true,
+            allow_page_sniff: true,
+            allow_direct_fallback: true,
+            probe_timeout_secs: DEFAULT_PROBE_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl ProbeTierSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.probe_timeout_secs < 5 || self.probe_timeout_secs > 600 {
+            return Err("probe timeout must be between 5 and 600 seconds".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Whether a yt-dlp extractor key is the generic fallback.
+pub fn is_generic_extractor_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("generic") || key.eq_ignore_ascii_case("genericalias")
+}
 
 /// A single quality/format available for a media item.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -58,6 +169,16 @@ pub struct MediaItem {
     pub uploader: Option<String>,
     /// Upload date (YYYYMMDD) when known from probe.
     pub upload_date: Option<String>,
+    /// How this item is fetched on confirm.
+    #[serde(default)]
+    pub fetch_kind: MediaFetchKind,
+    /// True when `qualities` are standard presets (flat playlist entry), not
+    /// the exact formats — shells may call enrich before confirm.
+    #[serde(default)]
+    pub qualities_are_presets: bool,
+    /// Page URL to send as `Referer` when fetching this item.
+    #[serde(default)]
+    pub referer: Option<String>,
 }
 
 /// Result of probing a URL via the Extractor Toolchain.
@@ -70,6 +191,19 @@ pub struct ProbeResult {
     /// Source name derived from the probe, used for batch/channel
     /// Job Destination subfolder naming.  `None` for single-video probes.
     pub source_name: Option<String>,
+    /// Which path produced this result.
+    #[serde(default = "default_tier")]
+    pub tier: ExtractionTier,
+    /// yt-dlp `extractor_key` when the toolchain produced the result.
+    #[serde(default)]
+    pub extractor_key: Option<String>,
+    /// Non-fatal notes for the shell (generic extraction, skipped tiers, ...).
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+fn default_tier() -> ExtractionTier {
+    ExtractionTier::Dedicated
 }
 
 /// Result of an Extractor Toolchain download attempt.
@@ -90,6 +224,20 @@ pub trait ExtractorToolchain: Send + Sync {
         cookies: &CookieChannel,
         proxy: &ProxySettings,
     ) -> Result<ProbeResult, String>;
+
+    /// Probe with an explicit [`ProbePolicy`] (generic allowed, timeout, cancel).
+    ///
+    /// Default delegates to [`Self::probe`], which keeps the Launch Site
+    /// hard-fail behaviour for toolchains that do not implement policies.
+    fn probe_with_policy(
+        &self,
+        url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        _policy: &ProbePolicy,
+    ) -> Result<ProbeResult, String> {
+        self.probe(url, cookies, proxy)
+    }
 
     /// Fetch exact available formats for one playlist entry (non-flat probe).
     fn probe_item_qualities(
@@ -143,6 +291,25 @@ pub trait ExtractorToolchain: Send + Sync {
     /// `yt-dlp-plugins/` under `root`. Fakes ignore this.
     fn apply_sidecar_root(&self, _root: &std::path::Path) {}
 
+    /// [`Self::download`] with an optional page `Referer` for CDN checks.
+    ///
+    /// Default ignores the referer. Production passes it to yt-dlp.
+    #[allow(clippy::too_many_arguments)]
+    fn download_with_referer(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+        stop: &AtomicBool,
+        media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        output_template: &str,
+        _referer: Option<&str>,
+    ) -> Result<ExtractorDownloadOutcome, String> {
+        self.download(url, format, dest_dir, stop, media_extras, cookies, proxy, output_template)
+    }
+
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
     fn download(
         &self,
@@ -183,6 +350,10 @@ pub struct FakeExtractorToolchain {
     ffmpeg_dir: Option<std::path::PathBuf>,
     /// Count of [`ExtractorToolchain::apply_sidecar_root`] calls (tests).
     sidecar_root_applies: std::sync::Arc<std::sync::Mutex<u32>>,
+    /// URLs whose probe reports yt-dlp's `Generic` extractor key.
+    generic_urls: HashSet<String>,
+    /// Record of `(url, allow_generic)` for every probe call (tests).
+    probe_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
 }
 
 #[derive(Clone)]
@@ -247,6 +418,19 @@ impl FakeExtractorToolchain {
         std::sync::Arc::clone(&self.sidecar_root_applies)
     }
 
+    /// Mark a configured URL as resolved by yt-dlp's `Generic` extractor.
+    ///
+    /// Probing it with `allow_generic = false` fails like production; with
+    /// `allow_generic = true` it returns the items tagged `GenericExtractor`.
+    pub fn mark_generic(&mut self, url: &str) {
+        self.generic_urls.insert(url.to_string());
+    }
+
+    /// `(url, allow_generic)` for every probe call so far.
+    pub fn probe_calls(&self) -> Vec<(String, bool)> {
+        self.probe_calls.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
     /// Insert a single-item probe response.
     ///
     /// When `url` is probed, returns one item with the given qualities.
@@ -273,6 +457,9 @@ impl FakeExtractorToolchain {
             archived: false,
             uploader: None,
             upload_date: None,
+            fetch_kind: MediaFetchKind::Extractor,
+            qualities_are_presets: false,
+            referer: None,
         };
         self.responses.insert(
             url.to_string(),
@@ -310,6 +497,9 @@ impl FakeExtractorToolchain {
             archived: false,
             uploader: None,
             upload_date: None,
+            fetch_kind: MediaFetchKind::Extractor,
+            qualities_are_presets: false,
+            referer: None,
         };
         self.responses.insert(
             url.to_string(),
@@ -347,6 +537,9 @@ impl FakeExtractorToolchain {
                 archived: false,
                 uploader: None,
                 upload_date: None,
+                fetch_kind: MediaFetchKind::Extractor,
+                qualities_are_presets: false,
+                referer: None,
             })
             .collect();
         self.responses.insert(
@@ -373,17 +566,44 @@ impl ExtractorToolchain for FakeExtractorToolchain {
     fn probe(
         &self,
         url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Result<ProbeResult, String> {
+        self.probe_with_policy(url, cookies, proxy, &ProbePolicy::default())
+    }
+
+    fn probe_with_policy(
+        &self,
+        url: &str,
         _cookies: &CookieChannel,
         _proxy: &ProxySettings,
+        policy: &ProbePolicy,
     ) -> Result<ProbeResult, String> {
+        if let Ok(mut calls) = self.probe_calls.lock() {
+            calls.push((url.to_string(), policy.allow_generic));
+        }
         let response = self
             .responses
             .get(url)
             .ok_or_else(|| format!("fake extractor: no response configured for {url}"))?;
+        let generic = self.generic_urls.contains(url);
+        if generic && !policy.allow_generic {
+            return Err(format!(
+                "unsupported Launch Site: yt-dlp resolved '{url}' via generic \
+                 extractor — no dedicated extractor available"
+            ));
+        }
         Ok(ProbeResult {
             url: url.to_string(),
             items: response.items.clone(),
             source_name: response.source_name.clone(),
+            tier: if generic {
+                ExtractionTier::GenericExtractor
+            } else {
+                ExtractionTier::Dedicated
+            },
+            extractor_key: Some(if generic { "Generic" } else { "Fake" }.to_string()),
+            warnings: Vec::new(),
         })
     }
 

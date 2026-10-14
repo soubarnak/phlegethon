@@ -7254,6 +7254,7 @@ fn extractor_download_does_not_hold_core_mutex() {
         "list_job_snapshots blocked for {waited:?} during an extractor download"
     );
     assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].status, "downloading", "active transfers report downloading");
     assert!(
         *chunks_written.lock().unwrap() < 40,
         "snapshot should have been taken mid-download"
@@ -7323,4 +7324,440 @@ fn segmented_pause_then_resume_produces_intact_file() {
     let final_path = job_dir.join("seg-pause.bin");
     let on_disk = std::fs::read(&final_path).expect("final file written");
     assert_eq!(on_disk, content, "resumed segmented download must be intact");
+}
+
+// ---------------------------------------------------------------------------
+// Tiered extraction for non-Launch-Site URLs (yt-dlp → generic → page sniff → file)
+// ---------------------------------------------------------------------------
+
+fn fake_http_map(entries: &[(&str, &[u8])]) -> FakeHttp {
+    let mut map = std::collections::HashMap::new();
+    for (url, body) in entries {
+        map.insert((*url).to_string(), body.to_vec());
+    }
+    FakeHttp {
+        responses: Arc::new(Mutex::new(map)),
+    }
+}
+
+fn sniffed(url: &str, kind: SniffedKind, label: Option<&str>) -> SniffedMedia {
+    SniffedMedia {
+        url: url.to_string(),
+        kind,
+        label_hint: label.map(str::to_string),
+        source: SniffSource::SourceTag,
+    }
+}
+
+#[test]
+fn launch_site_probe_still_hard_fails_on_generic_extractor() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=generic-yt",
+        "Looks Generic",
+        "https://cdn.example.com/g.mp4",
+        vec![("720p", "720p")],
+    );
+    toolchain.mark_generic("https://www.youtube.com/watch?v=generic-yt");
+    let probe_calls_handle = toolchain.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let err = core
+        .probe("https://www.youtube.com/watch?v=generic-yt")
+        .unwrap_err();
+    assert!(err.contains("generic"), "got: {err}");
+    let calls = probe_calls_handle.probe_calls();
+    assert!(calls.is_empty() || calls.iter().all(|(_, allow)| !allow), "Launch Sites never allow generic: {calls:?}");
+    let events = collect_events(&rx);
+    assert!(events.iter().any(|e| matches!(e, CoreEvent::ProbeFailed { .. })));
+}
+
+#[test]
+fn unknown_site_accepts_generic_extractor_with_warning() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://videos.example.org/watch/42",
+        "Some Clip",
+        "https://videos.example.org/watch/42",
+        vec![("720p", "720p"), ("360p", "360p")],
+    );
+    toolchain.mark_generic("https://videos.example.org/watch/42");
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_page_sniffer(Arc::new(FakePageSniffer::new()));
+
+    let result = core.probe("https://videos.example.org/watch/42").unwrap();
+    assert_eq!(result.tier, ExtractionTier::GenericExtractor);
+    assert_eq!(result.extractor_key.as_deref(), Some("Generic"));
+    assert!(!result.warnings.is_empty(), "generic results carry a warning");
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].fetch_kind, MediaFetchKind::Extractor);
+
+    // Confirm still creates an extractor-backed job.
+    let selection = ProbeSelection {
+        url: "https://videos.example.org/watch/42".into(),
+        items: vec![ItemSelection {
+            item_id: "item-1".into(),
+            quality_id: "720p".into(),
+        }],
+        media_extras: None,
+    };
+    let ids = core.confirm_probe_selection(&selection, None).unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == ids[0])
+        .unwrap();
+    assert!(snap.is_extractor);
+    assert_eq!(snap.extraction_tier, Some(ExtractionTier::GenericExtractor));
+}
+
+#[test]
+fn generic_disabled_in_settings_makes_unknown_site_fail_through_to_sniff() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://videos.example.org/watch/43",
+        "Clip",
+        "https://videos.example.org/watch/43",
+        vec![("720p", "720p")],
+    );
+    toolchain.mark_generic("https://videos.example.org/watch/43");
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let sniffer = Arc::new(FakePageSniffer::new());
+    core.set_page_sniffer(sniffer.clone());
+    core.set_probe_tier_settings(ProbeTierSettings {
+        allow_generic: false,
+        ..ProbeTierSettings::default()
+    })
+    .unwrap();
+
+    let err = core.probe("https://videos.example.org/watch/43").unwrap_err();
+    assert!(err.contains("yt-dlp"), "error names the failing tier: {err}");
+    assert!(
+        sniffer.calls().iter().any(|(_, kind)| *kind == "sniff"),
+        "page sniff ran after yt-dlp was rejected: {:?}",
+        sniffer.calls()
+    );
+}
+
+#[test]
+fn unknown_site_falls_back_to_page_sniff_and_downloads_plain_file() {
+    let page = "https://blog.example.net/posts/clip";
+    let body_720 = b"seven-twenty-bytes-of-video!!".to_vec();
+    let http = fake_http_map(&[
+        ("https://cdn.example.net/media/clip_720.mp4", &body_720),
+        ("https://cdn.example.net/media/clip_480.mp4", b"small"),
+    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    // No yt-dlp response configured → toolchain fails → sniffer takes over.
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let sniffer = Arc::new(FakePageSniffer::new());
+    sniffer.insert_page(
+        page,
+        SniffOutcome::Page {
+            title: Some("A clip".into()),
+            media: vec![
+                sniffed(
+                    "https://cdn.example.net/media/clip_480.mp4",
+                    SniffedKind::DirectFile { ext: "mp4".into() },
+                    Some("480p"),
+                ),
+                sniffed(
+                    "https://cdn.example.net/media/clip_720.mp4",
+                    SniffedKind::DirectFile { ext: "mp4".into() },
+                    None,
+                ),
+                sniffed(
+                    "https://cdn.example.net/hls/master.m3u8",
+                    SniffedKind::Hls,
+                    None,
+                ),
+            ],
+        },
+    );
+    core.set_page_sniffer(sniffer.clone());
+
+    let result = core.probe(page).unwrap();
+    assert_eq!(result.tier, ExtractionTier::PageSniff);
+    assert!(result.warnings[0].contains("yt-dlp"));
+    assert_eq!(result.items.len(), 2, "one progressive item + one HLS item");
+    let file_item = result
+        .items
+        .iter()
+        .find(|i| i.fetch_kind == MediaFetchKind::DirectHttp)
+        .expect("plain-file item");
+    assert_eq!(file_item.qualities[0].id, "720p");
+    assert_eq!(file_item.referer.as_deref(), Some(page));
+    let hls_item = result
+        .items
+        .iter()
+        .find(|i| i.fetch_kind == MediaFetchKind::Extractor)
+        .expect("hls item");
+    assert_eq!(hls_item.qualities[0].id, "best");
+    assert_eq!(
+        sniffer.calls(),
+        vec![(page.to_string(), "head"), (page.to_string(), "sniff")],
+        "HEAD first, full sniff only after yt-dlp failed"
+    );
+
+    // Confirm the plain-file item at 720p: a normal HTTP job, not yt-dlp.
+    let selection = ProbeSelection {
+        url: page.into(),
+        items: vec![ItemSelection {
+            item_id: file_item.id.clone(),
+            quality_id: file_item.qualities[0].id.clone(),
+        }],
+        media_extras: None,
+    };
+    let ids = core.confirm_probe_selection(&selection, None).unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == ids[0])
+        .unwrap();
+    assert!(!snap.is_extractor, "sniffed plain files use the HTTP backend");
+    assert_eq!(snap.url, "https://cdn.example.net/media/clip_720.mp4");
+    assert_eq!(snap.extraction_tier, Some(ExtractionTier::PageSniff));
+
+    process_until_job_done(&mut core, &rx, &ids[0]);
+    let done = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == ids[0])
+        .unwrap();
+    assert_eq!(done.status, "completed");
+    let path = PathBuf::from(done.path.expect("completed jobs expose their path"));
+    assert_eq!(path.file_name().unwrap(), "clip_720.mp4");
+    assert_eq!(std::fs::read(&path).unwrap(), body_720);
+}
+
+#[test]
+fn sniffed_variant_quality_selects_its_own_url() {
+    let page = "https://blog.example.net/posts/variants";
+    let http = fake_http_map(&[
+        ("https://cdn.example.net/v/x_1080.mp4", b"big"),
+        ("https://cdn.example.net/v/x_480.mp4", b"small-file"),
+    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(FakeExtractorToolchain::new()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let sniffer = Arc::new(FakePageSniffer::new());
+    sniffer.insert_page(
+        page,
+        SniffOutcome::Page {
+            title: None,
+            media: vec![
+                sniffed("https://cdn.example.net/v/x_1080.mp4", SniffedKind::DirectFile { ext: "mp4".into() }, None),
+                sniffed("https://cdn.example.net/v/x_480.mp4", SniffedKind::DirectFile { ext: "mp4".into() }, None),
+            ],
+        },
+    );
+    core.set_page_sniffer(sniffer);
+    let result = core.probe(page).unwrap();
+    let item = &result.items[0];
+    let q480 = item.qualities.iter().find(|q| q.id.starts_with("480p")).unwrap();
+    let ids = core
+        .confirm_probe_selection(
+            &ProbeSelection {
+                url: page.into(),
+                items: vec![ItemSelection {
+                    item_id: item.id.clone(),
+                    quality_id: q480.id.clone(),
+                }],
+                media_extras: None,
+            },
+            None,
+        )
+        .unwrap();
+    process_until_job_done(&mut core, &rx, &ids[0]);
+    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == ids[0]).unwrap();
+    assert_eq!(snap.url, "https://cdn.example.net/v/x_480.mp4");
+    assert_eq!(std::fs::read(snap.path.unwrap()).unwrap(), b"small-file");
+}
+
+#[test]
+fn head_binary_short_circuits_to_direct_file_without_spawning_ytdlp() {
+    let url = "https://mirror.example.org/dl?id=77";
+    let body = b"ISO-9660-ish-bytes".to_vec();
+    let http = fake_http_map(&[(url, &body)]);
+    let toolchain = FakeExtractorToolchain::new();
+    let calls = toolchain.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let sniffer = Arc::new(FakePageSniffer::new());
+    sniffer.insert_head(
+        url,
+        SniffOutcome::Binary {
+            content_type: "application/x-iso9660-image".into(),
+            content_length: Some(body.len() as u64),
+            final_url: url.into(),
+            filename: Some("void-live.iso".into()),
+        },
+    );
+    core.set_page_sniffer(sniffer);
+
+    // The URL has no file extension, so classification wants a probe...
+    match core.enqueue(url, None).unwrap() {
+        EnqueueOutcome::ProbeThenConfirm { .. } => {}
+        other => panic!("expected probe, got {other:?}"),
+    }
+    // ...and the probe resolves it as a plain file from the HEAD alone.
+    let result = core.probe(url).unwrap();
+    assert_eq!(result.tier, ExtractionTier::DirectFile);
+    assert!(calls.probe_calls().is_empty(), "yt-dlp must not run for binary bodies");
+    let item = &result.items[0];
+    assert_eq!(item.title, "void-live.iso");
+    assert_eq!(item.fetch_kind, MediaFetchKind::DirectHttp);
+    assert_eq!(item.qualities[0].id, "file");
+    assert_eq!(item.qualities[0].size_bytes, Some(body.len() as u64));
+
+    let ids = core
+        .confirm_probe_selection(
+            &ProbeSelection {
+                url: url.into(),
+                items: vec![ItemSelection {
+                    item_id: item.id.clone(),
+                    quality_id: "file".into(),
+                }],
+                media_extras: None,
+            },
+            None,
+        )
+        .unwrap();
+    process_until_job_done(&mut core, &rx, &ids[0]);
+    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == ids[0]).unwrap();
+    assert_eq!(snap.status, "completed");
+    let path = PathBuf::from(snap.path.unwrap());
+    assert_eq!(path.file_name().unwrap(), "void-live.iso");
+    assert_eq!(std::fs::read(&path).unwrap(), body);
+}
+
+#[test]
+fn probe_with_nothing_found_reports_both_tiers() {
+    let url = "https://nothing.example.org/page";
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(FakeExtractorToolchain::new()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let sniffer = Arc::new(FakePageSniffer::new());
+    sniffer.insert_page(url, SniffOutcome::Page { title: Some("x".into()), media: vec![] });
+    core.set_page_sniffer(sniffer);
+    let err = core.probe(url).unwrap_err();
+    assert!(err.contains("yt-dlp") && err.contains("page sniff"), "got: {err}");
+}
+
+#[test]
+fn cancel_probe_aborts_between_tiers() {
+    let url = "https://slow.example.org/page";
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(FakeExtractorToolchain::new()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_page_sniffer(Arc::new(FakePageSniffer::new()));
+    let plan = core.plan_probe(url).unwrap();
+    assert!(core.cancel_probe(url), "in-flight probe is cancellable");
+    let err = plan.run().unwrap_err();
+    assert!(err.contains("cancelled"), "got: {err}");
+    let err = core.finish_probe(plan.url(), Err(err)).unwrap_err();
+    assert!(err.contains("cancelled"));
+    assert!(!core.cancel_probe(url), "finished probes are forgotten");
+}
+
+#[test]
+fn probe_tier_settings_persist_across_library_root_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let custom = ProbeTierSettings {
+        allow_generic: false,
+        allow_page_sniff: true,
+        allow_direct_fallback: false,
+        probe_timeout_secs: 90,
+    };
+    {
+        let (mut core, _rx) = make_core(Box::new(fake_http()));
+        core.set_library_root(root.clone()).unwrap();
+        assert_eq!(core.probe_tier_settings(), ProbeTierSettings::default());
+        core.set_probe_tier_settings(custom).unwrap();
+        let err = core
+            .set_probe_tier_settings(ProbeTierSettings { probe_timeout_secs: 1, ..custom })
+            .unwrap_err();
+        assert!(err.contains("timeout"));
+    }
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(root).unwrap();
+    assert_eq!(core.probe_tier_settings(), custom);
+}
+
+#[test]
+fn enqueue_force_direct_skips_probe_classification() {
+    let tmp = tempfile::tempdir().unwrap();
+    let url = "https://www.youtube.com/watch?v=plain-file";
+    let body = b"not really a video".to_vec();
+    let http = fake_http_map(&[(url, &body)]);
+    let (mut core, rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let outcome = core
+        .enqueue_with_options(url, None, EnqueueOptions { force_direct: true })
+        .unwrap();
+    let EnqueueOutcome::EnqueueDirect { job_id, .. } = outcome else {
+        panic!("force_direct must enqueue a plain job");
+    };
+    process_until_job_done(&mut core, &rx, &job_id);
+    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == job_id).unwrap();
+    assert_eq!(snap.status, "completed");
+    assert_eq!(snap.extraction_tier, Some(ExtractionTier::DirectFile));
+    assert_eq!(snap.queue_index, 0);
+}
+
+#[test]
+fn failed_job_snapshot_carries_last_error_until_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(FailingHttp));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.process_pending().unwrap();
+    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == job_id).unwrap();
+    assert_eq!(snap.status, "failed");
+    assert!(snap.last_error.is_some(), "failed jobs expose the error text");
+    core.retry_job(&job_id).unwrap();
+    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == job_id).unwrap();
+    assert_eq!(snap.last_error, None);
+}
+
+#[test]
+fn clear_history_removes_archive_entries() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=hist-clear",
+        "History Clear",
+        "https://cdn.youtube.com/hist-clear.mp4",
+        vec![("720p", "720p")],
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.probe("https://www.youtube.com/watch?v=hist-clear").unwrap();
+    let ids = core
+        .confirm_probe_selection(
+            &ProbeSelection {
+                url: "https://www.youtube.com/watch?v=hist-clear".into(),
+                items: vec![ItemSelection {
+                    item_id: "item-1".into(),
+                    quality_id: "720p".into(),
+                }],
+                media_extras: None,
+            },
+            None,
+        )
+        .unwrap();
+    process_until_job_done(&mut core, &rx, &ids[0]);
+    assert_eq!(core.history_len(), 1);
+    assert_eq!(core.clear_history(Some(ArchiveOutcome::Failed)).unwrap(), 0);
+    assert_eq!(core.clear_history(None).unwrap(), 1);
+    assert_eq!(core.history_len(), 0);
 }

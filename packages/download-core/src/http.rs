@@ -14,6 +14,38 @@ pub struct FetchResult {
     pub bytes_written: u64,
 }
 
+/// Metadata from a HEAD request (or a `Range: bytes=0-0` GET fallback).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HeadInfo {
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    pub accept_ranges: bool,
+    /// URL after redirects.
+    pub final_url: String,
+    pub content_disposition: Option<String>,
+}
+
+/// Sink that accepts at most `max` bytes, then reports `Ok(0)` so streaming stops.
+struct CappedSink {
+    buf: Vec<u8>,
+    max: u64,
+}
+
+impl Write for CappedSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let room = self.max.saturating_sub(self.buf.len() as u64) as usize;
+        if room == 0 {
+            return Ok(0);
+        }
+        let n = data.len().min(room);
+        self.buf.extend_from_slice(&data[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// An HTTP backend that the Download Core uses to fetch remote content.
 ///
 /// In production this wraps a real HTTP client.  In tests a fake impl
@@ -49,7 +81,39 @@ pub trait HttpBackend: Send + Sync {
     ///
     /// Test fakes ignore this; production HTTP honors proxy changes.
     fn apply_proxy_settings(&self, _proxy: &ProxySettings) {}
+
+    /// HEAD metadata used by the page sniffer to tell files from pages.
+    ///
+    /// Default composes [`Self::supports_range`] and [`Self::file_size`] and
+    /// reports no content type (fakes then look like pages).
+    fn head_info(&self, url: &str) -> Result<HeadInfo, String> {
+        Ok(HeadInfo {
+            content_type: None,
+            content_length: self.file_size(url).ok().filter(|&n| n > 0),
+            accept_ranges: self.supports_range(url).unwrap_or(false),
+            final_url: url.to_string(),
+            content_disposition: None,
+        })
+    }
+
+    /// GET at most `max_bytes` of the body. Returns `(bytes, content_type, final_url)`.
+    fn fetch_capped(
+        &self,
+        url: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>, String), String> {
+        let mut sink = CappedSink {
+            buf: Vec::new(),
+            max: max_bytes,
+        };
+        self.fetch(url, None, &mut sink)?;
+        Ok((sink.buf, None, url.to_string()))
+    }
 }
+
+/// Browser-like User-Agent for page fetches (many sites 403 bare clients).
+const PAGE_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+    (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 // Production HTTP backend (ureq-based)
 // ---------------------------------------------------------------------------
 
@@ -186,5 +250,61 @@ impl HttpBackend for ProdHttpBackend {
         resp.header("Content-Length")
             .and_then(|v| v.parse().ok())
             .ok_or_else(|| format!("no Content-Length for {url}"))
+    }
+
+    fn head_info(&self, url: &str) -> Result<HeadInfo, String> {
+        let client = self.client();
+        let head = client
+            .head(url)
+            .set("User-Agent", PAGE_USER_AGENT)
+            .call();
+        let resp = match head {
+            Ok(resp) => resp,
+            // Some servers reject HEAD; ask for the first byte instead.
+            Err(ureq::Error::Status(405 | 403 | 501, _)) | Err(ureq::Error::Status(400, _)) => client
+                .get(url)
+                .set("User-Agent", PAGE_USER_AGENT)
+                .set("Range", "bytes=0-0")
+                .call()
+                .map_err(|e| format!("GET(range 0-0) {url}: {e}"))?,
+            Err(e) => return Err(format!("HEAD {url}: {e}")),
+        };
+        let content_length = resp
+            .header("Content-Range")
+            .and_then(|v| v.rsplit('/').next())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .or_else(|| resp.header("Content-Length").and_then(|v| v.parse().ok()));
+        Ok(HeadInfo {
+            content_type: resp.header("Content-Type").map(str::to_string),
+            content_length,
+            accept_ranges: resp
+                .header("Accept-Ranges")
+                .map(|v| v == "bytes")
+                .unwrap_or(false),
+            final_url: resp.get_url().to_string(),
+            content_disposition: resp.header("Content-Disposition").map(str::to_string),
+        })
+    }
+
+    fn fetch_capped(
+        &self,
+        url: &str,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, Option<String>, String), String> {
+        let resp = self
+            .client()
+            .get(url)
+            .set("User-Agent", PAGE_USER_AGENT)
+            .set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+            .call()
+            .map_err(|e| format!("GET {url}: {e}"))?;
+        let content_type = resp.header("Content-Type").map(str::to_string);
+        let final_url = resp.get_url().to_string();
+        let mut reader = resp.into_reader().take(max_bytes);
+        let mut buf = Vec::new();
+        reader
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("read body {url}: {e}"))?;
+        Ok((buf, content_type, final_url))
     }
 }

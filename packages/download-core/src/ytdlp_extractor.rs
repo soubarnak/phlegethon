@@ -20,7 +20,7 @@ use crate::cookie_channel::{ytdlp_cookie_args, CookieChannel};
 use crate::doh_ytdlp::{run_ytdlp_with_optional_doh_dns, ytdlp_command_with_optional_doh_dns};
 use crate::proxy_settings::{ytdlp_proxy_args, ProxySettings};
 use crate::extractor::{
-    ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
+    ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult, Quality, is_generic_extractor_key,
 };
 use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtrasOptions};
 use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
@@ -242,12 +242,12 @@ impl YtDlpExtractorToolchain {
         &self,
         url: &str,
         extractor_key: &str,
+        allow_generic: bool,
     ) -> Result<(), String> {
         // If the extractor_key is "Generic" or "GenericAlias", that means
-        // yt-dlp had no dedicated extractor — hard-fail.
-        if extractor_key.eq_ignore_ascii_case("generic")
-            || extractor_key.eq_ignore_ascii_case("genericalias")
-        {
+        // yt-dlp had no dedicated extractor — hard-fail unless the caller
+        // (Core's non-Launch-Site fallback chain) explicitly allows it.
+        if is_generic_extractor_key(extractor_key) && !allow_generic {
             return Err(format!(
                 "unsupported Launch Site: yt-dlp resolved '{url}' via generic \
                  extractor — no dedicated extractor available"
@@ -363,11 +363,20 @@ impl YtDlpExtractorToolchain {
     }
 
     pub(crate) fn parse_probe_result(&self, json: &str, url: &str) -> Result<ProbeResult, String> {
+        self.parse_probe_result_with_policy(json, url, false)
+    }
+
+    pub(crate) fn parse_probe_result_with_policy(
+        &self,
+        json: &str,
+        url: &str,
+        allow_generic: bool,
+    ) -> Result<ProbeResult, String> {
         let info: YtDlpVideoInfo = serde_json::from_str(json)
             .map_err(|e| format!("failed to parse yt-dlp JSON: {e}"))?;
 
         // Validate extractor key
-        self.validate_extractor(url, &info.extractor_key)?;
+        self.validate_extractor(url, &info.extractor_key, allow_generic)?;
 
         let is_playlist = info
             .type_
@@ -394,12 +403,18 @@ impl YtDlpExtractorToolchain {
             archived: false,
             uploader: info.uploader.clone(),
             upload_date: info.upload_date.clone(),
+            fetch_kind: MediaFetchKind::Extractor,
+            qualities_are_presets: false,
+            referer: None,
         };
 
         Ok(ProbeResult {
             url: url.to_string(),
             items: vec![item],
             source_name,
+            tier: tier_for_extractor_key(&info.extractor_key),
+            extractor_key: Some(info.extractor_key.clone()),
+            warnings: Vec::new(),
         })
     }
 
@@ -439,9 +454,9 @@ impl YtDlpExtractorToolchain {
             };
             let title = playlist_entry_title(entry, &id);
 
-            let qualities = match &entry.formats {
-                Some(formats) if !formats.is_empty() => self.formats_to_qualities(formats),
-                _ => launch_site_standard_qualities(),
+            let (qualities, presets) = match &entry.formats {
+                Some(formats) if !formats.is_empty() => (self.formats_to_qualities(formats), false),
+                _ => (launch_site_standard_qualities(), true),
             };
 
             items.push(MediaItem {
@@ -452,6 +467,9 @@ impl YtDlpExtractorToolchain {
                 archived: false,
                 uploader: None,
                 upload_date: None,
+                fetch_kind: MediaFetchKind::Extractor,
+                qualities_are_presets: presets,
+                referer: None,
             });
         }
 
@@ -465,6 +483,9 @@ impl YtDlpExtractorToolchain {
             url: url.to_string(),
             items,
             source_name,
+            tier: tier_for_extractor_key(&info.extractor_key),
+            extractor_key: Some(info.extractor_key.clone()),
+            warnings: Vec::new(),
         })
     }
 
@@ -624,6 +645,19 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         // Parse into ProbeResult — flat playlist entries already carry standard qualities.
         // Skip per-item enrich for multi-item channels so the probe sheet opens quickly.
         self.parse_probe_result(&json, url)
+    }
+
+    fn probe_with_policy(
+        &self,
+        url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        policy: &ProbePolicy,
+    ) -> Result<ProbeResult, String> {
+        url::Url::parse(url)
+            .map_err(|e| format!("invalid URL '{url}': {e}"))?;
+        let json = self.run_probe(url, cookies, proxy)?;
+        self.parse_probe_result_with_policy(&json, url, policy.allow_generic)
     }
 
     fn probe_item_qualities(
@@ -915,6 +949,15 @@ struct YtDlpEntry {
 }
 
 /// Stable MediaItem id prefix for a Launch Site extractor family.
+/// Tier reported for a yt-dlp result from its `extractor_key`.
+fn tier_for_extractor_key(extractor_key: &str) -> ExtractionTier {
+    if is_generic_extractor_key(extractor_key) {
+        ExtractionTier::GenericExtractor
+    } else {
+        ExtractionTier::Dedicated
+    }
+}
+
 fn item_id_prefix(extractor_key: &str) -> &'static str {
     if extractor_key.starts_with("XHamster") {
         "xh"
@@ -1678,7 +1721,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor("https://www.youtube.com/watch?v=abc", "Youtube")
+                .validate_extractor("https://www.youtube.com/watch?v=abc", "Youtube", false)
                 .is_ok()
         );
     }
@@ -1688,10 +1731,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor(
-                    "https://www.youtube.com/playlist?list=ABC",
-                    "YoutubePlaylist",
-                )
+                .validate_extractor("https://www.youtube.com/playlist?list=ABC", "YoutubePlaylist", false)
                 .is_ok()
         );
     }
@@ -1700,7 +1740,7 @@ mod tests {
     fn validate_generic_extractor_hard_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://example.com/video/12345", "Generic")
+            .validate_extractor("https://example.com/video/12345", "Generic", false)
             .unwrap_err();
         assert!(
             err.contains("generic extractor"),
@@ -1712,7 +1752,7 @@ mod tests {
     fn validate_generic_alias_extractor_hard_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://unknown.example.com/video", "GenericAlias")
+            .validate_extractor("https://unknown.example.com/video", "GenericAlias", false)
             .unwrap_err();
         assert!(
             err.contains("generic extractor"),
@@ -1725,7 +1765,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor("https://xhamster.com/videos/example-12345", "XHamster")
+                .validate_extractor("https://xhamster.com/videos/example-12345", "XHamster", false)
                 .is_ok()
         );
     }
@@ -1734,7 +1774,7 @@ mod tests {
     fn validate_unknown_extractor_for_known_site_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://www.youtube.com/watch?v=abc", "SomeUnknownExtractor")
+            .validate_extractor("https://www.youtube.com/watch?v=abc", "SomeUnknownExtractor", false)
             .unwrap_err();
         assert!(
             err.contains("extractor mismatch"),
@@ -1749,7 +1789,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor("https://example.com/video", "CustomExtractor")
+                .validate_extractor("https://example.com/video", "CustomExtractor", false)
                 .is_ok()
         );
     }
@@ -1758,7 +1798,7 @@ mod tests {
     fn validate_unknown_site_with_generic_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://example.com/video", "Generic")
+            .validate_extractor("https://example.com/video", "Generic", false)
             .unwrap_err();
         assert!(
             err.contains("generic extractor"),
@@ -1771,7 +1811,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor("https://youtu.be/abc123", "Youtube")
+                .validate_extractor("https://youtu.be/abc123", "Youtube", false)
                 .is_ok()
         );
     }
@@ -1974,10 +2014,7 @@ mod tests {
     fn validate_youtube_tab_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor(
-                "https://www.youtube.com/@ExampleChannel/videos",
-                "YoutubeTab",
-            )
+            .validate_extractor("https://www.youtube.com/@ExampleChannel/videos", "YoutubeTab", false)
             .is_ok());
     }
 
@@ -2087,10 +2124,7 @@ mod tests {
     fn validate_xhamster_user_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor(
-                "https://xhamster.com/creators/example-creator",
-                "XHamsterUser",
-            )
+            .validate_extractor("https://xhamster.com/creators/example-creator", "XHamsterUser", false)
             .is_ok());
     }
 
@@ -2182,7 +2216,7 @@ mod tests {
     fn xxxbp_wrong_extractor_hard_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://www.xxxbp.tv/v/12345", "SomeOther")
+            .validate_extractor("https://www.xxxbp.tv/v/12345", "SomeOther", false)
             .unwrap_err();
         assert!(
             err.contains("extractor mismatch"),
@@ -2684,10 +2718,7 @@ mod tests {
     fn validate_luxuretv_plugin_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor(
-                "https://en.luxuretv.com/videos/sample-16982.html",
-                "LuxureTV",
-            )
+            .validate_extractor("https://en.luxuretv.com/videos/sample-16982.html", "LuxureTV", false)
             .is_ok());
     }
 
@@ -2695,7 +2726,7 @@ mod tests {
     fn validate_xxxbp_plugin_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor("https://xxxbp.tv/v/12345", "XxxbpTV")
+            .validate_extractor("https://xxxbp.tv/v/12345", "XxxbpTV", false)
             .is_ok());
     }
 
