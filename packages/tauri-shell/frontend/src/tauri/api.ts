@@ -16,6 +16,8 @@ import type {
   MediaExtrasOptions,
   ProbeDestinationPreview,
   ProbeResult,
+  PickFolderResult,
+  PlatformCapabilities,
   ProbeSelection,
   ProbeTierSettings,
   ProxySettings,
@@ -70,7 +72,10 @@ export const api = {
     invoke<void>("set_job_expected_hash", { jobId, algorithm, digest }),
 
   // ---- Window / files
-  pickFolder: (title?: string) => invoke<string | null>("pick_folder", { title: title ?? null }),
+  pickFolder: (title?: string) => invoke<PickFolderResult>("pick_folder", { title: title ?? null }),
+  getPlatformCapabilities: () => invoke<PlatformCapabilities>("get_platform_capabilities"),
+  notifyFallback: (summary: string, body: string) =>
+    invoke<boolean>("notify_fallback", { summary, body }),
   isMainWindowFocused: () => invoke<boolean>("is_main_window_focused"),
   focusMainWindow: () => invoke<void>("focus_main_window"),
 

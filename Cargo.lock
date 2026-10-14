@@ -2752,6 +2752,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "phlegethon-shell-support"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "phlegethon-tauri"
 version = "0.1.0"
 dependencies = [
@@ -2760,6 +2769,7 @@ dependencies = [
  "dirs 5.0.1",
  "download-core",
  "log",
+ "phlegethon-shell-support",
  "serde",
  "serde_json",
  "tauri",
@@ -2769,6 +2779,7 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "tempfile",
 ]
 
 [[package]]

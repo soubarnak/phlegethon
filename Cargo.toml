@@ -3,6 +3,7 @@ members = [
     "packages/download-core",
     "packages/companion-protocol",
     "packages/native-messaging-host",
+    "packages/shell-support",
     "packages/tauri-shell/src-tauri",
 ]
 resolver = "2"

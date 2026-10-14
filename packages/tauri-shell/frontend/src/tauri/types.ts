@@ -234,3 +234,18 @@ export interface CompanionIntent {
   url: string;
   source?: string;
 }
+
+/** Which mechanism the Rust side used for a folder choice. `manual` = ask for a typed path. */
+export type PickerMethod = "portal" | "zenity" | "kdialog" | "manual";
+
+export interface PickFolderResult {
+  path: string | null;
+  method: PickerMethod;
+}
+
+export interface PlatformCapabilities {
+  folder_picker: PickerMethod;
+  portal: boolean;
+  wayland: boolean;
+  notify_send: boolean;
+}

@@ -31,15 +31,23 @@ export function FolderPicker({
   const [busy, setBusy] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualPath, setManualPath] = useState("");
+  const [noChooser, setNoChooser] = useState(false);
 
   const choose = async () => {
     setBusy(true);
     try {
-      const picked = await pickFolder(title);
-      if (picked) onPicked(picked);
+      const result = await pickFolder(title);
+      if (result.method === "manual") {
+        // Neither a portal nor zenity/kdialog: ask for a typed path.
+        setNoChooser(true);
+        setManualOpen(true);
+      } else if (result.path) {
+        onPicked(result.path);
+      }
     } catch (err) {
-      // No portal / picker available: fall back to typing a path.
+      // The chooser itself failed: fall back to typing a path.
       onError?.(err);
+      setNoChooser(false);
       setManualOpen(true);
     } finally {
       setBusy(false);
@@ -63,7 +71,10 @@ export function FolderPicker({
         kind="ghost"
         size={size}
         disabled={disabled}
-        onClick={() => setManualOpen(true)}
+        onClick={() => {
+          setNoChooser(false);
+          setManualOpen(true);
+        }}
         data-testid="folder-picker-manual"
       >
         {t("folder.manual.open")}
@@ -86,7 +97,7 @@ export function FolderPicker({
         <TextInput
           id="manual-folder-path"
           labelText={t("folder.manual.label")}
-          helperText={t("folder.manual.hint")}
+          helperText={noChooser ? t("folder.manual.noChooser") : t("folder.manual.hint")}
           placeholder="/home/you/Videos"
           value={manualPath}
           invalid={manualPath.length > 0 && !manualValid}

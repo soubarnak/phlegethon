@@ -41,7 +41,7 @@ function setup() {
     pin_sidecar_version: () => undefined,
     unpin_sidecar_version: () => undefined,
     rollback_sidecar: () => undefined,
-    pick_folder: () => "/home/u/Videos",
+    pick_folder: () => ({ path: "/home/u/Videos", method: "portal" }),
   });
   const onNotifications = (() => {
     const calls: boolean[] = [];

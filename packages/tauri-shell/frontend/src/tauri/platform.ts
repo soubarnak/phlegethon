@@ -4,14 +4,19 @@
  */
 import { api } from "./api";
 import type { NotificationPort } from "@/lib/notifications";
+import type { PickFolderResult } from "./types";
 
 /** True when running inside the Tauri webview (false in vitest / plain browser). */
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-/** Folder picker: portal/zenity/kdialog via the Rust command; null when cancelled. */
-export async function pickFolder(title?: string): Promise<string | null> {
+/**
+ * Folder picker: xdg-desktop-portal, else zenity/kdialog, via the Rust command.
+ * `path` is null when cancelled; `method: "manual"` means no chooser exists and
+ * the caller should ask for a typed path.
+ */
+export async function pickFolder(title?: string): Promise<PickFolderResult> {
   return api.pickFolder(title);
 }
 
@@ -42,7 +47,15 @@ export async function notificationPort(): Promise<NotificationPort | null> {
   return {
     isPermissionGranted: () => mod.isPermissionGranted(),
     requestPermission: () => mod.requestPermission(),
-    sendNotification: (options) => mod.sendNotification(options),
+    sendNotification: async (options) => {
+      try {
+        await mod.sendNotification(options);
+      } catch {
+        // No notification daemon for the plugin: try notify-send instead.
+        const sent = await api.notifyFallback(options.title, options.body).catch(() => false);
+        if (!sent) throw new Error("no notification mechanism available");
+      }
+    },
   };
 }
 

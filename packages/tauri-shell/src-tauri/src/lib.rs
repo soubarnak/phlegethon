@@ -524,28 +524,134 @@ fn set_library_root(state: State<AppState>, path: String) -> Result<String, Stri
     Ok(root.display().to_string())
 }
 
+/// Which mechanism produced (or would produce) a folder choice.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum PickerMethod {
+    Portal,
+    Zenity,
+    Kdialog,
+    /// No native chooser is available: the UI asks for a typed path.
+    Manual,
+}
+
+#[derive(Serialize)]
+struct PickFolderResult {
+    /// `None` when the dialog was cancelled, or when `method` is `manual`.
+    path: Option<String>,
+    method: PickerMethod,
+}
+
+fn path_dirs() -> Vec<PathBuf> {
+    phlegethon_shell_support::path_dirs_from_env(std::env::var_os("PATH").as_deref())
+}
+
+/// Portal first (it is the only picker that honours sandboxing), then zenity,
+/// then kdialog, else ask for a typed path.
+fn detect_picker_method(dirs: &[PathBuf], portal: bool) -> PickerMethod {
+    use phlegethon_shell_support::picker::{self, PickerBackend};
+    if portal {
+        return PickerMethod::Portal;
+    }
+    match picker::detect(dirs) {
+        Some((PickerBackend::Zenity, _)) => PickerMethod::Zenity,
+        Some((PickerBackend::Kdialog, _)) => PickerMethod::Kdialog,
+        None => PickerMethod::Manual,
+    }
+}
+
 #[tauri::command]
 async fn pick_folder(
     app: tauri::AppHandle,
     title: Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<PickFolderResult, String> {
+    use phlegethon_shell_support::{picker, portal};
     let label = title.unwrap_or_else(|| "Choose folder".to_string());
-    // Non-blocking picker + channel: avoids blocking_pick_* wedging the
-    // WebKitGTK event loop when rfd used gtk3.
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    app.dialog()
-        .file()
-        .set_title(label)
-        .pick_folder(move |folder| {
-            let _ = tx.send(folder);
-        });
-    let folder = tauri::async_runtime::spawn_blocking(move || rx.recv())
+    let dirs = path_dirs();
+    let portal_up = tauri::async_runtime::spawn_blocking(portal::portal_available)
         .await
-        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    Ok(folder
-        .and_then(|path| path.into_path().ok())
-        .map(|p| p.display().to_string()))
+
+    match detect_picker_method(&dirs, portal_up) {
+        PickerMethod::Portal => {
+            // Non-blocking picker + channel: avoids blocking_pick_* wedging the
+            // WebKitGTK event loop when rfd used gtk3.
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            app.dialog()
+                .file()
+                .set_title(label)
+                .pick_folder(move |folder| {
+                    let _ = tx.send(folder);
+                });
+            let folder = tauri::async_runtime::spawn_blocking(move || rx.recv())
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            Ok(PickFolderResult {
+                path: folder
+                    .and_then(|path| path.into_path().ok())
+                    .map(|p| p.display().to_string()),
+                method: PickerMethod::Portal,
+            })
+        }
+        method @ (PickerMethod::Zenity | PickerMethod::Kdialog) => {
+            let (backend, program) = picker::detect(&dirs)
+                .ok_or_else(|| "folder picker disappeared".to_string())?;
+            let start = dirs_home();
+            let outcome = tauri::async_runtime::spawn_blocking(move || {
+                picker::run(backend, &program, &label, start.as_deref())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            Ok(PickFolderResult {
+                path: match outcome {
+                    picker::PickOutcome::Picked(p) => Some(p.display().to_string()),
+                    picker::PickOutcome::Cancelled => None,
+                },
+                method,
+            })
+        }
+        PickerMethod::Manual => Ok(PickFolderResult {
+            path: None,
+            method: PickerMethod::Manual,
+        }),
+    }
+}
+
+#[derive(Serialize)]
+struct PlatformCapabilities {
+    folder_picker: PickerMethod,
+    portal: bool,
+    wayland: bool,
+    notify_send: bool,
+}
+
+#[tauri::command]
+async fn get_platform_capabilities() -> Result<PlatformCapabilities, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let dirs = path_dirs();
+        let portal = phlegethon_shell_support::portal::portal_available();
+        PlatformCapabilities {
+            folder_picker: detect_picker_method(&dirs, portal),
+            portal,
+            wayland: phlegethon_shell_support::platform::is_wayland(
+                &phlegethon_shell_support::platform::current_env(),
+            ),
+            notify_send: phlegethon_shell_support::notify::detect(&dirs).is_some(),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// `notify-send` fallback for desktops where the notification plugin finds no daemon.
+/// Returns false when `notify-send` is not installed.
+#[tauri::command]
+fn notify_fallback(summary: String, body: String) -> Result<bool, String> {
+    match phlegethon_shell_support::notify::detect(&path_dirs()) {
+        Some(program) => phlegethon_shell_support::notify::send(&program, &summary, &body).map(|_| true),
+        None => Ok(false),
+    }
 }
 
 #[tauri::command]
@@ -955,6 +1061,10 @@ fn clear_history(state: State<AppState>, outcome: Option<String>) -> Result<usiz
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn dirs_home() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
 fn dirs_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -1077,6 +1187,8 @@ pub fn run() {
             get_library_root,
             set_library_root,
             pick_folder,
+            get_platform_capabilities,
+            notify_fallback,
             process_pending,
             list_jobs,
             normalize_url_cmd,
@@ -1154,5 +1266,29 @@ mod tests {
         };
         let json = serde_json::to_value(&evt).unwrap();
         assert_eq!(json["type"], "JobProgress");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod picker_method_tests {
+    use super::{detect_picker_method, PickerMethod};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn tool(dir: &std::path::Path, name: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn portal_wins_then_zenity_then_kdialog_then_manual() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(detect_picker_method(&dirs, false), PickerMethod::Manual);
+        tool(dir.path(), "kdialog");
+        assert_eq!(detect_picker_method(&dirs, false), PickerMethod::Kdialog);
+        tool(dir.path(), "zenity");
+        assert_eq!(detect_picker_method(&dirs, false), PickerMethod::Zenity);
+        assert_eq!(detect_picker_method(&dirs, true), PickerMethod::Portal);
     }
 }

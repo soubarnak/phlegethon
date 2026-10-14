@@ -13,7 +13,7 @@ function setup(over: Partial<React.ComponentProps<typeof UrlBar>> = {}) {
     onClipboardWatchChange: vi.fn(),
     ...over,
   };
-  installFakeIpc({ pick_folder: () => "/home/u/Videos", split_urls_cmd: (a) => String(a.text).split(/\s+/).filter(Boolean) });
+  installFakeIpc({ pick_folder: () => ({ path: "/home/u/Videos", method: "portal" }), split_urls_cmd: (a) => String(a.text).split(/\s+/).filter(Boolean) });
   render(<UrlBar {...props} />);
   return props;
 }
