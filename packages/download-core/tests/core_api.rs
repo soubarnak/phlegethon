@@ -5990,14 +5990,22 @@ fn media_extras_defaults_persist_and_round_trip_on_confirm() {
     let stored = core.job_media_extras(&job_ids[0]).unwrap();
     assert!(!stored.write_subs, "override should disable write_subs");
     assert!(stored.write_thumbnail);
-    assert!(
-        !stored.embed_thumbnail,
-        "embed stripped when ffmpeg unavailable"
-    );
+    if download_core::ffmpeg_available(None) {
+        assert!(stored.embed_thumbnail, "embed kept when ffmpeg is on PATH");
+    } else {
+        assert!(
+            !stored.embed_thumbnail,
+            "embed stripped when ffmpeg unavailable"
+        );
+    }
 }
 
 #[test]
 fn media_extras_capabilities_report_ffmpeg_unavailable_by_default() {
+    if download_core::ffmpeg_available(None) {
+        eprintln!("skipping: ffmpeg is on PATH in this environment");
+        return;
+    }
     let (core, _) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
     let caps = core.media_extras_capabilities();
     assert!(!caps.ffmpeg_available);

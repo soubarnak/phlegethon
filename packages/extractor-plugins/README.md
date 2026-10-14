@@ -29,7 +29,7 @@ Download Core installs this package under the Extractor Toolchain sidecar:
 
 yt-dlp is invoked with `--plugin-dirs <sidecar_root>/yt-dlp-plugins`.
 
-Plugins are updateable independently of a full Win/Debian app release via
+Plugins are updateable independently of a full app release via
 `download_core::plugin_sidecar::install_plugin_package` (replace package + bump
 manifest version).
 

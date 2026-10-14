@@ -3,16 +3,6 @@ name = "download-core"
 version.workspace = true
 edition.workspace = true
 
-[lib]
-crate-type = ["lib", "cdylib"]
-
-[features]
-default = []
-generate-bindings = []
-
-[build-dependencies]
-# csbindgen is only used when feature=generate-bindings
-
 [dependencies]
 crossbeam-channel = "0.5"
 serde = { version = "1", features = ["derive"] }

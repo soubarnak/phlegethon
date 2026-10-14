@@ -4,7 +4,6 @@
 //! Platform shells consume this library via its public command/event API.
 
 mod bandwidth;
-mod cabi;
 mod classification;
 mod cookie_channel;
 mod disk_space;

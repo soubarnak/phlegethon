@@ -19,50 +19,18 @@ Platform Shell + Download Core
 | Extension | `packages/chrome-companion/` |
 | Native messaging host | `packages/native-messaging-host/` (`phlegethon-nmh`) |
 | Protocol types | `packages/companion-protocol/` |
-| Debian receiver | `packages/tauri-shell/src-tauri/src/companion.rs` |
-| Win11 receiver | `packages/winui-shell/Phlegethon/Services/CompanionReceiverService.cs` |
+| Tauri receiver | `packages/tauri-shell/src-tauri/src/companion.rs` |
 
 ## Build
 
-### Prerequisites (Windows / MSVC)
-
-`download-core` (and crates that pull in `ring`) need the **MSVC C++ toolchain** with Windows SDK headers/libs. A plain PowerShell without VC env fails with `vcruntime.h` / `LNK1104: msvcrt.lib` because `INCLUDE` and `LIB` are unset.
-
-Install **Visual Studio 2022 Build Tools** (or Community) with component `Microsoft.VisualStudio.Component.VC.Tools.x86.x64`.
-
-Then either:
-
-1. Open **x64 Native Tools Command Prompt for VS 2022**, `cd` to the repo, and run `cargo`, or
-2. Load DevShell in PowerShell, then build:
-
-```powershell
-$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-  -latest -products * `
-  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-  -property installationPath
-Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64' | Out-Null
-cargo build -p download-core
-```
-
-Or use the helper script (auto-loads DevShell):
-
-```powershell
-./scripts/build-core.ps1
-# optional: ./scripts/build-core.ps1 --release
-```
-
-### Packages
+### Build (Linux)
 
 ```bash
-# Native messaging host
 cargo build -p phlegethon-nmh --release
-
-# Debian shell (includes companion receiver)
+# Tauri shell (includes companion receiver)
 cargo build -p phlegethon-tauri
 ```
 
-WinUI shell: build `packages/winui-shell/Phlegethon/Phlegethon.csproj` as usual (`-p:Platform=x64`).
 
 ## Install native messaging host
 
@@ -72,21 +40,10 @@ Template manifest: `packages/native-messaging-host/manifests/com.phlegethon.brid
 
 Replace:
 
-- `path` — absolute path to `phlegethon-nmh` (`.exe` on Windows)
+- `path` — absolute path to `phlegethon-nmh`
 - `allowed_origins` — your unpacked or store extension ID (`chrome-extension://<id>/`)
 
-### Windows (Chrome + Chromium)
-
-Per-user registry (repeat for each browser):
-
-| Browser | Registry key |
-| --- | --- |
-| Chrome | `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.phlegethon.bridge` |
-| Chromium | `HKCU\Software\Chromium\NativeMessagingHosts\com.phlegethon.bridge` |
-
-Default value = full path to the host manifest JSON file.
-
-### Debian / Linux (Chrome + Chromium)
+### Linux (Chrome, Chromium, Brave)
 
 | Scope | Chrome | Chromium |
 | --- | --- | --- |
@@ -119,8 +76,7 @@ Launch Sites still use **Probe-then-Confirm** — the companion never auto-confi
 
 | Platform | Receiver | Socket / pipe |
 | --- | --- | --- |
-| Debian (Tauri) | Background thread in `companion.rs` | `phlegethon-companion` (interprocess local socket) |
-| Win11 (WinUI) | `CompanionReceiverService` | Named pipe `\\.\pipe\phlegethon-companion` |
+| Tauri shell | Background thread in `companion.rs` | `phlegethon-companion` (interprocess local socket) |
 
 Both call the same Download Core enqueue path as paste/drop. Optional cookies are applied via `set_cookie_channel` before enqueue.
 
@@ -129,7 +85,7 @@ Both call the same Download Core enqueue path as paste/drop. Optional cookies ar
 | Symptom | Check |
 | --- | --- |
 | Native messaging connection failed | NMH manifest path, `allowed_origins` extension ID, host binary exists |
-| Phlegethon desktop app is not running | Start Tauri or WinUI shell first |
+| Phlegethon desktop app is not running | Start the Phlegethon app first |
 | Probe sheet does not appear | Shell event loop running; check shell logs |
 | Cookies ignored | Use explicit “with cookies” menu item; verify cookie file under app data `companion-cookies/` |
 

@@ -47,18 +47,54 @@ pub struct SystemFreeSpace;
 
 impl FreeSpaceLookup for SystemFreeSpace {
     fn free_bytes(&self, path: &Path) -> Result<u64, String> {
-        fs2::available_space(path).map_err(|e| {
+        // The Job Destination usually does not exist yet when the guard runs;
+        // `statvfs` needs an existing path, so query the nearest existing ancestor.
+        let probe = nearest_existing_ancestor(path);
+        fs2::available_space(probe).map_err(|e| {
             format!(
                 "query free disk space at {}: {e}",
-                path.display()
+                probe.display()
             )
         })
+    }
+}
+
+/// Walk up from `path` to the first component that exists on disk.
+///
+/// Falls back to `path` itself when nothing exists (the caller then reports
+/// the OS error for that path).
+pub fn nearest_existing_ancestor(path: &Path) -> &Path {
+    let mut current = path;
+    loop {
+        if current.exists() {
+            return current;
+        }
+        match current.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => current = parent,
+            _ => return path,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearest_existing_ancestor_walks_up_to_existing_dir() {
+        let tmp = std::env::temp_dir();
+        let missing = tmp.join("phlegethon-missing-a").join("missing-b");
+        assert_eq!(nearest_existing_ancestor(&missing), tmp.as_path());
+        assert_eq!(nearest_existing_ancestor(&tmp), tmp.as_path());
+    }
+
+    #[test]
+    fn system_free_space_works_for_not_yet_created_destination() {
+        let tmp = std::env::temp_dir();
+        let missing = tmp.join("phlegethon-missing-job-dir").join("job-123");
+        let free = SystemFreeSpace.free_bytes(&missing).unwrap();
+        assert!(free > 0);
+    }
 
     #[test]
     fn margin_uses_sixty_four_mb_floor_for_small_downloads() {

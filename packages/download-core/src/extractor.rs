@@ -42,7 +42,7 @@ pub struct Quality {
 }
 
 /// A single media item discovered during probing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MediaItem {
     /// Unique identifier within the probe result.
     pub id: String,
@@ -61,7 +61,7 @@ pub struct MediaItem {
 }
 
 /// Result of probing a URL via the Extractor Toolchain.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProbeResult {
     /// The URL that was probed.
     pub url: String,

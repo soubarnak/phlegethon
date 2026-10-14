@@ -7,9 +7,9 @@
 
 | Area | Files |
 | --- | --- |
-| Core (Rust) | `download-core/src/{lib,job,extractor,ytdlp_extractor,cabi}.rs` |
+| Core (Rust) | `download-core/src/{lib,job,extractor,ytdlp_extractor}.rs` |
 | Tauri shell | `tauri-shell/src-tauri/src/lib.rs`, `tauri-shell/frontend/{app.js,index.html,styles.css}` |
-| WinUI shell | `winui-shell/Phlegethon/**` |
+| WinUI shell | removed — see `docs/adr/0001-drop-windows-shell.md` |
 | Tests | `download-core/tests/{core_api,ytdlp_extractor_integration}.rs` |
 
 Themes of the change: absolute **Save to… / Job Destination overrides**, **Library Root** settings + persistence, an **interruptible Extractor** (Pause/Discard hard-kills yt-dlp), **silent-progress** reporting from on-disk growth, and **filesize-based totals** for determinate progress.

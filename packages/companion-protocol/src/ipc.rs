@@ -8,7 +8,7 @@ use interprocess::local_socket::{
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-/// Local socket / named-pipe identifier shared by NMH, Tauri, and WinUI receivers.
+/// Local socket identifier shared by the NMH and the Tauri shell receiver.
 pub const COMPANION_SOCKET_NAME: &str = "phlegethon-companion";
 
 fn socket_name() -> Result<Name<'static>, String> {
