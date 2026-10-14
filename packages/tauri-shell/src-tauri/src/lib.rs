@@ -43,6 +43,15 @@ impl AppState {
     fn new() -> Self {
         let http = Box::new(ProdHttpBackend::new());
         let sidecar_root = dirs_data_dir();
+        // The luxuretv / xxxbp.tv plugins are embedded in the Core. Install them before
+        // yt-dlp is configured, otherwise those Launch Sites would never resolve.
+        match download_core::ensure_bundled_plugins(&sidecar_root) {
+            Ok(download_core::BundledInstall::Installed { version }) => {
+                log::info!("installed bundled extractor plugins {version}")
+            }
+            Ok(_) => {}
+            Err(err) => log::warn!("could not install bundled extractor plugins: {err}"),
+        }
         // Sidecar manifest → YTDLP_PATH → PATH → python3 -m yt_dlp, plus JS runtime.
         let config = download_core::YtDlpConfig::discover(Some(&sidecar_root));
         let extractor = Box::new(download_core::YtDlpExtractorToolchain::new(config));

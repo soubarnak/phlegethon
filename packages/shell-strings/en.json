@@ -271,5 +271,7 @@
   "toolchain.rolledBack": "Rolled back to the previous version",
   "toolchain.rollbackFailed": "Could not roll back",
   "url.clearDestination": "Clear Save to folder",
-  "folder.manual.noChooser": "No folder chooser was found. Install xdg-desktop-portal, zenity or kdialog to get one, or type the folder path here."
+  "folder.manual.noChooser": "No folder chooser was found. Install xdg-desktop-portal, zenity or kdialog to get one, or type the folder path here.",
+  "toolchain.impersonation": "Browser impersonation",
+  "toolchain.impersonationMissing": "Needs curl_cffi. Some sites (for example luxuretv) are only reachable with it or with browser cookies."
 }

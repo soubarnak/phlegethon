@@ -14,7 +14,13 @@ path = "src/main.rs"
 
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
+
+[features]
+# Embed the built frontend instead of loading the dev server. `cargo tauri build`
+# turns this on; plain `cargo build --release` (xbps-src, Makefile) must pass
+# `--features custom-protocol` or the window loads http://localhost:1420.
+custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

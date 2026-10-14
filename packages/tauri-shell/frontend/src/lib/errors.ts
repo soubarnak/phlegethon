@@ -40,7 +40,7 @@ export function errorToString(raw: unknown): string {
 export function errorHint(code: ErrorCode | null): string | null {
   switch (code) {
     case "needs_browser_cookies":
-      return "The site blocked the request (login wall, bot check or Cloudflare challenge). Open the page in your browser once, then set Cookies → from browser in Settings and retry.";
+      return "The site blocked the request (login wall, bot check or Cloudflare challenge). Open the page in your browser once, then set Cookies → from browser in Settings and retry. A yt-dlp with browser impersonation (curl_cffi, see the Toolchain panel) gets past many Cloudflare checks without cookies.";
     case "needs_js_runtime":
       return "yt-dlp needs a JavaScript runtime for this site. Install deno (≥ 2.3) or node (≥ 22) and check the Toolchain panel.";
     case "timeout":

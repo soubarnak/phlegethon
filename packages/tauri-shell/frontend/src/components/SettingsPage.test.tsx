@@ -149,4 +149,28 @@ describe("SettingsPage: no dead buttons", () => {
     expect(await screen.findByText(/yt-dlp was not found/)).toBeInTheDocument();
     expect(screen.getAllByText("Missing").length).toBeGreaterThan(0);
   });
+
+  it.each([
+    [true, false],
+    [false, true],
+  ])("shows browser impersonation (available=%s) in the Toolchain panel", async (available, hintShown) => {
+    installFakeIpc({
+      get_library_root: () => "/x", get_active_job_limit: () => 3, get_audio_only_mode: () => false,
+      get_default_quality_policy: () => ({ max_height: 1080, prefer_mp4: true }), get_filename_template: () => "t",
+      get_default_media_extras: () => ({}), get_media_extras_capabilities: () => ({ ffmpeg_available: true, embed_disabled_reason: null }),
+      get_cookie_channel: () => ({ cookies_from_browser: null, cookie_file: null }), get_proxy_settings: () => ({ url: null }),
+      get_global_bandwidth_cap: () => null,
+      get_probe_tier_settings: () => ({ allow_generic: true, allow_page_sniff: true, allow_direct_fallback: true, probe_timeout_secs: 45 }),
+      get_sidecar_update_settings: () => ({ check_on_launch: false, toolchain_pin: null, plugin_pin: null }),
+      preview_filename_template: () => "x",
+      get_toolchain_status: () => toolchainStatus({ impersonation_available: available }),
+    });
+    render(
+      <ToastProvider>
+        <SettingsPage notificationsEnabled onNotificationsChange={() => undefined} onToolchainStatus={() => undefined} />
+      </ToastProvider>,
+    );
+    expect(await screen.findByText("Browser impersonation")).toBeInTheDocument();
+    expect(screen.queryByText(/Needs curl_cffi/) !== null).toBe(hintShown);
+  });
 });

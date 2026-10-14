@@ -211,6 +211,17 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
                 </StructuredListCell>
               </StructuredListRow>
               <StructuredListRow>
+                <StructuredListCell noWrap>{t("toolchain.impersonation")}</StructuredListCell>
+                <StructuredListCell>
+                  <Tag size="sm" type={status.impersonation_available ? "green" : "warm-gray"}>
+                    {status.impersonation_available ? t("toolchain.found") : t("toolchain.missing")}
+                  </Tag>
+                  {!status.impersonation_available && (
+                    <span className="ph-muted"> {t("toolchain.impersonationMissing")}</span>
+                  )}
+                </StructuredListCell>
+              </StructuredListRow>
+              <StructuredListRow>
                 <StructuredListCell noWrap>{t("toolchain.platform")}</StructuredListCell>
                 <StructuredListCell>
                   <span>
