@@ -45,14 +45,19 @@ Run on 2026-10-14 from a Linux container with yt-dlp 2026.08.19, curl_cffi, node
 | generic-page | PASS | generic_extractor | Generic | 1 | 1 |
 | direct-file | PASS | direct_file | | 1 | 1 |
 
-Downloads were also run end to end through yt-dlp with the plugins:
+## End-to-end downloads through the Core
 
-| Video | Result |
-| --- | --- |
-| xxxbp.tv reference, 144p | 22 MB mp4, 25:04, valid |
-| luxuretv reference | 11.8 MiB mp4, 1:36, valid |
+`cargo run -p download-core --example download -- <url> --out DIR --max-height 240` runs the app's own flow: probe, pick a quality, confirm, transfer, then checks the file. Same machine and date as above. Every file was verified with ffprobe.
 
-Not downloaded: xHamster and YouTube were probed only.
+| URL | Result | File |
+| --- | --- | --- |
+| Direct file (MDN flower.mp4) | Completed | 1.1 MB, 5 s, plain HTTP |
+| xxxbp.tv reference, 240p | Completed | 47.5 MB, 25:04, h264 + aac |
+| luxuretv reference | Completed | 12.4 MB, 1:36, h264 + aac |
+| xHamster reference, 240p (HLS, needs ffmpeg) | Completed | 507 s, h264 + aac |
+| YouTube "Me at the zoo" | Probe passes, download fails with 403 | See below |
+
+**YouTube from a datacenter address.** The probe lists formats, but the download is refused with HTTP 403, and plain `yt-dlp` fails the same way from this container. YouTube treats datacenter traffic as automated. The Core reports it as `needs_browser_cookies`, so the UI points at Settings, Cookies. On a home connection this is not expected; if it happens, supply browser cookies and keep yt-dlp current.
 
 ## What luxuretv needs
 
