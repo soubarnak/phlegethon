@@ -51,13 +51,22 @@ def _abs(page_url: str, media_url: str) -> str:
     return urljoin(page_url, media_url)
 
 
-_PREVIEW_MARKERS = ('_preview.', '/preview/', '/previews/', '/thumb', '_thumb.', '-preview.')
+_PREVIEW_MARKERS = (
+    '_preview.', '/preview/', '/previews/', '/preview_', '/thumb', '_thumb.', '-preview.')
 
 
 def looks_like_preview(url: str) -> bool:
     """Hover previews and thumbnails are never the main video."""
     lower = url.lower()
     return any(marker in lower for marker in _PREVIEW_MARKERS)
+
+
+_IMAGE_URL_RE = re.compile(r'\.(?:jpe?g|png|gif|webp|avif|svg|ico|bmp)(?:[?#]|$)', re.IGNORECASE)
+
+
+def looks_like_image(url: str) -> bool:
+    """Thumbnail URLs such as ``abc.mp4/abc.mp4-7.jpg`` contain ``.mp4`` but are images."""
+    return bool(_IMAGE_URL_RE.search(url))
 
 
 def _height_from_label(label: str | None, url: str) -> int | None:
@@ -108,7 +117,8 @@ def extract_formats(webpage: str, page_url: str) -> list[dict[str, Any]]:
 
     def add(url: str, **kwargs: Any) -> None:
         abs_url = _abs(page_url, url.strip())
-        if not abs_url.startswith('http') or abs_url in seen or looks_like_preview(abs_url):
+        if (not abs_url.startswith('http') or abs_url in seen
+                or looks_like_preview(abs_url) or looks_like_image(abs_url)):
             return
         seen.add(abs_url)
         formats.append(_format_entry(abs_url, **kwargs))
@@ -233,10 +243,11 @@ def is_cloudflare_challenge(webpage: str | None) -> bool:
 
 
 CLOUDFLARE_HELP = (
-    'is protected by a Cloudflare challenge. Open the site in your browser once, '
-    'then pass those cookies to yt-dlp (--cookies-from-browser <browser>, or Settings > '
-    'Cookies in Phlegethon) and retry; the cf_clearance cookie is tied to the browser '
-    'and network, so use the same machine.'
+    'is protected by a Cloudflare challenge. Use a yt-dlp build with browser impersonation '
+    '(curl_cffi; check with --list-impersonate-targets), or open the site in your browser once '
+    'and pass those cookies to yt-dlp (--cookies-from-browser <browser>, or Settings > Cookies in '
+    'Phlegethon) and retry. The cf_clearance cookie is tied to the browser and network, so use '
+    'the same machine.'
 )
 
 
@@ -358,3 +369,143 @@ def next_page_link(html: str, page_url: str) -> str | None:
         return None
     href = m.group('href') or m.group('href2')
     return urljoin(page_url, href) if href else None
+
+
+_LUXURE_PLAYER_RE = re.compile(
+    r'<video\b[^>]*\bid=["\']thisPlayer["\'][^>]*>(?P<body>.*?)</video>',
+    re.IGNORECASE | re.DOTALL,
+)
+_LUXURE_TITLE_SUFFIX_RE = re.compile(r'\s*[-|–]\s*LuxureTV\s*$', re.IGNORECASE)
+_ISO_DURATION_RE = re.compile(
+    r'^P(?:(?P<d>\d+)D)?T?(?:(?P<h>\d+)H)?(?:(?P<m>\d+)M)?(?:(?P<s>\d+(?:\.\d+)?)S)?$', re.IGNORECASE)
+_JSON_LD_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(?P<body>.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_iso_duration(value: Any) -> int | None:
+    """``PT1M36S`` -> 96. Plain numbers are taken as seconds."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.isdigit():
+        return int(text)
+    m = _ISO_DURATION_RE.match(text)
+    if not m or not any(m.groupdict().values()):
+        return None
+    total = (
+        int(m.group('d') or 0) * 86400
+        + int(m.group('h') or 0) * 3600
+        + int(m.group('m') or 0) * 60
+        + float(m.group('s') or 0)
+    )
+    return int(total)
+
+
+def json_ld_video(webpage: str) -> dict[str, Any]:
+    """The first schema.org ``VideoObject`` in the page, or ``{}``."""
+    import json
+
+    def walk(node: Any):
+        if isinstance(node, dict):
+            kind = node.get('@type')
+            if kind == 'VideoObject' or (isinstance(kind, list) and 'VideoObject' in kind):
+                yield node
+            for value in node.values():
+                yield from walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from walk(value)
+
+    for m in _JSON_LD_RE.finditer(webpage):
+        try:
+            data = json.loads(m.group('body'))
+        except ValueError:
+            continue
+        for video in walk(data):
+            return video
+    return {}
+
+
+def luxure_player_sources(webpage: str, page_url: str) -> list[dict[str, str]]:
+    """``<source>`` tags of the main player (``<video id="thisPlayer">``) only.
+
+    The page also has an advertising modal player and dozens of related-video clips and
+    thumbnails; none of those are the video being watched.
+    """
+    m = _LUXURE_PLAYER_RE.search(webpage)
+    if not m:
+        return []
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for tag in re.finditer(r'<source\b[^>]*>', m.group('body'), re.IGNORECASE):
+        src = re.search(r'\bsrc=["\'](?P<u>[^"\']+)["\']', tag.group(0), re.IGNORECASE)
+        if not src:
+            continue
+        url = _abs(page_url, src.group('u').replace('&amp;', '&').strip())
+        if not url.startswith('http') or url in seen or looks_like_image(url):
+            continue
+        seen.add(url)
+        kind = re.search(r'\btype=["\'](?P<t>[^"\']+)["\']', tag.group(0), re.IGNORECASE)
+        sources.append({'url': url, 'type': kind.group('t') if kind else 'video/mp4'})
+    return sources
+
+
+def luxure_info(
+    *,
+    video_id: str,
+    page_url: str,
+    webpage: str,
+    display_id: str | None = None,
+) -> dict[str, Any]:
+    """Info dict for a luxuretv video page.
+
+    Uses the main player's signed source, falling back to the JSON-LD ``contentUrl``,
+    and only then to the generic scraper (for layouts we have not seen).
+    """
+    ld = json_ld_video(webpage)
+    sources = luxure_player_sources(webpage, page_url)
+    if not sources and isinstance(ld.get('contentUrl'), str) and not looks_like_image(ld['contentUrl']):
+        sources = [{'url': ld['contentUrl'], 'type': 'video/mp4'}]
+    if not sources:
+        return build_info_dict(
+            video_id=video_id, page_url=page_url, webpage=webpage, display_id=display_id)
+
+    formats = []
+    for index, source in enumerate(sources):
+        is_hls = source['type'].lower().startswith('application/') or '.m3u8' in source['url']
+        formats.append({
+            'url': source['url'],
+            'format_id': 'default' if len(sources) == 1 else f'default-{index}',
+            'ext': 'mp4',
+            'protocol': 'm3u8_native' if is_hls else 'https',
+            'vcodec': 'avc1',
+            'acodec': 'mp4a',
+            'http_headers': {'Referer': page_url},
+            # The stream sits behind the same Cloudflare check as the page.
+            'impersonate': True,
+        })
+    title = _LUXURE_TITLE_SUFFIX_RE.sub('', str(ld.get('name') or extract_title(webpage) or '')).strip()
+    info: dict[str, Any] = {
+        'id': video_id,
+        'title': title or display_id or video_id,
+        'formats': formats,
+        'age_limit': 18,
+        'webpage_url': page_url,
+    }
+    if display_id:
+        info['display_id'] = display_id
+    thumb = ld.get('thumbnailUrl')
+    if isinstance(thumb, list):
+        thumb = thumb[0] if thumb else None
+    if isinstance(thumb, str):
+        info['thumbnail'] = thumb
+    duration = parse_iso_duration(ld.get('duration'))
+    if duration is not None:
+        info['duration'] = duration
+    if isinstance(ld.get('uploadDate'), str):
+        info['upload_date_raw'] = ld['uploadDate']
+    return info

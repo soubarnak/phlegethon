@@ -105,6 +105,16 @@ class LuxureExtractorTests(unittest.TestCase):
             ie._real_extract("https://en.luxuretv.com/videos/some-video-100.html")
         self.assertIn("cookies", str(ctx.exception).lower())
 
+    def test_live_page_yields_exactly_the_main_stream(self):
+        ie = self._ie(LuxureTVIE, _read("luxuretv_live.html"))
+        info = ie._real_extract("https://en.luxuretv.com/videos/sample-clip-100200.html")
+        self.assertEqual(info["id"], "100200")
+        self.assertEqual(info["title"], "Sample Clip")
+        self.assertEqual(info["duration"], 96)
+        self.assertEqual(info["upload_date"], "20260102")
+        self.assertEqual(len(info["formats"]), 1)
+        self.assertIn("/cf-stream/100200/", info["formats"][0]["url"])
+
     def test_single_video_page_extracts(self):
         ie = self._ie(LuxureTVIE, _read("luxuretv_single_video.html"))
         info = ie._real_extract("https://www.luxuretv.com/videos/sample-video-16982.html")

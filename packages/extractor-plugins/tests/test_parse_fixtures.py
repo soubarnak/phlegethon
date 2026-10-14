@@ -166,6 +166,63 @@ class CloudflareDetectionTests(unittest.TestCase):
         self.assertIn("cookies", parse.CLOUDFLARE_HELP.lower())
 
 
+class LuxureLivePageTests(unittest.TestCase):
+    URL = "https://en.luxuretv.com/videos/sample-clip-100200.html"
+
+    def setUp(self):
+        self.html = (FIXTURES / "luxuretv_live.html").read_text(encoding="utf-8")
+
+    def test_only_the_main_player_source_is_used(self):
+        sources = parse.luxure_player_sources(self.html, self.URL)
+        self.assertEqual(len(sources), 1)
+        self.assertIn("/cf-stream/100200/", sources[0]["url"])
+        self.assertIn("md5=TOKEN&expires=", sources[0]["url"], "&amp; must be unescaped")
+
+    def test_info_ignores_thumbnails_ads_and_related_clips(self):
+        info = parse.luxure_info(video_id="100200", page_url=self.URL, webpage=self.html)
+        self.assertEqual(len(info["formats"]), 1)
+        fmt = info["formats"][0]
+        self.assertEqual(fmt["format_id"], "default")
+        self.assertTrue(fmt["impersonate"])
+        self.assertEqual(fmt["http_headers"]["Referer"], self.URL)
+        self.assertEqual(info["title"], "Sample Clip")
+        self.assertEqual(info["duration"], 96)
+        self.assertTrue(info["thumbnail"].endswith(".jpg"))
+        self.assertTrue(info["upload_date_raw"].startswith("2026-01-02"))
+
+    def test_json_ld_content_url_is_the_fallback(self):
+        no_player = self.html.replace('id="thisPlayer"', 'id="other"')
+        info = parse.luxure_info(video_id="100200", page_url=self.URL, webpage=no_player)
+        self.assertEqual(
+            [f["url"] for f in info["formats"]],
+            ["https://en.luxuretv.com/cf-stream/100200/a/b/c/d/e/abcde0002.mp4"],
+        )
+
+    def test_generic_scraper_never_returns_images(self):
+        formats = parse.extract_formats(self.html, self.URL)
+        self.assertFalse([f for f in formats if parse.looks_like_image(f["url"])])
+        self.assertFalse([f for f in formats if "preview_" in f["url"]])
+
+    def test_image_detection(self):
+        self.assertTrue(parse.looks_like_image("https://x/abc.mp4/abc.mp4-7b.jpg"))
+        self.assertTrue(parse.looks_like_image("https://x/a.PNG?v=1"))
+        self.assertFalse(parse.looks_like_image("https://x/abc.mp4?md5=1"))
+
+    def test_iso_durations(self):
+        self.assertEqual(parse.parse_iso_duration("PT1M36S"), 96)
+        self.assertEqual(parse.parse_iso_duration("PT1H2M3S"), 3723)
+        self.assertEqual(parse.parse_iso_duration("PT45S"), 45)
+        self.assertEqual(parse.parse_iso_duration(120), 120)
+        self.assertEqual(parse.parse_iso_duration("90"), 90)
+        self.assertIsNone(parse.parse_iso_duration("garbage"))
+        self.assertIsNone(parse.parse_iso_duration(None))
+
+    def test_page_without_any_source_still_raises(self):
+        with self.assertRaises(ValueError):
+            parse.luxure_info(
+                video_id="1", page_url=self.URL, webpage="<html><body>nothing</body></html>")
+
+
 class LuxureListingTests(unittest.TestCase):
     HTML = """
     <html><head><link rel="next" href="/videos/page2.html"></head><body>

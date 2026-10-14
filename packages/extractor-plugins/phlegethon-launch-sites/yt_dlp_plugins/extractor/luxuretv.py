@@ -1,11 +1,11 @@
 # ⚠ Don't use relative imports
 from yt_dlp.extractor.common import InfoExtractor
-from yt_dlp.utils import ExtractorError
+from yt_dlp.utils import ExtractorError, unified_strdate
 
 from yt_dlp_plugins.extractor._parse import (
     CLOUDFLARE_HELP,
-    build_info_dict,
     is_cloudflare_challenge,
+    luxure_info,
     luxure_listing_links,
     next_page_link,
 )
@@ -44,7 +44,7 @@ class LuxureTVIE(InfoExtractor):
         if is_cloudflare_challenge(webpage):
             raise ExtractorError(f'luxuretv {CLOUDFLARE_HELP}', expected=True)
         try:
-            return build_info_dict(
+            info = luxure_info(
                 video_id=video_id,
                 page_url=url,
                 webpage=webpage,
@@ -52,6 +52,8 @@ class LuxureTVIE(InfoExtractor):
             )
         except ValueError as e:
             raise ExtractorError(str(e), expected=True) from e
+        info['upload_date'] = unified_strdate(info.pop('upload_date_raw', None))
+        return info
 
 
 class LuxureTVListIE(InfoExtractor):
