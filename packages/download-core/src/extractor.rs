@@ -285,6 +285,11 @@ pub trait ExtractorToolchain: Send + Sync {
         None
     }
 
+    /// Detected tool versions for the Toolchain panel.
+    fn toolchain_status(&self) -> crate::toolchain_discovery::ToolchainStatus {
+        crate::toolchain_discovery::ToolchainStatus::unavailable()
+    }
+
     /// Refresh toolchain binary / plugin dirs from an app-managed sidecar root.
     ///
     /// Production extractors should pick up `toolchain-manifest.json` +

@@ -28,12 +28,19 @@ mod proxy_settings;
 pub mod plugin_sidecar;
 mod sidecar_updates;
 mod storage;
+pub mod toolchain_discovery;
 pub mod ytdlp_extractor;
 pub use plugin_sidecar::{
     install_plugin_package, load_manifest, needs_update, plugin_dirs_path, write_manifest,
     PluginManifest, MANIFEST_FILENAME, PLUGIN_DIRS_REL, PLUGIN_PACKAGE_NAME,
 };
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
+pub use toolchain_discovery::{
+    classify_ytdlp_failure, detect_libc, error_code, error_code_hint, tag_error, EjsStatus,
+    JsRuntime, JsRuntimeKind, Libc, PlatformInfo, ToolInfo, ToolchainStatus, YtDlpLauncher,
+    YtDlpSource, ERROR_CODE_NEEDS_BROWSER_COOKIES, ERROR_CODE_NEEDS_JS_RUNTIME,
+    ERROR_CODE_TIMEOUT,
+};
 
 pub use cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
 pub use proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
@@ -2091,6 +2098,15 @@ impl Core {
     /// Replace the page sniffer (tests inject [`FakePageSniffer`]).
     pub fn set_page_sniffer(&mut self, sniffer: Arc<dyn PageSniffer>) {
         self.sniffer = sniffer;
+    }
+
+    /// Detected Extractor Toolchain state (yt-dlp, ffmpeg, JS runtime, EJS).
+    ///
+    /// Runs `--version` probes; shells should call it off the main thread and cache.
+    pub fn toolchain_status(&self) -> ToolchainStatus {
+        let mut status = self.extractor.toolchain_status();
+        status.sidecar_root = self.sidecar_root.as_ref().map(|p| p.display().to_string());
+        status
     }
 
     /// Fetch exact formats for one item from a pending probe and update stored qualities.
