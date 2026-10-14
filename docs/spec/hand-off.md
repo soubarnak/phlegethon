@@ -4,11 +4,13 @@ Product + engineering specification for implementation kickoff. Decisions locked
 
 **Status:** **hand-off accepted** (map [#1](https://github.com/soubarnak/phlegethon/issues/1) signed off 2026-07-20) — implementation may start. Remaining fog stays under [§ Deferred / open](#11-deferred--open).
 
+**Amended 2026-10-14:** the Windows shell was dropped, the single shell is Tauri 2 on Void Linux and the only release artifact is an xbps package ([ADR 0001](../adr/0001-drop-windows-shell.md)), and the design system is IBM Carbon instead of Geist ([ADR 0002](../adr/0002-carbon-design-system.md)). Sections 1, 3.1, 4, 6.1, 6.2, 6.5, 8.1, 9 and 11 below reflect that; the rest is unchanged.
+
 ---
 
 ## 1. Purpose & Destination
 
-Phlegethon is a desktop **Download Manager** with first-class **Video Intelligence**, shipping on Windows 11 and Debian Linux. This document is the **Hand-off Spec**: clear enough that implementation can start without reopening locked product, platform, download-architecture, Launch Site, UI, and Companion decisions.
+Phlegethon is a desktop **Download Manager** with first-class **Video Intelligence**, shipping on Void Linux (glibc and musl) as an xbps package. This document is the **Hand-off Spec**: clear enough that implementation can start without reopening locked product, platform, download-architecture, Launch Site, UI, and Companion decisions.
 
 This effort does **not** build or ship the app. Implementation begins only after human sign-off on the map.
 
@@ -27,7 +29,7 @@ Canonical terms live in [`CONTEXT.md`](../../CONTEXT.md). Spec language must mat
 | Area | v1 commitment |
 | --- | --- |
 | Product shape | Universal download manager + video intelligence (not video-only) |
-| Platforms | Windows 11 (WinUI 3 shell) + Debian (Tauri 2 shell); shared Rust Download Core |
+| Platforms | Void Linux, glibc and musl (Tauri 2 shell over the Rust Download Core); released as an xbps package only |
 | URL entry | Paste / drop URLs must work alone for desktop MVP |
 | Launch Sites | Four equal must-haves: YouTube, xxxbp.tv, luxuretv, xHamster (see matrix) |
 | HTTP depth | Resumable Transfer, Segmented Transfer, Mirror Sets, Bandwidth Caps; queue parity with video jobs |
@@ -46,36 +48,36 @@ See [§ Non-goals](#non-goals) (map Out of scope set).
 
 ## 4. Platform & architecture
 
-### 4.1 Shells
+### 4.1 Shell
 
 | OS | Platform Shell | UI toolkit |
 | --- | --- | --- |
-| Windows 11 | Native host | WinUI 3 (C#) |
-| Debian | Native host | Tauri 2 (webview) |
+| Void Linux (glibc, musl) | Native host | Tauri 2 (WebKitGTK webview) with React and IBM Carbon |
 
-Both shells talk to one shared Rust **Download Core** and share a Geist-inspired design system (tokens + recipes, native chrome per shell).
+One shell, one Rust **Download Core**. Other Linux distributions are expected to build from source but are not release targets.
 
-### 4.2 Windows ↔ Core (locked)
+### 4.2 Shell ↔ Core (locked)
 
-Embed the Download Core as a Rust `cdylib` (DLL), expose a thin **C ABI**, consume from WinUI 3 via **csbindgen** / `[LibraryImport]`, and stream queue/progress events through a rooted native callback into `System.Threading.Channels` (then the WinUI dispatcher).
+The Tauri backend links `download-core` as an ordinary Rust dependency (`rlib`). Tauri commands wrap the Core API; the frontend calls them through `@tauri-apps/api`. Core events are drained on a background thread and pushed to the webview as a `core-event` event. There is no C ABI and no second process.
 
-**Escape hatch:** named-pipes sidecar (gRPC only if a protobuf IDL is wanted) when extractor/core crashes must not kill the shell.
+Long operations (probe, yt-dlp downloads) never run while holding the Core mutex: the Core splits each into a plan made under the lock, a run outside it, and a finish step under the lock again, so the queue stays responsive.
 
-**Not defaults:** UniFFI for C#; wrapping the core as a WinRT component.
+**Escape hatch:** a sidecar process over a local socket if extractor or Core crashes must not take the shell down.
 
-Detail: [`docs/research/winui3-rust-core.md`](../research/winui3-rust-core.md).
+### 4.3 Void Linux target
 
-### 4.3 Debian / Tauri ↔ Core
-
-**Deferred:** how the shared C ABI is consumed from the Tauri/Debian shell. Windows path is locked; Linux binding details stay open (see [§ Deferred / open](#11-deferred--open)).
+- Release artifact: an xbps package from [`packaging/void/srcpkgs/phlegethon/template`](../../packaging/void/srcpkgs/phlegethon/template). Tauri's own bundler (deb, AppImage, rpm) is disabled.
+- No systemd assumptions (Void uses runit). The companion socket is an `interprocess` local socket.
+- Folder chooser: `xdg-desktop-portal` when it is on the bus, else `zenity` or `kdialog`, else a typed path (`phlegethon-shell-support`).
+- Desktop notifications: the notification plugin, with `notify-send` as fallback.
+- Dependencies at runtime: `yt-dlp`, `ffmpeg`, a JavaScript runtime (`nodejs`) for YouTube, `xdg-utils`, `xdg-desktop-portal`, `dbus`.
 
 ### 4.4 System context
 
 ```mermaid
 flowchart LR
   subgraph shells [Platform Shells]
-    WinUI[WinUI 3 / Win11]
-    Tauri[Tauri 2 / Debian]
+    Tauri[Tauri 2 / Void Linux]
   end
   Core[Download Core Rust]
   ET[Extractor Toolchain yt-dlp sidecar]
@@ -83,8 +85,7 @@ flowchart LR
   Comp[Chrome Companion optional]
   FS[(Library Root / Job Destination)]
 
-  WinUI -->|C ABI in-proc cdylib| Core
-  Tauri -->|C ABI binding TBD| Core
+  Tauri -->|Rust dependency, in-proc| Core
   Comp -->|native messaging stdio| shells
   Core --> ET
   ET --> EP
@@ -169,25 +170,27 @@ Default multi-item UX: **dense sheet** — checklist + per-row quality, sticky C
 
 ### 6.1 Packaging
 
-Wrap official **yt-dlp** release binaries as a managed **sidecar** (CLI + `-J`/`-j` JSON probe). Prefer **nightly** updates (`-U` / `--update-to nightly` or app-fetched GitHub assets).
+Drive **yt-dlp** as a managed **sidecar** (CLI + `-J`/`-j` JSON probe). The Core finds it in this order: the app sidecar directory (installed from the Toolchain panel), `YTDLP_PATH`, `yt-dlp` on `PATH`, then `python3 -m yt_dlp`. The Toolchain panel can install the latest GitHub release into the sidecar directory, verified against the release's `SHA2-256SUMS`.
 
-Also ship:
+Also needed:
 
 - **ffmpeg / ffprobe**
-- For full YouTube: **yt-dlp-ejs** + a JS runtime
+- For full YouTube: **yt-dlp-ejs** and a JS runtime. The Core detects deno (2.3 or newer), node (22 or newer), quickjs or bun and passes `--js-runtimes`. Fetching the EJS components from GitHub (`--remote-components ejs:github`) is off until the user turns it on.
 
-| OS | Binary shape |
+| libc | Binary shape |
 | --- | --- |
-| Win11 | `yt-dlp.exe` (ARM64 variant if needed) |
-| Debian | `yt-dlp_linux` or zipimport `yt-dlp` + system Python |
+| glibc (x86_64, aarch64, armv7l) | `yt-dlp_linux`, `yt-dlp_linux_aarch64`, `yt-dlp_linux_armv7l` standalone builds |
+| musl | The universal `yt-dlp` zipimport script, which needs `python3`; or the xbps `yt-dlp` package |
 
-Do not use you-get / gallery-dl as the primary toolchain; do not rely on Debian apt alone for Launch Site freshness.
+When the site is behind a browser check, the Core adds `--impersonate chrome` if `curl_cffi` is available.
+
+Do not use you-get / gallery-dl as the primary toolchain. The xbps `yt-dlp` package is the default install, and the sidecar exists so Launch Site fixes do not wait for a distro update.
 
 Detail: [`docs/research/extractor-toolchain.md`](../research/extractor-toolchain.md).
 
 ### 6.2 Extractor Plugins
 
-**luxuretv** and **xxxbp.tv** have no first-party yt-dlp extractors. Coverage is **Phlegethon-owned yt-dlp Extractor Plugins** shipped as app-managed sidecar assets, **updateable independently** of a full Win/Debian app release.
+**luxuretv** and **xxxbp.tv** have no first-party yt-dlp extractors. Coverage is **Phlegethon-owned yt-dlp Extractor Plugins** shipped as app-managed sidecar assets, **updateable independently** of a full app release.
 
 Native Download Core handlers only if a site cannot be expressed as a yt-dlp IE.
 
@@ -223,6 +226,22 @@ flowchart LR
 3. Degraded post-ship coverage is OK with explicit Failed / unsupported UX.
 4. A Companion-fed **direct media URL** may enqueue as ordinary HTTP / Resumable Transfer; that does **not** count as Launch Site Video Intelligence acceptance.
 
+### 6.5 Tiered extraction for every other site
+
+The failure policy above applies to the four Launch Sites only. For any other URL the Core tries, in order, and tags the result with the tier that worked:
+
+| Tier | What happens | Shown as |
+| --- | --- | --- |
+| Direct file | A HEAD request reports a non-HTML body (video, audio, archive, ...) | Original file, plain HTTP |
+| Dedicated | A yt-dlp extractor made for the site resolves it | No warning |
+| Generic extractor | yt-dlp's `Generic` extractor resolves it | Warning: "Generic extraction" |
+| Page scan | The Core reads the page for `og:video`, `<video>`/`<source>`, JSON-LD, media links and inline script URLs (hover previews are ignored) | Warning: found by scanning the page |
+| Failure | Nothing worked | Error with both reasons and a "Try plain download" action |
+
+Each tier after Dedicated can be switched off in Settings, and the probe has a timeout. "Try plain download" enqueues the URL as an ordinary HTTP transfer without probing.
+
+Sites behind a Cloudflare challenge (luxuretv) fail with an actionable "needs browser cookies" error instead of a generic one; the user supplies cookies under Settings.
+
 ---
 
 ## 7. Chrome Companion
@@ -255,13 +274,13 @@ Detail: [`docs/research/chrome-companion-bridge.md`](../research/chrome-companio
 
 ### 8.1 Design system
 
-Share **Geist as tokens + recipes**, not as React components. Vendor `design.md` / `design.dark.md` as the token SoT; generate CSS variables for Tauri and XAML `ThemeDictionaries` (Light / Dark + system HighContrast) for WinUI 3. Embed the same OFL Geist Sans / Mono files on both shells; recolor native progress / queue rows via tokens (blue active, green done, red failed). Native chrome per shell — do not maintain separate Fluent vs ad-hoc web palettes.
+**IBM Carbon** through `@carbon/react`, theme **g10** (light) and **g100** (dark), following the system preference and persisted per user. IBM Plex Sans and Mono are bundled locally, so the app works offline and under a strict CSP. Use Carbon components as they are (DataTable, Modal, Tabs, Tag, ProgressBar, Toggle, Dropdown, notifications); recolor nothing by hand. Status colors come from Carbon `Tag` types: gray pending, blue downloading, teal paused, green completed, red failed. User-facing strings live in `packages/shell-strings/en.json`.
 
-Detail: [`docs/research/geist-winui-tauri.md`](../research/geist-winui-tauri.md).
+Detail: [ADR 0002](../adr/0002-carbon-design-system.md).
 
 ### 8.2 Download queue (default chrome)
 
-**Dense-row queue:** flat list, quiet batch section header, thin under-row progress, inline Pause / Resume / Retry, Geist-token surfaces, no cards.
+**Dense-row queue:** flat list, quiet batch section header, thin under-row progress, inline Pause / Resume / Retry, Carbon data table, no cards.
 
 When a batch header is present, expose **group Pause / Resume** on that header (secondary affordance — not a bordered tree / collapse-as-primary hierarchy).
 
@@ -285,17 +304,21 @@ Beyond clean progress bars and Failed / Retry states: exact offline / empty-stat
 
 ## 9. Packaging & trust
 
-### 9.1 Locked packaging pieces
+### 9.1 Packaging
 
 | Component | Expectation |
 | --- | --- |
-| yt-dlp sidecar | App-managed; prefer nightly; platform binaries per §6.1 |
-| ffmpeg / ejs / JS runtime | Shipped beside toolchain as needed for Launch Sites |
-| Extractor Plugins | App-managed sidecar assets; independently updateable |
+| App | One xbps package: `phlegethon` (Tauri shell) and `phlegethon-nmh` (native messaging host), a `.desktop` file, AppStream metainfo and hicolor icons |
+| Source tarball | `scripts/make-dist-tarball.sh`: tracked sources plus the prebuilt `frontend/dist`, so xbps-src needs no npm |
+| yt-dlp | `depends` on the xbps `yt-dlp`; the Toolchain panel can install a newer one into the sidecar directory |
+| ffmpeg / JS runtime | `depends` on `ffmpeg` and `nodejs` |
+| Extractor Plugins | App-managed sidecar assets, independently updateable (`plugins-manifest.json`) |
 
-### 9.2 Deferred packaging
+Build and install steps are in the top-level [`README.md`](../../README.md).
 
-Installers, auto-update, and code-signing expectations for Win11 + Debian (including trust / signing for independently updated Extractor Plugins + yt-dlp sidecar) are **open** — see §11. Implementation may start against the architectural locks above while packaging details are filled.
+### 9.2 Still open
+
+Auto-update of the app itself (updates come from the xbps repository) and signing for independently updated Extractor Plugins and the yt-dlp sidecar. The release checksum is verified for the yt-dlp binary; plugins are not yet signed — see §11.
 
 ---
 
@@ -344,8 +367,8 @@ Map Destination bar — a reviewer walks this list against this file; human map 
 | [Prototype: clean download queue and progress](https://github.com/soubarnak/phlegethon/issues/9) | §8.2 |
 | [Grill: Chrome Companion capability boundary](https://github.com/soubarnak/phlegethon/issues/7) | §7 |
 | [Grill: general HTTP download depth for v1](https://github.com/soubarnak/phlegethon/issues/6) | §5.4 |
-| [Research: Geist design system on WinUI 3 and Tauri](https://github.com/soubarnak/phlegethon/issues/5) | §8.1 |
-| [Research: WinUI 3 shell talking to a Rust Download Core](https://github.com/soubarnak/phlegethon/issues/3) | §4.2 |
+| [Research: Geist design system on WinUI 3 and Tauri](https://github.com/soubarnak/phlegethon/issues/5) | §8.1 (superseded by ADR 0002: Carbon) |
+| [Research: WinUI 3 shell talking to a Rust Download Core](https://github.com/soubarnak/phlegethon/issues/3) | §4.2 (superseded by ADR 0001: in-process Rust dependency) |
 | [Research: Extractor Toolchain packaging and Launch Site coverage](https://github.com/soubarnak/phlegethon/issues/2) | §6.1, §6.3 |
 | [Research: Chrome Companion to desktop bridge](https://github.com/soubarnak/phlegethon/issues/4) | §7.2 |
 
@@ -357,8 +380,8 @@ In-scope fog carried forward from the map — may stay open without blocking map
 
 | Topic | Notes |
 | --- | --- |
-| Tauri / Debian C ABI binding | Windows in-proc `cdylib` locked; Linux consumption of the shared C ABI TBD |
-| Installers, auto-update, code-signing | Win11 + Debian; trust/signing for independently updated Extractor Plugins + yt-dlp sidecar |
+| ~~Tauri / Debian C ABI binding~~ | Resolved: no C ABI; the shell links the Core directly (§4.2) |
+| App auto-update, plugin signing | App updates come from the xbps repository; trust/signing for independently updated Extractor Plugins is open |
 | Offline / error UX copy and empty states | Beyond clean progress + Failed / Retry chrome |
 | Companion cookie / session payload schema | Capability + transport locked; names / TTL / logging rules open |
 
@@ -371,9 +394,7 @@ In-scope fog carried forward from the map — may stay open without blocking map
 | Note | Path |
 | --- | --- |
 | Extractor Toolchain packaging & Launch Site coverage | [`docs/research/extractor-toolchain.md`](../research/extractor-toolchain.md) |
-| WinUI 3 ↔ Rust Download Core | [`docs/research/winui3-rust-core.md`](../research/winui3-rust-core.md) |
 | Chrome Companion bridge | [`docs/research/chrome-companion-bridge.md`](../research/chrome-companion-bridge.md) |
-| Geist on WinUI 3 + Tauri | [`docs/research/geist-winui-tauri.md`](../research/geist-winui-tauri.md) |
 
 ### Prototypes
 

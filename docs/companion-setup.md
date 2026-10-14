@@ -36,6 +36,15 @@ cargo build -p phlegethon-tauri
 
 Host name: **`com.phlegethon.bridge`**
 
+Quick path on Linux (writes the manifest for Chrome, Chromium, Brave, Vivaldi and Edge, using the installed or freshly built `phlegethon-nmh`):
+
+```bash
+scripts/install-nmh-linux.sh --extension-id <32-letter extension id>
+# --browsers chrome,chromium  limit to some browsers;  --system  /etc for Chrome/Chromium;  --uninstall
+```
+
+The manual steps below do the same thing by hand.
+
 Template manifest: `packages/native-messaging-host/manifests/com.phlegethon.bridge.json`
 
 Replace:

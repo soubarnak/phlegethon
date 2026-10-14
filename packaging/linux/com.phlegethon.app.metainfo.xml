@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.phlegethon.app</id>
+  <name>Phlegethon</name>
+  <summary>Download videos, playlists and files from almost any website</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <description>
+    <p>
+      Phlegethon is a download manager. Paste or drop links, review what was found,
+      pick the quality, and download. Playlists and creator pages are listed first so
+      you choose which items to keep. It uses yt-dlp for sites it knows, and falls back
+      to scanning the page or downloading the file directly for sites it does not.
+    </p>
+  </description>
+  <launchable type="desktop-id">phlegethon.desktop</launchable>
+  <url type="homepage">https://github.com/soubarnak/phlegethon</url>
+  <provides>
+    <binary>phlegethon</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+</component>
