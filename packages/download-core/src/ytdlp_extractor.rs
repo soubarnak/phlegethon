@@ -16,9 +16,9 @@
 //! [`FakeYtDlpExtractor`] returns canned yt-dlp JSON through the same parser.
 //! This module's unit tests use canned JSON strings.
 
-use crate::cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
+use crate::cookie_channel::{ytdlp_cookie_args, CookieChannel};
 use crate::doh_ytdlp::{run_ytdlp_with_optional_doh_dns, ytdlp_command_with_optional_doh_dns};
-use crate::proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
+use crate::proxy_settings::{ytdlp_proxy_args, ProxySettings};
 use crate::extractor::{
     ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
 };

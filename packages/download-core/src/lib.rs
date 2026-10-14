@@ -75,7 +75,7 @@ use bandwidth::{shared_token_bucket, SharedTokenBucket};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -135,7 +135,7 @@ pub use storage::DEFAULT_ACTIVE_JOB_LIMIT;
 
 pub struct Core {
     http: Arc<dyn HttpBackend>,
-    extractor: Box<dyn ExtractorToolchain>,
+    extractor: Arc<dyn ExtractorToolchain>,
     library_root: Option<PathBuf>,
     jobs: Vec<job::Job>,
     event_tx: crossbeam_channel::Sender<CoreEvent>,
@@ -170,9 +170,6 @@ pub struct Core {
 }
 
 enum UnlockedTransferPlan {
-    UnderLock {
-        job_index: usize,
-    },
     SingleFetch {
         job_index: usize,
         bytes_received: u64,
@@ -185,16 +182,45 @@ enum UnlockedTransferPlan {
         http: Arc<dyn HttpBackend>,
         global_bucket: Option<SharedTokenBucket>,
         job_bucket: Option<SharedTokenBucket>,
-        pause_requested: Arc<std::sync::atomic::AtomicBool>,
-        transfer_active: Arc<std::sync::atomic::AtomicBool>,
+        pause_requested: Arc<AtomicBool>,
+        transfer_active: Arc<AtomicBool>,
         progress: TransferProgress,
+    },
+    /// Multi-connection Range transfer (fresh job, server supports ranges, no cap).
+    Segmented {
+        job_index: usize,
+        url: String,
+        part_path: PathBuf,
+        file_path: PathBuf,
+        http: Arc<dyn HttpBackend>,
+        global_bucket: Option<SharedTokenBucket>,
+        job_bucket: Option<SharedTokenBucket>,
+        pause_requested: Arc<AtomicBool>,
+        transfer_active: Arc<AtomicBool>,
+        progress: TransferProgress,
+    },
+    /// Extractor Toolchain (yt-dlp) download; runs on its own thread while Core
+    /// polls Job Destination growth for progress.
+    ExtractorFetch {
+        job_index: usize,
+        job_id: String,
+        url: String,
+        format: String,
+        dest: PathBuf,
+        output_spec: String,
+        media_extras: MediaExtrasOptions,
+        cookies: CookieChannel,
+        proxy: ProxySettings,
+        extractor: Arc<dyn ExtractorToolchain>,
+        stop: Arc<AtomicBool>,
+        transfer_active: Arc<AtomicBool>,
+        live_bytes: Arc<AtomicU64>,
+        event_tx: crossbeam_channel::Sender<CoreEvent>,
+        total_for_progress: Option<u64>,
     },
 }
 
 enum UnlockedTransferOutcome {
-    UnderLock {
-        job_index: usize,
-    },
     Fetched {
         job_index: usize,
         bytes_received: u64,
@@ -203,12 +229,25 @@ enum UnlockedTransferOutcome {
         outcome: transfer::SingleFetchOutcome,
         failed_url: String,
     },
+    Segmented {
+        job_index: usize,
+        part_path: PathBuf,
+        file_path: PathBuf,
+        failed_url: String,
+        result: Result<(u64, u64, bool), String>,
+    },
+    Extracted {
+        job_index: usize,
+        dest: PathBuf,
+        media_extras: MediaExtrasOptions,
+        stop: Arc<AtomicBool>,
+        result: Result<ExtractorDownloadOutcome, String>,
+    },
 }
 
 impl UnlockedTransferPlan {
     fn run(self) -> UnlockedTransferOutcome {
         match self {
-            Self::UnderLock { job_index } => UnlockedTransferOutcome::UnderLock { job_index },
             Self::SingleFetch {
                 job_index,
                 bytes_received,
@@ -249,8 +288,232 @@ impl UnlockedTransferPlan {
                     failed_url,
                 }
             }
+            Self::Segmented {
+                job_index,
+                url,
+                part_path,
+                file_path,
+                http,
+                global_bucket,
+                job_bucket,
+                pause_requested,
+                transfer_active,
+                progress,
+            } => {
+                let failed_url = url.clone();
+                let result = run_segmented_fetch(
+                    http,
+                    &url,
+                    &part_path,
+                    global_bucket,
+                    job_bucket,
+                    pause_requested,
+                    Some(progress),
+                );
+                transfer_active.store(false, Ordering::Release);
+                UnlockedTransferOutcome::Segmented {
+                    job_index,
+                    part_path,
+                    file_path,
+                    failed_url,
+                    result,
+                }
+            }
+            Self::ExtractorFetch {
+                job_index,
+                job_id,
+                url,
+                format,
+                dest,
+                output_spec,
+                media_extras,
+                cookies,
+                proxy,
+                extractor,
+                stop,
+                transfer_active,
+                live_bytes,
+                event_tx,
+                total_for_progress,
+            } => {
+                let result = run_extractor_fetch(ExtractorFetchParams {
+                    extractor,
+                    url,
+                    format,
+                    dest: dest.clone(),
+                    output_spec,
+                    media_extras: media_extras.clone(),
+                    cookies,
+                    proxy,
+                    stop: stop.clone(),
+                    live_bytes,
+                    event_tx,
+                    job_id,
+                    total_for_progress,
+                });
+                transfer_active.store(false, Ordering::Release);
+                UnlockedTransferOutcome::Extracted {
+                    job_index,
+                    dest,
+                    media_extras,
+                    stop,
+                    result,
+                }
+            }
         }
     }
+}
+
+struct ExtractorFetchParams {
+    extractor: Arc<dyn ExtractorToolchain>,
+    url: String,
+    format: String,
+    dest: PathBuf,
+    output_spec: String,
+    media_extras: MediaExtrasOptions,
+    cookies: CookieChannel,
+    proxy: ProxySettings,
+    stop: Arc<AtomicBool>,
+    live_bytes: Arc<AtomicU64>,
+    event_tx: crossbeam_channel::Sender<CoreEvent>,
+    job_id: String,
+    total_for_progress: Option<u64>,
+}
+
+/// Run an Extractor Toolchain download on a worker thread and emit
+/// [`CoreEvent::JobProgress`] from on-disk growth under the Job Destination
+/// until it finishes or stops. Runs without the Core mutex.
+fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownloadOutcome, String> {
+    let ExtractorFetchParams {
+        extractor,
+        url,
+        format,
+        dest,
+        output_spec,
+        media_extras,
+        cookies,
+        proxy,
+        stop,
+        live_bytes,
+        event_tx,
+        job_id,
+        total_for_progress,
+    } = params;
+    let (result_tx, result_rx) = mpsc::channel();
+    let dest_worker = dest.clone();
+    std::thread::spawn(move || {
+        let outcome = extractor.download(
+            &url,
+            &format,
+            &dest_worker,
+            stop.as_ref(),
+            &media_extras,
+            &cookies,
+            &proxy,
+            &output_spec,
+        );
+        let _ = result_tx.send(outcome);
+    });
+
+    let mut last_emitted: Option<u64> = None;
+    loop {
+        match result_rx.try_recv() {
+            Ok(outcome) => break outcome,
+            Err(mpsc::TryRecvError::Empty) => {
+                let on_disk = storage::destination_byte_total(&dest);
+                if last_emitted != Some(on_disk) {
+                    live_bytes.store(on_disk, Ordering::Release);
+                    let _ = event_tx.send(CoreEvent::JobProgress {
+                        job_id: job_id.clone(),
+                        bytes_downloaded: on_disk,
+                        total_bytes: total_for_progress,
+                    });
+                    last_emitted = Some(on_disk);
+                }
+                std::thread::sleep(EXTRACTOR_DISK_POLL_INTERVAL);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err("extractor download thread disconnected".into());
+            }
+        }
+    }
+}
+
+/// Multi-connection Range transfer into `part_path`. Runs without the Core mutex.
+///
+/// Returns `(total_size, bytes_written, paused)`.
+fn run_segmented_fetch(
+    http: Arc<dyn HttpBackend>,
+    url: &str,
+    part_path: &Path,
+    global_bucket: Option<SharedTokenBucket>,
+    job_bucket: Option<SharedTokenBucket>,
+    pause_requested: Arc<AtomicBool>,
+    progress: Option<TransferProgress>,
+) -> Result<(u64, u64, bool), String> {
+    let total_size = http.file_size(url)?;
+    if total_size == 0 {
+        return Err("empty file, nothing to download".to_string());
+    }
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(part_path)
+        .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
+
+    let seg_count = DEFAULT_SEGMENT_COUNT.min(total_size);
+    let seg_size = total_size / seg_count;
+    let mut segments: Vec<Range<u64>> = Vec::with_capacity(seg_count as usize);
+    for s in 0..seg_count {
+        let start = s * seg_size;
+        let end = if s == seg_count - 1 {
+            total_size
+        } else {
+            (s + 1) * seg_size
+        };
+        if start < end {
+            segments.push(start..end);
+        }
+    }
+
+    let url_owned = url.to_string();
+    let part_path_owned = part_path.to_path_buf();
+
+    let segment_results: Vec<Result<u64, String>> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for range in segments {
+            let http_ref = http.clone();
+            let url_ref = url_owned.clone();
+            let part_ref = part_path_owned.clone();
+            let global = global_bucket.clone();
+            let job = job_bucket.clone();
+            let pause = pause_requested.clone();
+            let prog = progress.clone();
+            handles.push(scope.spawn(move || {
+                execute_segment_fetch(SegmentFetchParams {
+                    http: http_ref,
+                    url: url_ref,
+                    part_path: part_ref,
+                    range,
+                    global_bucket: global,
+                    job_bucket: job,
+                    pause_requested: pause,
+                    progress: prog,
+                })
+            }));
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let mut bytes_written = 0u64;
+    for result in segment_results {
+        bytes_written = bytes_written.saturating_add(result?);
+    }
+
+    let paused = pause_requested.load(Ordering::Acquire);
+    Ok((total_size, bytes_written, paused))
 }
 
 impl Core {
@@ -306,7 +569,7 @@ impl Core {
         let (tx, rx) = crossbeam_channel::unbounded();
         let core = Self {
             http: Arc::from(http),
-            extractor,
+            extractor: Arc::from(extractor),
             library_root: None,
             jobs: Vec::new(),
             event_tx: tx,
@@ -1763,6 +2026,11 @@ impl Core {
     }
 
     /// Prepare a transfer that can run without holding the Core mutex.
+    ///
+    /// Every transfer kind (single HTTP fetch, segmented HTTP fetch, Extractor
+    /// Toolchain download) is planned under the lock and executed outside it.
+    /// Returns `None` when the job is not pending, is already transferring, or
+    /// was finalized Failed during planning (disk space, no extractor resume).
     fn plan_unlocked_transfer(
         &mut self,
         job_id: &str,
@@ -1780,28 +2048,117 @@ impl Core {
             return Ok(None);
         }
 
-        if self.jobs[i].extractor_format().is_some() {
-            return Ok(Some(UnlockedTransferPlan::UnderLock { job_index: i }));
-        }
-
         let url = self.jobs[i].url().to_string();
         let dest = self.jobs[i].destination().to_path_buf();
         let bytes_received = self.jobs[i].bytes_received();
+        let extractor_format = self.jobs[i].extractor_format().map(|s| s.to_string());
+
+        let ytdlp_output_spec = extractor_format.as_ref().map(|_| {
+            let (spec, basename) = self.extractor_output_for_job(&self.jobs[i]);
+            self.jobs[i].set_filename(basename);
+            spec
+        });
+
         if !self.guard_disk_space_for_transfer(i, job_id, &dest, &url, bytes_received)? {
             return Ok(None);
         }
 
-        let filename = self.jobs[i].filename().to_string();
-        let job_cap = self.jobs[i].bandwidth_cap();
         let pause_requested = self.jobs[i].pause_requested().clone();
         let transfer_active = self.jobs[i].transfer_active().clone();
 
+        if let Some(format) = extractor_format {
+            let output_spec = ytdlp_output_spec
+                .unwrap_or_else(|| self.filename_template.clone());
+            let on_disk = storage::destination_byte_total(&dest);
+            if on_disk > 0 && !self.extractor.supports_extractor_resume() {
+                self.finalize_failed_job(
+                    job_id,
+                    i,
+                    "extractor cannot resume partial download; use Retry".into(),
+                )?;
+                return Ok(None);
+            }
+
+            let live_bytes = self.jobs[i].live_downloaded();
+            live_bytes.store(0, Ordering::Release);
+            let total_for_progress = self.jobs[i].total_bytes();
+            self.event_tx
+                .send(CoreEvent::JobProgress {
+                    job_id: job_id.to_string(),
+                    bytes_downloaded: 0,
+                    total_bytes: total_for_progress,
+                })
+                .map_err(|_| "event channel closed".to_string())?;
+
+            // Claim the job under the lock so a concurrent dispatch cannot start it twice.
+            transfer_active.store(true, Ordering::Release);
+            // `pause_requested` is also set by Discard (`signal_discard_stop`);
+            // both Pause and Discard use it as the extractor stop signal.
+            return Ok(Some(UnlockedTransferPlan::ExtractorFetch {
+                job_index: i,
+                job_id: job_id.to_string(),
+                url,
+                format,
+                dest,
+                output_spec,
+                media_extras: self.jobs[i].media_extras(),
+                cookies: self.cookie_channel.clone(),
+                proxy: self.proxy_settings.clone(),
+                extractor: Arc::clone(&self.extractor),
+                stop: pause_requested,
+                transfer_active,
+                live_bytes,
+                event_tx: self.event_tx.clone(),
+                total_for_progress,
+            }));
+        }
+
+        let filename = self.jobs[i].filename().to_string();
+        let job_cap = self.jobs[i].bandwidth_cap();
+        let job_bucket = job_cap.map(|rate| make_job_bucket(rate, self.clock.clone()));
+
         if bytes_received == 0 {
             let supports_range = matches!(self.http.supports_range(&url), Ok(true));
-            let job_bucket = job_cap.map(|rate| make_job_bucket(rate, self.clock.clone()));
             let rate_limited = global_bucket.is_some() || job_bucket.is_some();
             if supports_range && !rate_limited {
-                return Ok(Some(UnlockedTransferPlan::UnderLock { job_index: i }));
+                std::fs::create_dir_all(&dest)
+                    .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
+                let file_path = dest.join(&filename);
+                let part_path = Self::part_path_for(&file_path);
+
+                let known_total = self.http.file_size(&url).ok().filter(|&n| n > 0);
+                if let Some(total) = known_total {
+                    self.jobs[i].set_total_bytes(Some(total));
+                }
+                let live_bytes = self.jobs[i].live_downloaded();
+                live_bytes.store(0, Ordering::Release);
+                let progress = TransferProgress {
+                    job_id: job_id.to_string(),
+                    event_tx: self.event_tx.clone(),
+                    total_bytes: self.jobs[i].total_bytes(),
+                    live_bytes,
+                };
+                self.event_tx
+                    .send(CoreEvent::JobProgress {
+                        job_id: job_id.to_string(),
+                        bytes_downloaded: 0,
+                        total_bytes: self.jobs[i].total_bytes(),
+                    })
+                    .map_err(|_| "event channel closed".to_string())?;
+
+                transfer_active.store(true, Ordering::Release);
+                return Ok(Some(UnlockedTransferPlan::Segmented {
+                    job_index: i,
+                    url,
+                    part_path,
+                    file_path,
+                    http: self.http.clone(),
+                    global_bucket: global_bucket.clone(),
+                    job_bucket,
+                    pause_requested,
+                    transfer_active,
+                    progress,
+                }));
             }
         }
 
@@ -1845,8 +2202,8 @@ impl Core {
         } else {
             None
         };
-        let job_bucket = job_cap.map(|rate| make_job_bucket(rate, self.clock.clone()));
 
+        transfer_active.store(true, Ordering::Release);
         Ok(Some(UnlockedTransferPlan::SingleFetch {
             job_index: i,
             bytes_received,
@@ -1873,13 +2230,6 @@ impl Core {
         outcome: UnlockedTransferOutcome,
     ) -> Result<bool, String> {
         match outcome {
-            UnlockedTransferOutcome::UnderLock { job_index } => {
-                let bucket = self
-                    .bandwidth_cap
-                    .map(|rate| shared_token_bucket(rate, self.clock.clone()));
-                self.transfer_job_at_index(job_index, &bucket)?;
-                Ok(false)
-            }
             UnlockedTransferOutcome::Fetched {
                 job_index,
                 bytes_received,
@@ -1925,162 +2275,65 @@ impl Core {
                                 self.flush_pending_progress()?;
                             }
                             None => {
+                                // Unknown size: successful fetch to EOF is complete.
                                 self.complete_job_file(job_id, job_index, &part_path, &file_path, on_disk)?;
                             }
                         }
                         Ok(false)
                     }
-                    Err(err) => {
-                        if self.jobs[job_index].advance_mirror() {
-                            let next_url = self.jobs[job_index].url().to_string();
-                            self.event_tx
-                                .send(CoreEvent::JobMirrorFailover {
-                                    job_id: job_id.to_string(),
-                                    previous_url: failed_url,
-                                    next_url,
-                                    error: err,
-                                })
-                                .map_err(|_| "event channel closed".to_string())?;
-                            self.persist_queue_now()?;
-                            Ok(true)
-                        } else {
-                            self.finalize_failed_job(&job_id, job_index, err)?;
-                            Ok(false)
-                        }
-                    }
+                    Err(err) => self.fail_or_failover(job_id, job_index, failed_url, err),
                 }
             }
-        }
-    }
+            UnlockedTransferOutcome::Segmented {
+                job_index,
+                part_path,
+                file_path,
+                failed_url,
+                result,
+            } => match result {
+                Err(err) => {
+                    let _ = std::fs::remove_file(&part_path);
+                    self.fail_or_failover(job_id, job_index, failed_url, err)
+                }
+                Ok((total_size, _bytes_written, paused)) => {
+                    self.jobs[job_index].set_total_bytes(Some(total_size));
+                    if paused {
+                        // Segments write at independent offsets, so an interrupted
+                        // `.part` has holes and its length is not a resumable byte
+                        // count. Drop it; Resume restarts the transfer from zero.
+                        let _ = std::fs::remove_file(&part_path);
+                        self.jobs[job_index].set_bytes_received(0);
+                        self.finalize_stop_after_transfer(job_id)?;
+                        return Ok(false);
+                    }
 
-    fn transfer_job_at_index(
-        &mut self,
-        i: usize,
-        global_bucket: &Option<SharedTokenBucket>,
-    ) -> Result<(), String> {
-            let (
-                job_id,
-                url,
+                    let on_disk = self.sync_job_progress(job_id, 0)?;
+                    self.event_tx
+                        .send(CoreEvent::JobProgress {
+                            job_id: job_id.to_string(),
+                            bytes_downloaded: on_disk,
+                            total_bytes: Some(total_size),
+                        })
+                        .map_err(|_| "event channel closed".to_string())?;
+
+                    if on_disk >= total_size {
+                        self.complete_job_file(job_id, job_index, &part_path, &file_path, total_size)?;
+                    } else {
+                        self.flush_pending_progress()?;
+                    }
+                    Ok(false)
+                }
+            },
+            UnlockedTransferOutcome::Extracted {
+                job_index,
                 dest,
-                filename,
-                bytes_received,
-                job_cap,
-                extractor_format,
                 media_extras,
-                pause_requested,
-                transfer_active,
-            ) = {
-                let job = &self.jobs[i];
-                (
-                    job.id().to_string(),
-                    job.url().to_string(),
-                    job.destination().to_path_buf(),
-                    job.filename().to_string(),
-                    job.bytes_received(),
-                    job.bandwidth_cap(),
-                    job.extractor_format().map(|s| s.to_string()),
-                    job.media_extras(),
-                    job.pause_requested().clone(),
-                    job.transfer_active().clone(),
-                )
-            };
-
-            let ytdlp_output_spec = extractor_format
-                .as_ref()
-                .map(|_| {
-                    let (spec, basename) = self.extractor_output_for_job(&self.jobs[i]);
-                    self.jobs[i].set_filename(basename);
-                    spec
-                });
-
-            if !self.guard_disk_space_for_transfer(i, &job_id, &dest, &url, bytes_received)? {
-                return Ok(());
-            }
-
-            if let Some(format) = extractor_format {
-                let output_spec_owned = ytdlp_output_spec
-                    .unwrap_or_else(|| self.filename_template.clone());
-                let on_disk = storage::destination_byte_total(&dest);
-                if on_disk > 0 && !self.extractor.supports_extractor_resume() {
-                    self.finalize_failed_job(
-                        &job_id,
-                        i,
-                        "extractor cannot resume partial download; use Retry".into(),
-                    )?;
-                    return Ok(());
-                }
-
-                let live_bytes = self.jobs[i].live_downloaded();
-                live_bytes.store(0, Ordering::Release);
-                let total_for_progress = self.jobs[i].total_bytes();
-
-                self.event_tx
-                    .send(CoreEvent::JobProgress {
-                        job_id: job_id.clone(),
-                        bytes_downloaded: 0,
-                        total_bytes: total_for_progress,
-                    })
-                    .map_err(|_| "event channel closed".to_string())?;
-
-                // `pause_requested` is also set by Discard (`signal_discard_stop`);
-                // both Pause and Discard use it as the extractor stop signal.
-                let stop = pause_requested.as_ref();
-                transfer_active.store(true, Ordering::Release);
-                // Extractor Toolchain is often silent mid-transfer: run it on a
-                // scoped thread and emit JobProgress from on-disk growth under
-                // the Job Destination until it finishes or stops.
-                let download_result = std::thread::scope(|s| {
-                    let (result_tx, result_rx) = mpsc::channel();
-                    let extractor = self.extractor.as_ref();
-                    let dest_ref = dest.as_path();
-                    let url_ref = url.as_str();
-                    let format_ref = format.as_str();
-                    let output_spec = output_spec_owned.as_str();
-                    let extras = media_extras;
-                    let cookies = self.cookie_channel.clone();
-                    let proxy = self.proxy_settings.clone();
-                    s.spawn(move || {
-                        let outcome = extractor.download(
-                            url_ref,
-                            format_ref,
-                            dest_ref,
-                            stop,
-                            &extras,
-                            &cookies,
-                            &proxy,
-                            output_spec,
-                        );
-                        let _ = result_tx.send(outcome);
-                    });
-
-                    let mut last_emitted: Option<u64> = None;
-                    loop {
-                        match result_rx.try_recv() {
-                            Ok(outcome) => break outcome,
-                            Err(mpsc::TryRecvError::Empty) => {
-                                let on_disk = Self::destination_byte_total(&dest);
-                                if last_emitted != Some(on_disk) {
-                                    live_bytes.store(on_disk, Ordering::Release);
-                                    let _ = self.event_tx.send(CoreEvent::JobProgress {
-                                        job_id: job_id.clone(),
-                                        bytes_downloaded: on_disk,
-                                        total_bytes: total_for_progress,
-                                    });
-                                    last_emitted = Some(on_disk);
-                                }
-                                std::thread::sleep(EXTRACTOR_DISK_POLL_INTERVAL);
-                            }
-                            Err(mpsc::TryRecvError::Disconnected) => {
-                                break Err(
-                                    "extractor download thread disconnected".into(),
-                                );
-                            }
-                        }
-                    }
-                });
-                transfer_active.store(false, Ordering::Release);
-
-                match download_result {
+                stop,
+                result,
+            } => {
+                let live_bytes = self.jobs[job_index].live_downloaded();
+                let total_for_progress = self.jobs[job_index].total_bytes();
+                match result {
                     Ok(ExtractorDownloadOutcome::Completed(path)) => {
                         Self::cleanup_extractor_temp_artifacts(&dest, &path);
                         let ffmpeg_dir = self.extractor.ffmpeg_dir();
@@ -2088,7 +2341,7 @@ impl Core {
                             &path,
                             &media_extras,
                             ffmpeg_dir,
-                            pause_requested.as_ref(),
+                            stop.as_ref(),
                         );
                         let (final_path, bytes) = match post {
                             PostprocessOutcome::Unchanged(p) | PostprocessOutcome::Remuxed(p) => {
@@ -2102,258 +2355,82 @@ impl Core {
                                 pre_remux_path,
                             } => {
                                 let _ = pre_remux_path;
-                                self.finalize_failed_job(&job_id, i, error)?;
-                                return Ok(());
+                                self.finalize_failed_job(job_id, job_index, error)?;
+                                return Ok(false);
                             }
                         };
                         live_bytes.store(bytes, Ordering::Release);
                         let _ = self.event_tx.send(CoreEvent::JobProgress {
-                            job_id: job_id.clone(),
+                            job_id: job_id.to_string(),
                             bytes_downloaded: bytes,
                             total_bytes: total_for_progress,
                         });
-                        self.finalize_completed_job(&job_id, i, &final_path, bytes)?;
+                        self.finalize_completed_job(job_id, job_index, &final_path, bytes)?;
                     }
                     Ok(ExtractorDownloadOutcome::Stopped) => {
-                        self.finalize_stop_after_transfer(&job_id)?;
+                        self.finalize_stop_after_transfer(job_id)?;
                     }
                     Err(err) => {
                         // Kill/stop races can surface as toolchain errors; prefer
                         // Pause/Discard finalize when the user already requested stop.
-                        if pause_requested.load(Ordering::Acquire) {
-                            self.finalize_stop_after_transfer(&job_id)?;
+                        if stop.load(Ordering::Acquire) {
+                            self.finalize_stop_after_transfer(job_id)?;
                         } else {
-                            self.finalize_failed_job(&job_id, i, err)?;
+                            self.finalize_failed_job(job_id, job_index, err)?;
                         }
                     }
                 }
-                return Ok(());
+                Ok(false)
             }
+        }
+    }
 
-            let job_bucket = job_cap.map(|rate| make_job_bucket(rate, self.clock.clone()));
-
-            if bytes_received == 0 {
-                let supports_range = matches!(self.http.supports_range(&url), Ok(true));
-                let rate_limited = global_bucket.is_some() || job_bucket.is_some();
-
-                if supports_range && !rate_limited {
-                    std::fs::create_dir_all(&dest)
-                        .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
-                    let file_path = dest.join(&filename);
-                    let part_path = Self::part_path_for(&file_path);
-
-                    let seg_result = 'seg_loop: loop {
-                        let current_url = self.jobs[i].url().to_string();
-                        let known_total = self.http.file_size(&current_url).ok().filter(|&n| n > 0);
-                        if let Some(total) = known_total {
-                            self.jobs[i].set_total_bytes(Some(total));
-                        }
-                        let live_bytes = self.jobs[i].live_downloaded();
-                        live_bytes.store(0, Ordering::Release);
-                        let progress = TransferProgress {
-                            job_id: job_id.clone(),
-                            event_tx: self.event_tx.clone(),
-                            total_bytes: self.jobs[i].total_bytes(),
-                            live_bytes,
-                        };
-                        self.event_tx
-                            .send(CoreEvent::JobProgress {
-                                job_id: job_id.clone(),
-                                bytes_downloaded: 0,
-                                total_bytes: self.jobs[i].total_bytes(),
-                            })
-                            .map_err(|_| "event channel closed".to_string())?;
-                        match self.segmented_fetch(
-                            &current_url,
-                            &part_path,
-                            global_bucket.clone(),
-                            job_bucket.clone(),
-                            pause_requested.clone(),
-                            transfer_active.clone(),
-                            Some(progress),
-                        ) {
-                            Ok(result) => break 'seg_loop Some(result),
-                            Err(err) => {
-                                let _ = std::fs::remove_file(&part_path);
-                                if self.jobs[i].advance_mirror() {
-                                    let next_url = self.jobs[i].url().to_string();
-                                    self.event_tx
-                                        .send(CoreEvent::JobMirrorFailover {
-                                            job_id: job_id.clone(),
-                                            previous_url: current_url,
-                                            next_url,
-                                            error: err,
-                                        })
-                                        .map_err(|_| "event channel closed".to_string())?;
-                                    self.persist_queue_now()?;
-                                    continue 'seg_loop;
-                                }
-                                self.finalize_failed_job(&job_id, i, err)?;
-                                break 'seg_loop None;
-                            }
-                        }
-                    };
-
-                    match seg_result {
-                        Some((total_size, _bytes_written, paused)) => {
-                            self.jobs[i].set_total_bytes(Some(total_size));
-                            if paused {
-                                self.sync_job_progress(&job_id, bytes_received)?;
-                                self.finalize_stop_after_transfer(&job_id)?;
-                                return Ok(());
-                            }
-
-                            let on_disk = self.sync_job_progress(&job_id, bytes_received)?;
-                            self.event_tx
-                                .send(CoreEvent::JobProgress {
-                                    job_id: job_id.clone(),
-                                    bytes_downloaded: on_disk,
-                                    total_bytes: Some(total_size),
-                                })
-                                .map_err(|_| "event channel closed".to_string())?;
-
-                            if on_disk >= total_size {
-                                self.complete_job_file(
-                                    &job_id, i, &part_path, &file_path, total_size,
-                                )?;
-                            } else {
-                                self.flush_pending_progress()?;
-                            }
-                        }
-                        None => return Ok(()),
-                    }
-                    return Ok(());
-                }
-            }
-
-            let range = if bytes_received > 0 {
-                Some(bytes_received..u64::MAX)
-            } else {
-                None
-            };
-
-            let known_total = self.http.file_size(&url).ok().filter(|&n| n > 0);
-            if let Some(total) = known_total {
-                self.jobs[i].set_total_bytes(Some(total));
-            }
-            let total_for_progress = self.jobs[i].total_bytes();
-
+    /// On transfer error: advance to the next mirror (returns `true` to retry)
+    /// or finalize the job Failed.
+    fn fail_or_failover(
+        &mut self,
+        job_id: &str,
+        job_index: usize,
+        failed_url: String,
+        err: String,
+    ) -> Result<bool, String> {
+        if self.jobs[job_index].advance_mirror() {
+            let next_url = self.jobs[job_index].url().to_string();
             self.event_tx
-                .send(CoreEvent::JobProgress {
-                    job_id: job_id.clone(),
-                    bytes_downloaded: bytes_received,
-                    total_bytes: total_for_progress,
+                .send(CoreEvent::JobMirrorFailover {
+                    job_id: job_id.to_string(),
+                    previous_url: failed_url,
+                    next_url,
+                    error: err,
                 })
                 .map_err(|_| "event channel closed".to_string())?;
+            self.persist_queue_now()?;
+            Ok(true)
+        } else {
+            self.finalize_failed_job(job_id, job_index, err)?;
+            Ok(false)
+        }
+    }
 
-            std::fs::create_dir_all(&dest)
-                .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
-
-            let file_path = dest.join(&filename);
-            let part_path = Self::part_path_for(&file_path);
-
-            if bytes_received > 0 && !part_path.exists() && file_path.exists() {
-                std::fs::rename(&file_path, &part_path).map_err(|e| {
-                    format!("migrate partial {file_path:?} -> {part_path:?}: {e}")
-                })?;
-            }
-
-            let live_bytes = self.jobs[i].live_downloaded();
-            live_bytes.store(bytes_received, Ordering::Release);
-            let progress = TransferProgress {
-                job_id: job_id.clone(),
-                event_tx: self.event_tx.clone(),
-                total_bytes: total_for_progress,
-                live_bytes,
+    /// Synchronous transfer used by [`Core::process_pending`]: plans, runs and
+    /// finishes the job while the caller holds `&mut self` (tests and the
+    /// single-threaded shell loop). The threaded path is
+    /// [`Core::dispatch_pending`].
+    fn transfer_job_at_index(
+        &mut self,
+        i: usize,
+        global_bucket: &Option<SharedTokenBucket>,
+    ) -> Result<(), String> {
+        let job_id = self.jobs[i].id().to_string();
+        loop {
+            let Some(plan) = self.plan_unlocked_transfer(&job_id, global_bucket)? else {
+                return Ok(());
             };
-
-            let job_fetch = 'fetch_loop: loop {
-                let current_url = self.jobs[i].url().to_string();
-                let outcome = execute_single_fetch(SingleFetchParams {
-                    http: self.http.clone(),
-                    url: current_url.clone(),
-                    part_path: part_path.clone(),
-                    range: range.clone(),
-                    append: bytes_received > 0,
-                    truncate: bytes_received == 0,
-                    global_bucket: global_bucket.clone(),
-                    job_bucket: job_bucket.clone(),
-                    pause_requested: pause_requested.clone(),
-                    transfer_active: transfer_active.clone(),
-                    progress: Some(progress.clone()),
-                });
-
-                if outcome.paused {
-                    break 'fetch_loop Some(outcome);
-                }
-
-                match outcome.fetch {
-                    Ok(_result) => break 'fetch_loop Some(outcome),
-                    Err(err) => {
-                        if self.jobs[i].advance_mirror() {
-                            let next_url = self.jobs[i].url().to_string();
-                            self.event_tx
-                                .send(CoreEvent::JobMirrorFailover {
-                                    job_id: job_id.clone(),
-                                    previous_url: current_url,
-                                    next_url,
-                                    error: err,
-                                })
-                                .map_err(|_| "event channel closed".to_string())?;
-                            self.persist_queue_now()?;
-                            continue 'fetch_loop;
-                        }
-                        self.finalize_failed_job(&job_id, i, err)?;
-                        break 'fetch_loop None;
-                    }
-                }
-            };
-
-            let outcome = match job_fetch {
-                Some(outcome) => outcome,
-                None => return Ok(()),
-            };
-
-            if outcome.paused {
-                self.sync_job_progress(&job_id, bytes_received)?;
-                self.finalize_stop_after_transfer(&job_id)?;
+            let outcome = plan.run();
+            if !self.finish_unlocked_transfer(&job_id, outcome)? {
                 return Ok(());
             }
-
-            let reported = outcome.fetch?.total_length;
-            let on_disk = self.sync_job_progress(&job_id, bytes_received)?;
-            let total_opt = self.jobs[i].total_bytes().or_else(|| {
-                if reported > 0 {
-                    Some(reported)
-                } else {
-                    None
-                }
-            });
-            if self.jobs[i].total_bytes().is_none() {
-                self.jobs[i].set_total_bytes(total_opt);
-            }
-
-            self.event_tx
-                .send(CoreEvent::JobProgress {
-                    job_id: job_id.clone(),
-                    bytes_downloaded: on_disk,
-                    total_bytes: total_opt,
-                })
-                .map_err(|_| "event channel closed".to_string())?;
-
-            match total_opt {
-                Some(total) if on_disk >= total => {
-                    self.complete_job_file(&job_id, i, &part_path, &file_path, total)?;
-                }
-                Some(_) => {
-                    self.flush_pending_progress()?;
-                }
-                None => {
-                    // Unknown size: successful fetch to EOF is complete.
-                    self.complete_job_file(&job_id, i, &part_path, &file_path, on_disk)?;
-                }
-            }
-        Ok(())
+        }
     }
 
     fn sync_job_progress(&mut self, job_id: &str, bytes_before: u64) -> Result<u64, String> {
@@ -2503,104 +2580,6 @@ impl Core {
             self.download_archive.save(root)?;
         }
         Ok(())
-    }
-
-    fn segmented_fetch(
-        &self,
-        url: &str,
-        part_path: &Path,
-        global_bucket: Option<SharedTokenBucket>,
-        job_bucket: Option<SharedTokenBucket>,
-        pause_requested: Arc<std::sync::atomic::AtomicBool>,
-        transfer_active: Arc<std::sync::atomic::AtomicBool>,
-        progress: Option<TransferProgress>,
-    ) -> Result<(u64, u64, bool), String> {
-        transfer_active.store(true, Ordering::Release);
-        let result = self.run_segmented_fetch(
-            url,
-            part_path,
-            global_bucket,
-            job_bucket,
-            pause_requested,
-            progress,
-        );
-        transfer_active.store(false, Ordering::Release);
-        result
-    }
-
-    fn run_segmented_fetch(
-        &self,
-        url: &str,
-        part_path: &Path,
-        global_bucket: Option<SharedTokenBucket>,
-        job_bucket: Option<SharedTokenBucket>,
-        pause_requested: Arc<std::sync::atomic::AtomicBool>,
-        progress: Option<TransferProgress>,
-    ) -> Result<(u64, u64, bool), String> {
-        let total_size = self.http.file_size(url)?;
-        if total_size == 0 {
-            return Err("empty file, nothing to download".to_string());
-        }
-
-        std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(part_path)
-            .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
-
-        let seg_count = DEFAULT_SEGMENT_COUNT.min(total_size);
-        let seg_size = total_size / seg_count;
-        let mut segments: Vec<Range<u64>> = Vec::with_capacity(seg_count as usize);
-        for s in 0..seg_count {
-            let start = s * seg_size;
-            let end = if s == seg_count - 1 {
-                total_size
-            } else {
-                (s + 1) * seg_size
-            };
-            if start < end {
-                segments.push(start..end);
-            }
-        }
-
-        let http = self.http.clone();
-        let url_owned = url.to_string();
-        let part_path_owned = part_path.to_path_buf();
-
-        let segment_results: Vec<Result<u64, String>> = std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-            for range in segments {
-                let http_ref = http.clone();
-                let url_ref = url_owned.clone();
-                let part_ref = part_path_owned.clone();
-                let global = global_bucket.clone();
-                let job = job_bucket.clone();
-                let pause = pause_requested.clone();
-                let prog = progress.clone();
-                handles.push(scope.spawn(move || {
-                    execute_segment_fetch(SegmentFetchParams {
-                        http: http_ref,
-                        url: url_ref,
-                        part_path: part_ref,
-                        range,
-                        global_bucket: global,
-                        job_bucket: job,
-                        pause_requested: pause,
-                        progress: prog,
-                    })
-                }));
-            }
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-
-        let mut bytes_written = 0u64;
-        for result in segment_results {
-            bytes_written = bytes_written.saturating_add(result?);
-        }
-
-        let paused = pause_requested.load(Ordering::Acquire);
-        Ok((total_size, bytes_written, paused))
     }
 
     // -----------------------------------------------------------------------

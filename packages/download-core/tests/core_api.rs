@@ -7116,3 +7116,211 @@ fn clear_pending_probe_allows_re_probe_after_cancel() {
     assert!(core.find_active_job_for_url(url).is_none());
 }
 
+
+// ---------------------------------------------------------------------------
+// Transfers run outside the Core mutex (extractor + segmented)
+// ---------------------------------------------------------------------------
+
+/// Range-capable fake that streams slowly so a transfer can be paused mid-way.
+#[derive(Clone)]
+struct SlowRangeFakeHttp {
+    responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    delay_per_byte: std::time::Duration,
+}
+
+impl HttpBackend for SlowRangeFakeHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        let full_body = {
+            let responses = self.responses.lock().unwrap();
+            responses
+                .get(url)
+                .cloned()
+                .ok_or_else(|| format!("no fake response for {url}"))?
+        };
+        let total = full_body.len() as u64;
+        let data = match range {
+            Some(r) => {
+                let start = r.start.min(total);
+                let end = r.end.min(total).max(start);
+                &full_body[start as usize..end as usize]
+            }
+            None => full_body.as_slice(),
+        };
+        let mut written = 0u64;
+        for byte in data {
+            let n = sink
+                .write(std::slice::from_ref(byte))
+                .map_err(|e| format!("sink write: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            written += n as u64;
+            std::thread::sleep(self.delay_per_byte);
+        }
+        Ok(FetchResult {
+            total_length: total,
+            bytes_written: written,
+        })
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        let responses = self.responses.lock().unwrap();
+        responses
+            .get(url)
+            .map(|b| b.len() as u64)
+            .ok_or_else(|| format!("no fake response for {url}"))
+    }
+}
+
+fn wait_for_status(core: &Arc<Mutex<Core>>, job_id: &str, status: &str, timeout: std::time::Duration) {
+    let started = std::time::Instant::now();
+    loop {
+        let snap = core
+            .lock()
+            .unwrap()
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id);
+        match snap {
+            Some(s) if s.status == status => return,
+            Some(s) => {
+                assert!(
+                    started.elapsed() < timeout,
+                    "job {job_id} did not reach status {status:?} (now {:?})",
+                    s.status
+                );
+            }
+            None => {
+                assert!(started.elapsed() < timeout, "job {job_id} vanished");
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn extractor_download_does_not_hold_core_mutex() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=unlocked-ext",
+        "Unlocked Extractor Video",
+        "https://cdn.youtube.com/unlocked-ext.mp4",
+        vec![("720p", "720p")],
+    );
+    let chunks_written = toolchain.enable_slow_download(40, std::time::Duration::from_millis(20));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.probe("https://www.youtube.com/watch?v=unlocked-ext").unwrap();
+    collect_events(&rx);
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=unlocked-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_id = core.confirm_probe_selection(&selection, None).unwrap()[0].clone();
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+
+    let started = std::time::Instant::now();
+    while *chunks_written.lock().unwrap() == 0 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "extractor download never became active"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    // While yt-dlp (the fake) is mid-download, queue reads must not block.
+    let t0 = std::time::Instant::now();
+    let snapshots = core.lock().unwrap().list_job_snapshots();
+    let waited = t0.elapsed();
+    assert!(
+        waited < std::time::Duration::from_millis(300),
+        "list_job_snapshots blocked for {waited:?} during an extractor download"
+    );
+    assert_eq!(snapshots.len(), 1);
+    assert!(
+        *chunks_written.lock().unwrap() < 40,
+        "snapshot should have been taken mid-download"
+    );
+
+    wait_for_status(&core, &job_id, "completed", std::time::Duration::from_secs(10));
+    let events = collect_events(&rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { job_id: id, .. } if id == &job_id)),
+        "expected JobCompleted, got {events:?}"
+    );
+}
+
+#[test]
+fn segmented_pause_then_resume_produces_intact_file() {
+    let content: Vec<u8> = (0..400u32).map(|i| (i % 251) as u8).collect();
+    let mut map = std::collections::HashMap::new();
+    map.insert("https://example.com/seg-pause.bin".to_string(), content.clone());
+    let http = SlowRangeFakeHttp {
+        responses: Arc::new(Mutex::new(map)),
+        delay_per_byte: std::time::Duration::from_millis(2),
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/seg-pause.bin");
+    let signals = core.job_signals();
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+
+    // Let the four segments write a little, then pause.
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    signals
+        .request_pause(&job_id)
+        .expect("pause flag registered")
+        .store(true, std::sync::atomic::Ordering::Release);
+    wait_for_status(&core, &job_id, "paused", std::time::Duration::from_secs(5));
+
+    let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
+    let part_path = job_dir.join("seg-pause.bin.part");
+    assert!(
+        !part_path.exists(),
+        "interrupted segmented partial has holes and must be dropped, not resumed"
+    );
+    let paused_snap = core
+        .lock()
+        .unwrap()
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap();
+    assert_eq!(paused_snap.bytes_downloaded, 0, "no resumable bytes after segmented pause");
+    collect_events(&rx);
+
+    // Resume: the transfer restarts and must produce byte-identical output.
+    {
+        let mut guard = core.lock().unwrap();
+        guard.resume_job(&job_id).unwrap();
+    }
+    Core::dispatch_pending(core.clone()).unwrap();
+    wait_for_status(&core, &job_id, "completed", std::time::Duration::from_secs(20));
+
+    let final_path = job_dir.join("seg-pause.bin");
+    let on_disk = std::fs::read(&final_path).expect("final file written");
+    assert_eq!(on_disk, content, "resumed segmented download must be intact");
+}
