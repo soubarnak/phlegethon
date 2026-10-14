@@ -1,0 +1,472 @@
+// Carbon Design System (g10 light / g100 dark) for the Phlegethon shell.
+@use "@carbon/react" with (
+  $css--font-face: false,
+  $use-akamai-cdn: false
+);
+@use "@carbon/react/scss/theme";
+@use "@carbon/react/scss/themes";
+@use "@carbon/react/scss/spacing" as *;
+@use "@carbon/react/scss/type" as *;
+@use "@carbon/react/scss/breakpoint" as *;
+@use "./fonts";
+
+// Theme zones: the app toggles data-theme on <html>; Carbon's own zone
+// classes (.cds--g100 etc.) remain available for nested inversions.
+:root,
+:root[data-theme="g10"] {
+  @include theme.theme(themes.$g10);
+  color-scheme: light;
+}
+
+:root[data-theme="g100"] {
+  @include theme.theme(themes.$g100);
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--cds-background);
+  color: var(--cds-text-primary);
+  overflow: hidden;
+}
+
+// ---------------------------------------------------------------------------
+// App layout
+// ---------------------------------------------------------------------------
+
+.ph-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.ph-main {
+  // Carbon's Header is fixed at 3rem.
+  padding-top: 3rem;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ph-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: $spacing-05 $spacing-06 0;
+  gap: $spacing-05;
+  background: var(--cds-background);
+
+  .cds--tabs {
+    flex: none;
+  }
+
+  .cds--tab-content {
+    padding: 0;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+.ph-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-05;
+  padding-top: $spacing-05;
+  overflow: hidden;
+}
+
+.ph-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+// ---------------------------------------------------------------------------
+// URL bar
+// ---------------------------------------------------------------------------
+
+.ph-urlbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: $spacing-03 $spacing-05;
+  align-items: start;
+  padding: $spacing-05;
+  background: var(--cds-layer-01);
+  border: 1px solid transparent;
+  transition: border-color 110ms, background 110ms;
+
+  &.is-dragging {
+    border-color: var(--cds-focus);
+    background: var(--cds-layer-selected-01);
+  }
+
+  .cds--text-area {
+    min-height: 2.5rem;
+    resize: vertical;
+    font-family: "IBM Plex Mono", monospace;
+  }
+
+  .cds--text-area__wrapper {
+    width: 100%;
+  }
+}
+
+.ph-urlbar__actions {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-03;
+  align-items: stretch;
+  padding-top: 1.5rem; // align with the TextArea below its label
+}
+
+.ph-urlbar__meta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-03 $spacing-05;
+  min-height: 1.5rem;
+
+  .cds--toggle {
+    margin-left: auto;
+  }
+}
+
+.ph-dest-tag {
+  max-width: 100%;
+
+  .cds--tag__label {
+    max-width: 32rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: "IBM Plex Mono", monospace;
+    @include type-style("code-01");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Queue table
+// ---------------------------------------------------------------------------
+
+.ph-queue {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+
+  .cds--data-table-container {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .cds--data-table-content {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .cds--data-table td {
+    vertical-align: middle;
+  }
+}
+
+.ph-queue__title {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.ph-queue__title-text {
+  @include type-style("body-compact-01");
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 34rem;
+}
+
+.ph-queue__url {
+  @include type-style("helper-text-01");
+  color: var(--cds-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 34rem;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.ph-queue__progress {
+  min-width: 14rem;
+
+  .cds--progress-bar__helper-text {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.ph-queue__error {
+  margin-top: $spacing-02;
+  max-width: 34rem;
+  @include type-style("helper-text-01");
+  color: var(--cds-text-error);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ph-queue__tags {
+  display: flex;
+  gap: $spacing-02;
+  flex-wrap: wrap;
+}
+
+.ph-queue__toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: $spacing-03;
+
+  .cds--dropdown__wrapper {
+    min-width: 10rem;
+  }
+}
+
+.ph-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: $spacing-03;
+  padding: $spacing-09 $spacing-05;
+  text-align: center;
+  color: var(--cds-text-secondary);
+  @include type-style("body-01");
+}
+
+// ---------------------------------------------------------------------------
+// Probe modal
+// ---------------------------------------------------------------------------
+
+.ph-probe {
+  .cds--modal-container {
+    max-height: 92vh;
+  }
+
+  .cds--modal-content {
+    padding-top: $spacing-05;
+  }
+}
+
+.ph-probe__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-03 $spacing-05;
+  margin-bottom: $spacing-05;
+  @include type-style("body-compact-01");
+  color: var(--cds-text-secondary);
+}
+
+.ph-probe__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-03;
+  margin-bottom: $spacing-03;
+
+  .ph-probe__spacer {
+    flex: 1;
+  }
+
+  .cds--dropdown__wrapper {
+    min-width: 12rem;
+  }
+}
+
+.ph-probe__item-title {
+  @include type-style("body-compact-01");
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 28rem;
+}
+
+.ph-probe__item-sub {
+  @include type-style("helper-text-01");
+  color: var(--cds-text-secondary);
+}
+
+.ph-probe__quality {
+  min-width: 11rem;
+}
+
+.ph-probe__section {
+  margin-top: $spacing-05;
+}
+
+.ph-probe__dest {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: $spacing-03;
+  margin-top: $spacing-05;
+}
+
+.ph-probe__dest-path {
+  font-family: "IBM Plex Mono", monospace;
+  @include type-style("code-01");
+  color: var(--cds-text-secondary);
+  word-break: break-all;
+}
+
+.ph-probe__loading {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-05;
+  padding: $spacing-07 0;
+}
+
+.ph-probe__url {
+  font-family: "IBM Plex Mono", monospace;
+  @include type-style("code-01");
+  word-break: break-all;
+  color: var(--cds-text-secondary);
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+.ph-settings {
+  max-width: 64rem;
+  padding-bottom: $spacing-09;
+}
+
+.ph-settings__section {
+  padding: $spacing-06 0;
+  border-bottom: 1px solid var(--cds-border-subtle-01);
+
+  h3 {
+    @include type-style("heading-03");
+    margin: 0 0 $spacing-02;
+  }
+
+  p.ph-settings__hint {
+    @include type-style("body-compact-01");
+    color: var(--cds-text-secondary);
+    margin: 0 0 $spacing-05;
+    max-width: 48rem;
+  }
+}
+
+.ph-settings__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: $spacing-05;
+
+  > .cds--form-item,
+  > .cds--text-input__field-wrapper,
+  > .cds--number {
+    flex: 1 1 16rem;
+    min-width: 0;
+  }
+}
+
+.ph-settings__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: $spacing-03 $spacing-06;
+}
+
+.ph-settings__path {
+  flex: 1 1 24rem;
+}
+
+.ph-settings__preview {
+  margin-top: $spacing-03;
+  font-family: "IBM Plex Mono", monospace;
+  @include type-style("code-01");
+  color: var(--cds-text-secondary);
+  word-break: break-all;
+}
+
+.ph-toolchain__row-cell {
+  display: flex;
+  align-items: center;
+  gap: $spacing-03;
+  flex-wrap: wrap;
+}
+
+.ph-toolchain__path {
+  font-family: "IBM Plex Mono", monospace;
+  @include type-style("code-01");
+  color: var(--cds-text-secondary);
+  word-break: break-all;
+}
+
+.ph-toolchain__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-03;
+  margin-top: $spacing-05;
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+.ph-history__title {
+  @include type-style("body-compact-01");
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 34rem;
+}
+
+// ---------------------------------------------------------------------------
+// Toasts
+// ---------------------------------------------------------------------------
+
+.ph-toasts {
+  position: fixed;
+  right: $spacing-05;
+  bottom: $spacing-05;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-03;
+  z-index: 9000;
+  max-width: 28rem;
+
+  .cds--toast-notification {
+    margin: 0;
+  }
+}
+
+.ph-mono {
+  font-family: "IBM Plex Mono", monospace;
+  @include type-style("code-01");
+}
+
+.ph-muted {
+  color: var(--cds-text-secondary);
+}
+
+.ph-break {
+  word-break: break-all;
+}

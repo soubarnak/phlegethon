@@ -1,15 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window (local assets + localhost dev)",
-  "windows": ["main"],
-  "remote": {
-    "urls": ["http://localhost:8000/*", "http://127.0.0.1:8000/*"]
-  },
+  "description": "Capability for the main window (bundled assets only)",
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "dialog:default",
     "opener:default",
-    "notification:default"
+    "notification:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
   ]
 }
