@@ -1,14 +1,25 @@
 name: Release
 
-# Push a tag like v0.1.0 (it must match `version=` in the xbps template) to build the
-# source tarball and the x86_64 xbps packages (glibc and musl) and publish them as a
-# GitHub release. Run it by hand (Actions > Release > Run workflow) to build without
-# publishing.
+# Builds the source tarball and the x86_64 xbps packages (glibc and musl) and publishes
+# them as a GitHub release. Two ways to release (the version must match `version=` in
+# the xbps template and Cargo.toml):
+#   - push a tag like v0.1.0, or
+#   - Actions > Release > Run workflow with `version` set to 0.1.0: the release and
+#     its v0.1.0 tag are created on the commit the workflow ran on.
+# Running it by hand with `version` empty builds everything without publishing.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.1.0 (empty: build only, do not publish)"
+        required: false
+        default: ""
+
+env:
+  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || (inputs.version != '' && format('v{0}', inputs.version) || '') }}
 
 permissions:
   contents: write
@@ -45,12 +56,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Tag matches the package version
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Release version matches the package version
+        if: env.RELEASE_TAG != ''
         run: |
           version=$(sed -n 's/^version=//p' packaging/void/srcpkgs/phlegethon/template)
           cargo_version=$(awk -F'"' '/^\[workspace.package\]/{f=1} f&&/^version/{print $2; exit}' Cargo.toml)
-          tag=${GITHUB_REF_NAME#v}
+          tag=${RELEASE_TAG#v}
           echo "tag=$tag template=$version cargo=$cargo_version"
           [ "$tag" = "$version" ] && [ "$tag" = "$cargo_version" ]
       - uses: actions/setup-node@v4
@@ -99,7 +110,7 @@ jobs:
   release:
     name: Publish
     needs: [test, xbps]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref_type == 'tag' || inputs.version != ''
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -113,10 +124,14 @@ jobs:
           cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Phlegethon ${{ env.RELEASE_TAG }}
+          # A manual run creates the tag on the commit it built.
+          target_commitish: ${{ github.sha }}
           files: artifacts/*
           fail_on_unmatched_files: true
           body: |
-            Phlegethon ${{ github.ref_name }} for Void Linux (x86_64).
+            Phlegethon ${{ env.RELEASE_TAG }} for Void Linux (x86_64).
 
             | File | For |
             | --- | --- |
@@ -128,7 +143,7 @@ jobs:
 
             ```sh
             mkdir phlegethon-repo && cd phlegethon-repo
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/<file>.xbps
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/<file>.xbps
             xbps-rindex -a *.xbps
             sudo xbps-install --repository="$PWD" phlegethon
             ```
