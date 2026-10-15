@@ -2,3 +2,8 @@ target/
 
 __pycache__/
 *.py[cod]
+packages/tauri-shell/frontend/node_modules/
+packages/tauri-shell/frontend/dist/
+dist/
+.void-packages/
+out/

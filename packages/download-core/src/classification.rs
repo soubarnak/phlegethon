@@ -54,7 +54,7 @@ pub fn classify(url: &Url) -> Kind {
 ///
 /// URLs matching these domains always classify as `ProbeThenConfirm`
 /// regardless of path or extension.
-fn is_launch_site(url: &Url) -> bool {
+pub fn is_launch_site(url: &Url) -> bool {
     const LAUNCH_SITES: &[&str] = &[
         "youtube.com",
         "www.youtube.com",

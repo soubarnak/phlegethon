@@ -6,7 +6,11 @@ use std::path::PathBuf;
 /// Events emitted by the Download Core.
 ///
 /// Shells consume these in their event loop to update UI state.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serialises as a tagged object (`"type": "JobProgress"`, ...) for the
+/// Tauri event channel.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "type")]
 pub enum CoreEvent {
     /// A probe completed with discovered items and qualities.
     /// Emitted after `Core::probe()` successfully returns.

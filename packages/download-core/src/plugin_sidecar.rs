@@ -35,17 +35,26 @@ pub struct PluginManifest {
     pub version: String,
     /// Package directory name under `yt-dlp-plugins/`.
     pub package: String,
-    /// Extractor IE keys this package provides (e.g. `"LuxureTV"`, `"XxxbpTV"`).
+    /// Extractor IE keys this package provides (e.g. `"LuxureTV"`, `"XxxbpTVList"`).
     pub extractors: Vec<String>,
+    /// SHA-256 of the files installed from the copy bundled in the app. Lets a
+    /// same-version edit (or a damaged install) be refreshed on launch. Absent for
+    /// packages installed from a catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundled_sha256: Option<String>,
 }
 
 impl PluginManifest {
     /// Canonical manifest for the in-tree Launch Site plugin package.
     pub fn launch_sites_default() -> Self {
         Self {
-            version: "0.1.0".to_string(),
+            version: "0.2.0".to_string(),
             package: PLUGIN_PACKAGE_NAME.to_string(),
-            extractors: vec!["LuxureTV".to_string(), "XxxbpTV".to_string()],
+            extractors: ["LuxureTV", "LuxureTVList", "XxxbpTV", "XxxbpTVList"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            bundled_sha256: None,
         }
     }
 }
@@ -158,6 +167,127 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Plugins bundled in the app
+// ---------------------------------------------------------------------------
+
+/// Files of the in-tree Launch Site plugin package, embedded at compile time so
+/// a fresh install works without any catalog, package layout or network.
+const BUNDLED_FILES: &[(&str, &str)] = &[
+    (
+        "yt_dlp_plugins/extractor/_parse.py",
+        include_str!("../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/_parse.py"),
+    ),
+    (
+        "yt_dlp_plugins/extractor/luxuretv.py",
+        include_str!("../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/luxuretv.py"),
+    ),
+    (
+        "yt_dlp_plugins/extractor/xxxbp.py",
+        include_str!("../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/xxxbp.py"),
+    ),
+];
+
+const BUNDLED_MANIFEST_JSON: &str = include_str!("../../extractor-plugins/plugins-manifest.json");
+
+/// What [`ensure_bundled_plugins`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundledInstall {
+    /// The bundled package was written (first run, newer than installed, or refreshed).
+    Installed { version: String },
+    /// The installed package already matches the bundled one.
+    UpToDate,
+    /// A newer package (from an out-of-band update) is installed and was left alone.
+    KeptNewer { installed: String },
+}
+
+/// Manifest of the plugin package embedded in this build.
+pub fn bundled_manifest() -> PluginManifest {
+    let mut manifest: PluginManifest = serde_json::from_str(BUNDLED_MANIFEST_JSON)
+        .expect("bundled plugins-manifest.json is valid (checked by a unit test)");
+    manifest.bundled_sha256 = Some(bundled_digest());
+    manifest
+}
+
+fn bundled_digest() -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for (path, content) in BUNDLED_FILES {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(content.as_bytes());
+        hasher.update([0]);
+    }
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `a.b.c` comparison on the numeric components; non-numeric parts count as 0.
+pub fn version_is_newer(candidate: &str, installed: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split(['.', '-', '+'])
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    }
+    let (mut a, mut b) = (parts(candidate), parts(installed));
+    let len = a.len().max(b.len());
+    a.resize(len, 0);
+    b.resize(len, 0);
+    a > b
+}
+
+fn package_dir_has_files(sidecar_root: &Path, package: &str) -> bool {
+    plugin_dirs_path(sidecar_root)
+        .map(|dirs| dirs.join(package).join("yt_dlp_plugins").is_dir())
+        .unwrap_or(false)
+}
+
+/// Install the plugin package embedded in this build into `sidecar_root`, unless
+/// an equal or newer one is already there.
+///
+/// Call once at startup, before the yt-dlp configuration is built. A package that
+/// was updated out of band to a higher version is never downgraded.
+pub fn ensure_bundled_plugins(sidecar_root: &Path) -> Result<BundledInstall, String> {
+    let bundled = bundled_manifest();
+    if let Ok(installed) = load_manifest(sidecar_root) {
+        if package_dir_has_files(sidecar_root, &installed.package) {
+            if version_is_newer(&installed.version, &bundled.version) {
+                return Ok(BundledInstall::KeptNewer {
+                    installed: installed.version,
+                });
+            }
+            if installed.version == bundled.version
+                && installed.bundled_sha256 == bundled.bundled_sha256
+            {
+                return Ok(BundledInstall::UpToDate);
+            }
+        }
+    }
+
+    fs::create_dir_all(sidecar_root)
+        .map_err(|e| format!("create sidecar root {}: {e}", sidecar_root.display()))?;
+    let staging = sidecar_root.join(format!(".bundled-plugins-{}", std::process::id()));
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|e| format!("clear staging {}: {e}", staging.display()))?;
+    }
+    let result = (|| {
+        for (rel, content) in BUNDLED_FILES {
+            let path = staging.join(rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("create {}: {e}", parent.display()))?;
+            }
+            fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
+        install_plugin_package(sidecar_root, &staging, &bundled)
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    result.map(|_| BundledInstall::Installed {
+        version: bundled.version,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,9 +323,10 @@ mod tests {
         write_manifest(tmp.path(), &manifest).unwrap();
         let loaded = load_manifest(tmp.path()).unwrap();
         assert_eq!(loaded, manifest);
-        assert_eq!(loaded.version, "0.1.0");
+        assert_eq!(loaded.version, "0.2.0");
         assert!(loaded.extractors.contains(&"LuxureTV".to_string()));
         assert!(loaded.extractors.contains(&"XxxbpTV".to_string()));
+        assert!(loaded.extractors.contains(&"XxxbpTVList".to_string()));
     }
 
     #[test]
@@ -208,8 +339,8 @@ mod tests {
     #[test]
     fn needs_update_when_versions_differ() {
         let installed = PluginManifest::launch_sites_default();
-        assert!(needs_update(&installed, "0.2.0"));
-        assert!(!needs_update(&installed, "0.1.0"));
+        assert!(needs_update(&installed, "0.3.0"));
+        assert!(!needs_update(&installed, "0.2.0"));
     }
 
     #[test]
@@ -237,7 +368,7 @@ mod tests {
             .is_file());
 
         let loaded = load_manifest(&sidecar).unwrap();
-        assert_eq!(loaded.version, "0.1.0");
+        assert_eq!(loaded.version, "0.2.0");
     }
 
     #[test]
@@ -268,7 +399,7 @@ mod tests {
             b"v2-updated",
         )
         .unwrap();
-        manifest.version = "0.2.0".to_string();
+        manifest.version = "0.3.0".to_string();
         install_plugin_package(&sidecar, &source_v2, &manifest).unwrap();
 
         let content = fs::read_to_string(
@@ -281,7 +412,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(content, "v2-updated");
-        assert_eq!(load_manifest(&sidecar).unwrap().version, "0.2.0");
+        assert_eq!(load_manifest(&sidecar).unwrap().version, "0.3.0");
     }
 
     #[test]
@@ -296,5 +427,100 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("yt_dlp_plugins"), "got: {err}");
+    }
+
+    #[test]
+    fn bundled_manifest_matches_the_in_tree_file_and_lists_every_extractor() {
+        let m = bundled_manifest();
+        assert_eq!(m.package, PLUGIN_PACKAGE_NAME);
+        assert_eq!(m.version, PluginManifest::launch_sites_default().version);
+        for key in ["LuxureTV", "LuxureTVList", "XxxbpTV", "XxxbpTVList"] {
+            assert!(m.extractors.iter().any(|e| e == key), "{key}");
+        }
+        assert_eq!(m.bundled_sha256.as_deref().map(str::len), Some(64));
+    }
+
+    #[test]
+    fn version_ordering_is_numeric_not_lexical() {
+        assert!(version_is_newer("0.10.0", "0.9.0"));
+        assert!(version_is_newer("1.0", "0.9.9"));
+        assert!(!version_is_newer("0.2.0", "0.2.0"));
+        assert!(!version_is_newer("0.2.0", "0.2.1"));
+        assert!(version_is_newer("v0.3.0", "0.2.9"));
+    }
+
+    #[test]
+    fn first_run_installs_the_bundled_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = ensure_bundled_plugins(tmp.path()).unwrap();
+        assert!(matches!(outcome, BundledInstall::Installed { .. }));
+        let base = plugin_dirs_path(tmp.path()).unwrap().join(PLUGIN_PACKAGE_NAME);
+        for file in ["_parse.py", "luxuretv.py", "xxxbp.py"] {
+            assert!(base.join("yt_dlp_plugins/extractor").join(file).is_file(), "{file}");
+        }
+        assert_eq!(load_manifest(tmp.path()).unwrap().version, bundled_manifest().version);
+        // No staging directory is left behind.
+        let leftovers: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".bundled-plugins"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn second_run_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_bundled_plugins(tmp.path()).unwrap();
+        assert_eq!(ensure_bundled_plugins(tmp.path()).unwrap(), BundledInstall::UpToDate);
+    }
+
+    #[test]
+    fn missing_files_or_a_changed_digest_are_repaired() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_bundled_plugins(tmp.path()).unwrap();
+        let pkg = plugin_dirs_path(tmp.path()).unwrap().join(PLUGIN_PACKAGE_NAME);
+        fs::remove_dir_all(&pkg).unwrap();
+        assert!(matches!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::Installed { .. }
+        ));
+
+        let mut manifest = load_manifest(tmp.path()).unwrap();
+        manifest.bundled_sha256 = Some("stale".to_string());
+        write_manifest(tmp.path(), &manifest).unwrap();
+        assert!(matches!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::Installed { .. }
+        ));
+        assert_eq!(ensure_bundled_plugins(tmp.path()).unwrap(), BundledInstall::UpToDate);
+    }
+
+    #[test]
+    fn older_installed_package_is_upgraded_and_newer_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_bundled_plugins(tmp.path()).unwrap();
+
+        let mut old = load_manifest(tmp.path()).unwrap();
+        old.version = "0.0.1".to_string();
+        write_manifest(tmp.path(), &old).unwrap();
+        assert!(matches!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::Installed { .. }
+        ));
+
+        let marker = plugin_dirs_path(tmp.path())
+            .unwrap()
+            .join(PLUGIN_PACKAGE_NAME)
+            .join("yt_dlp_plugins/extractor/xxxbp.py");
+        fs::write(&marker, "# out-of-band update").unwrap();
+        let mut newer = load_manifest(tmp.path()).unwrap();
+        newer.version = "99.0.0".to_string();
+        write_manifest(tmp.path(), &newer).unwrap();
+        assert_eq!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::KeptNewer { installed: "99.0.0".to_string() }
+        );
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "# out-of-band update");
     }
 }

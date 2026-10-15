@@ -16,21 +16,27 @@
 //! [`FakeYtDlpExtractor`] returns canned yt-dlp JSON through the same parser.
 //! This module's unit tests use canned JSON strings.
 
-use crate::cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
-use crate::doh_ytdlp::{run_ytdlp_with_optional_doh_dns, ytdlp_command_with_optional_doh_dns};
-use crate::proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
+use crate::cookie_channel::{ytdlp_cookie_args, CookieChannel};
+use crate::doh_ytdlp::ytdlp_command_with_optional_doh_dns;
+use crate::proxy_settings::{ytdlp_proxy_args, ProxySettings};
+use crate::toolchain_discovery::{
+    classify_ytdlp_failure, detect_js_runtime, discover_ytdlp, find_in_path, path_dirs_from_env,
+    python_has_module, run_command_with_deadline_polling, tag_error, tool_version,
+    ytdlp_js_runtime_args, CommandOutcome, DiscoveryEnv, EjsStatus, JsRuntime, PlatformInfo,
+    ToolInfo, ToolchainStatus, YtDlpLauncher, YtDlpSource, ERROR_CODE_TIMEOUT,
+};
 use crate::extractor::{
-    ExtractorDownloadOutcome, ExtractorToolchain, MediaItem, ProbeResult, Quality,
+    ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult, Quality, is_generic_extractor_key,
 };
 use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtrasOptions};
 use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 
 // ---------------------------------------------------------------------------
@@ -52,13 +58,24 @@ use std::time::Duration;
 /// ```
 #[derive(Debug, Clone)]
 pub struct YtDlpConfig {
-    /// Path to the yt-dlp binary (or bare name on PATH).
+    /// Path to the yt-dlp binary (or bare name on PATH). Used when
+    /// [`Self::launcher`] is `None`.
     pub binary_path: PathBuf,
+    /// Resolved launcher (standalone binary or `python -m yt_dlp`).
+    pub launcher: Option<YtDlpLauncher>,
+    /// Where the launcher came from (Toolchain panel).
+    pub launcher_source: Option<YtDlpSource>,
     /// Optional directory containing ffmpeg/ffprobe binaries.
     pub ffmpeg_dir: Option<PathBuf>,
     /// Whether a JS runtime (e.g., deno, bun, node) is available for
     /// yt-dlp-ejs. Required for full YouTube format support.
     pub has_js_runtime: bool,
+    /// Detected JS runtime, passed to yt-dlp as `--js-runtimes`.
+    pub js_runtime: Option<JsRuntime>,
+    /// Let yt-dlp fetch `yt-dlp-ejs` from GitHub (`--remote-components ejs:github`).
+    pub remote_components: bool,
+    /// Ask yt-dlp to impersonate a browser TLS fingerprint when it can.
+    pub impersonate: bool,
     /// Timeout for probe operations (seconds). Default 30.
     pub probe_timeout_secs: u64,
     /// Extra directories passed to yt-dlp as `--plugin-dirs`.
@@ -72,8 +89,13 @@ impl Default for YtDlpConfig {
     fn default() -> Self {
         Self {
             binary_path: PathBuf::from("yt-dlp"),
+            launcher: None,
+            launcher_source: None,
             ffmpeg_dir: None,
             has_js_runtime: false,
+            js_runtime: None,
+            remote_components: false,
+            impersonate: true,
             probe_timeout_secs: 30,
             plugin_dirs: Vec::new(),
         }
@@ -81,6 +103,40 @@ impl Default for YtDlpConfig {
 }
 
 impl YtDlpConfig {
+    /// Discover yt-dlp, a JS runtime and ffmpeg from the real environment.
+    ///
+    /// Order: sidecar manifest → `YTDLP_PATH` → `yt-dlp` on PATH →
+    /// `python3 -m yt_dlp`. Falls back to the bare `yt-dlp` name so a later
+    /// install is picked up without restarting.
+    pub fn discover(sidecar_root: Option<&Path>) -> Self {
+        let path_dirs = path_dirs_from_env();
+        let python_check = |python: &Path| python_has_module(python, "yt_dlp");
+        let env = DiscoveryEnv {
+            env_ytdlp_path: std::env::var_os("YTDLP_PATH"),
+            path_dirs: &path_dirs,
+            python_has_ytdlp: &python_check,
+        };
+        let found = discover_ytdlp(sidecar_root, &env);
+        let js_runtime = detect_js_runtime(&path_dirs, &|p| tool_version(p, &["--version"]));
+        let mut config = Self {
+            binary_path: found
+                .as_ref()
+                .and_then(|(l, _)| l.binary_path().map(Path::to_path_buf))
+                .unwrap_or_else(|| PathBuf::from("yt-dlp")),
+            has_js_runtime: js_runtime.as_ref().is_some_and(|rt| rt.supported),
+            js_runtime,
+            ..Self::default()
+        };
+        if let Some((launcher, source)) = found {
+            config.launcher = Some(launcher);
+            config.launcher_source = Some(source);
+        }
+        if let Some(root) = sidecar_root {
+            config = config.with_sidecar_plugins(root);
+        }
+        config
+    }
+
     /// Attach app-managed Extractor Plugins from a sidecar root, if present.
     ///
     /// When `sidecar_root/yt-dlp-plugins` exists, it is appended to
@@ -125,6 +181,10 @@ pub struct YtDlpExtractorToolchain {
     /// Maps known site domains to their expected extractor_key prefixes.
     /// e.g. "youtube.com" → "Youtube"
     expected_extractors: HashMap<&'static str, &'static [&'static str]>,
+    /// Lazily probed `--help` flag support (`--js-runtimes`, `--impersonate`, ...).
+    supported_flags: Mutex<Option<HashSet<String>>>,
+    /// Lazily probed `--list-impersonate-targets` result.
+    impersonation_available: Mutex<Option<bool>>,
 }
 
 impl YtDlpExtractorToolchain {
@@ -160,15 +220,208 @@ impl YtDlpExtractorToolchain {
             sidecar_binary: Mutex::new(None),
             sidecar_plugin_dirs: Mutex::new(Vec::new()),
             expected_extractors,
+            supported_flags: Mutex::new(None),
+            impersonation_available: Mutex::new(None),
         }
     }
 
+    /// Effective yt-dlp binary path (sidecar override, then config).
+    ///
+    /// For a Python-module launcher this returns the interpreter path.
+    #[cfg(test)]
     fn effective_binary_path(&self) -> PathBuf {
-        self.sidecar_binary
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-            .unwrap_or_else(|| self.config.binary_path.clone())
+        match self.effective_launcher() {
+            YtDlpLauncher::Binary { path } => path,
+            YtDlpLauncher::PythonModule { python } => python,
+        }
+    }
+
+    /// Effective launcher: sidecar manifest binary → configured launcher → `binary_path`.
+    pub fn effective_launcher(&self) -> YtDlpLauncher {
+        if let Some(path) = self.sidecar_binary.lock().ok().and_then(|g| g.clone()) {
+            return YtDlpLauncher::binary(path);
+        }
+        self.config
+            .launcher
+            .clone()
+            .unwrap_or_else(|| YtDlpLauncher::binary(self.config.binary_path.clone()))
+    }
+
+    /// Does the active yt-dlp accept `flag` (from `--help`)? Cached per toolchain.
+    fn supports_flag(&self, flag: &str) -> bool {
+        let mut guard = match self.supported_flags.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        if guard.is_none() {
+            let mut cmd = self.effective_launcher().command();
+            cmd.arg("--help");
+            let flags = match run_command_with_deadline_polling(
+                &mut cmd,
+                None,
+                Some(Instant::now() + Duration::from_secs(15)),
+                Duration::from_millis(20),
+            ) {
+                Ok(CommandOutcome::Finished { stdout, .. }) => {
+                    let help = String::from_utf8_lossy(&stdout);
+                    help.split(|c: char| c.is_whitespace() || c == ',' || c == '=')
+                        .filter(|t| t.starts_with("--"))
+                        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-').to_string())
+                        .collect::<HashSet<String>>()
+                }
+                _ => HashSet::new(),
+            };
+            *guard = Some(flags);
+        }
+        guard.as_ref().is_some_and(|f| f.contains(flag))
+    }
+
+    /// Test seam: declare which flags the (fake) yt-dlp accepts.
+    pub fn set_supported_flags_for_test(&self, flags: &[&str]) {
+        if let Ok(mut guard) = self.supported_flags.lock() {
+            *guard = Some(flags.iter().map(|f| (*f).to_string()).collect());
+        }
+        if let Ok(mut guard) = self.impersonation_available.lock() {
+            *guard = Some(flags.contains(&"--impersonate"));
+        }
+    }
+
+    /// Can yt-dlp impersonate a browser (curl_cffi installed)? Cached.
+    fn impersonation_available(&self) -> bool {
+        if !self.supports_flag("--impersonate") {
+            return false;
+        }
+        let mut guard = match self.impersonation_available.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        if guard.is_none() {
+            let mut cmd = self.effective_launcher().command();
+            cmd.arg("--list-impersonate-targets");
+            let available = match run_command_with_deadline_polling(
+                &mut cmd,
+                None,
+                Some(Instant::now() + Duration::from_secs(15)),
+                Duration::from_millis(20),
+            ) {
+                Ok(CommandOutcome::Finished { status, stdout, .. }) if status.success() => {
+                    chrome_impersonation_listed(&String::from_utf8_lossy(&stdout))
+                }
+                _ => false,
+            };
+            *guard = Some(available);
+        }
+        guard.unwrap_or(false)
+    }
+
+    /// Runtime arguments shared by probe and download: JS runtime, remote
+    /// components and browser impersonation (each only when supported).
+    fn runtime_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.config.js_runtime.is_some() && self.supports_flag("--js-runtimes") {
+            args.extend(ytdlp_js_runtime_args(
+                self.config.js_runtime.as_ref(),
+                self.config.remote_components && self.supports_flag("--remote-components"),
+            ));
+        } else if self.config.remote_components && self.supports_flag("--remote-components") {
+            args.push("--remote-components".to_string());
+            args.push("ejs:github".to_string());
+        }
+        if self.config.impersonate && self.impersonation_available() {
+            args.push("--impersonate".to_string());
+            args.push("chrome".to_string());
+        }
+        args
+    }
+
+    /// Current tool versions and gaps for the Toolchain panel.
+    pub fn status(&self) -> ToolchainStatus {
+        let launcher = self.effective_launcher();
+        let path_dirs = path_dirs_from_env();
+        let ytdlp_version = {
+            let mut cmd = launcher.command();
+            cmd.arg("--version");
+            match run_command_with_deadline_polling(
+                &mut cmd,
+                None,
+                Some(Instant::now() + Duration::from_secs(15)),
+                Duration::from_millis(20),
+            ) {
+                Ok(CommandOutcome::Finished { status, stdout, .. }) if status.success() => {
+                    Some(String::from_utf8_lossy(&stdout).trim().to_string()).filter(|v| !v.is_empty())
+                }
+                _ => None,
+            }
+        };
+        let ytdlp = ytdlp_version.as_ref().map(|version| ToolInfo {
+            path: launcher.describe(),
+            version: Some(version.clone()),
+        });
+        let find_tool = |name: &str| -> Option<ToolInfo> {
+            let path = self
+                .config
+                .ffmpeg_dir
+                .as_ref()
+                .map(|d| d.join(name))
+                .filter(|p| p.is_file())
+                .or_else(|| find_in_path(name, &path_dirs))?;
+            Some(ToolInfo {
+                version: tool_version(&path, &["-version"]),
+                path: path.display().to_string(),
+            })
+        };
+        let ejs = match (&launcher, ytdlp.is_some()) {
+            (_, false) => EjsStatus::Unknown,
+            (YtDlpLauncher::PythonModule { python }, true) => {
+                if python_has_module(python, "yt_dlp_ejs") {
+                    EjsStatus::PythonPackage
+                } else {
+                    EjsStatus::Missing
+                }
+            }
+            (YtDlpLauncher::Binary { .. }, true) => {
+                // Distro packages depend on python3; a sibling interpreter with
+                // the module means the package is there. Standalone builds bundle it.
+                match find_in_path("python3", &path_dirs) {
+                    Some(python) if python_has_module(&python, "yt_dlp") => {
+                        if python_has_module(&python, "yt_dlp_ejs") {
+                            EjsStatus::PythonPackage
+                        } else {
+                            EjsStatus::Missing
+                        }
+                    }
+                    _ => EjsStatus::Bundled,
+                }
+            }
+        };
+        ToolchainStatus {
+            ytdlp_source: if ytdlp.is_some() {
+                self.config.launcher_source.or(Some(YtDlpSource::Path))
+            } else {
+                None
+            },
+            ytdlp_launcher: Some(launcher),
+            ytdlp,
+            ffmpeg: find_tool("ffmpeg"),
+            ffprobe: find_tool("ffprobe"),
+            js_runtime: self
+                .config
+                .js_runtime
+                .clone()
+                .or_else(|| detect_js_runtime(&path_dirs, &|p| tool_version(p, &["--version"]))),
+            ejs,
+            platform: PlatformInfo::current(),
+            sidecar_root: None,
+            plugin_dirs: self
+                .effective_plugin_dirs()
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect(),
+            remote_components_enabled: self.config.remote_components,
+            impersonation_available: ytdlp_version.is_some() && self.impersonation_available(),
+            issues: Vec::new(),
+        }
+        .with_issues()
     }
 
     fn effective_plugin_dirs(&self) -> Vec<PathBuf> {
@@ -242,12 +495,12 @@ impl YtDlpExtractorToolchain {
         &self,
         url: &str,
         extractor_key: &str,
+        allow_generic: bool,
     ) -> Result<(), String> {
         // If the extractor_key is "Generic" or "GenericAlias", that means
-        // yt-dlp had no dedicated extractor — hard-fail.
-        if extractor_key.eq_ignore_ascii_case("generic")
-            || extractor_key.eq_ignore_ascii_case("genericalias")
-        {
+        // yt-dlp had no dedicated extractor — hard-fail unless the caller
+        // (Core's non-Launch-Site fallback chain) explicitly allows it.
+        if is_generic_extractor_key(extractor_key) && !allow_generic {
             return Err(format!(
                 "unsupported Launch Site: yt-dlp resolved '{url}' via generic \
                  extractor — no dedicated extractor available"
@@ -300,13 +553,18 @@ impl YtDlpExtractorToolchain {
             args.push("--plugin-dirs".to_string());
             args.push(dir.display().to_string());
         }
+        if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
+            args.push("--ffmpeg-location".to_string());
+            args.push(ffmpeg_dir.display().to_string());
+        }
+        args.extend(self.runtime_args());
         args.push(url.to_string());
         args
     }
 
     /// Run yt-dlp with `-J` and return the raw JSON stdout.
     fn run_probe(&self, url: &str, cookies: &CookieChannel, proxy: &ProxySettings) -> Result<String, String> {
-        self.run_probe_json(url, true, cookies, proxy)
+        self.run_probe_json(url, true, cookies, proxy, &ProbePolicy::default())
     }
 
     fn run_probe_json(
@@ -315,35 +573,56 @@ impl YtDlpExtractorToolchain {
         flat_playlist: bool,
         cookies: &CookieChannel,
         proxy: &ProxySettings,
+        policy: &ProbePolicy,
     ) -> Result<String, String> {
         let args = self.probe_args_for(url, flat_playlist, cookies, proxy);
-        let bin = self.effective_binary_path();
+        let launcher = self.effective_launcher();
+        let (mut cmd, _doh_guard) =
+            ytdlp_command_with_optional_doh_dns(&launcher, &args, url, proxy)?;
 
-        // PATH note: ffmpeg dir is inherited by Python child when set on Command;
-        // DoH path builds its own Command — set env there too via wrapper if needed.
-        let output = if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
-            // Prefer direct invoke with PATH when no DoH; DoH helper does not take env.
-            // Re-apply ffmpeg PATH for direct path inside helper by extending process PATH briefly.
-            let old_path = std::env::var("PATH").unwrap_or_default();
-            let sep = if cfg!(windows) { ";" } else { ":" };
-            let new_path = format!("{}{}{}", ffmpeg_dir.display(), sep, old_path);
-            std::env::set_var("PATH", &new_path);
-            let out = run_ytdlp_with_optional_doh_dns(&bin, &args, url, proxy);
-            std::env::set_var("PATH", old_path);
-            out?
+        let timeout = if policy.timeout.is_zero() {
+            Duration::from_secs(self.config.probe_timeout_secs.max(5))
         } else {
-            run_ytdlp_with_optional_doh_dns(&bin, &args, url, proxy)?
+            policy.timeout
+        };
+        let deadline = Instant::now() + timeout;
+        let outcome = run_command_with_deadline_polling(
+            &mut cmd,
+            policy.cancel.as_deref(),
+            Some(deadline),
+            Duration::from_millis(50),
+        )
+        .map_err(|e| format!("failed to execute yt-dlp: {e}"))?;
+
+        let (status, stdout, stderr) = match outcome {
+            CommandOutcome::Finished {
+                status,
+                stdout,
+                stderr,
+            } => (status, stdout, stderr),
+            CommandOutcome::Stopped => return Err("probe cancelled".to_string()),
+            CommandOutcome::TimedOut => {
+                return Err(tag_error(
+                    ERROR_CODE_TIMEOUT,
+                    format!("yt-dlp probe timed out after {}s", timeout.as_secs()),
+                ))
+            }
         };
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "yt-dlp probe failed (exit {:?}): {stderr}",
-                output.status.code()
-            ));
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            let message = format!(
+                "yt-dlp probe failed (exit {:?}): {}",
+                status.code(),
+                stderr.trim()
+            );
+            return Err(match classify_ytdlp_failure(&stderr) {
+                Some(code) => tag_error(code, message),
+                None => message,
+            });
         }
 
-        let stdout = String::from_utf8(output.stdout)
+        let stdout = String::from_utf8(stdout)
             .map_err(|e| format!("yt-dlp output is not valid UTF-8: {e}"))?;
 
         if stdout.trim().is_empty() {
@@ -363,11 +642,20 @@ impl YtDlpExtractorToolchain {
     }
 
     pub(crate) fn parse_probe_result(&self, json: &str, url: &str) -> Result<ProbeResult, String> {
+        self.parse_probe_result_with_policy(json, url, false)
+    }
+
+    pub(crate) fn parse_probe_result_with_policy(
+        &self,
+        json: &str,
+        url: &str,
+        allow_generic: bool,
+    ) -> Result<ProbeResult, String> {
         let info: YtDlpVideoInfo = serde_json::from_str(json)
             .map_err(|e| format!("failed to parse yt-dlp JSON: {e}"))?;
 
         // Validate extractor key
-        self.validate_extractor(url, &info.extractor_key)?;
+        self.validate_extractor(url, &info.extractor_key, allow_generic)?;
 
         let is_playlist = info
             .type_
@@ -394,12 +682,18 @@ impl YtDlpExtractorToolchain {
             archived: false,
             uploader: info.uploader.clone(),
             upload_date: info.upload_date.clone(),
+            fetch_kind: MediaFetchKind::Extractor,
+            qualities_are_presets: false,
+            referer: None,
         };
 
         Ok(ProbeResult {
             url: url.to_string(),
             items: vec![item],
             source_name,
+            tier: tier_for_extractor_key(&info.extractor_key),
+            extractor_key: Some(info.extractor_key.clone()),
+            warnings: Vec::new(),
         })
     }
 
@@ -421,7 +715,10 @@ impl YtDlpExtractorToolchain {
         };
 
         let prefix = item_id_prefix(&info.extractor_key);
-        let mut items = Vec::new();
+        let mut items: Vec<MediaItem> = Vec::new();
+        // Listings can repeat an entry (the live xHamster creator page lists its newest
+        // video twice). Duplicate ids break selection counts and confirm, so keep the first.
+        let mut seen_ids = HashSet::new();
 
         for entry in info.entries.iter().flatten().flatten() {
             let Some(item_url) = entry
@@ -437,11 +734,14 @@ impl YtDlpExtractorToolchain {
             let Some(id) = playlist_entry_id(entry, &item_url) else {
                 continue;
             };
+            if !seen_ids.insert(id.clone()) {
+                continue;
+            }
             let title = playlist_entry_title(entry, &id);
 
-            let qualities = match &entry.formats {
-                Some(formats) if !formats.is_empty() => self.formats_to_qualities(formats),
-                _ => launch_site_standard_qualities(),
+            let (qualities, presets) = match &entry.formats {
+                Some(formats) if !formats.is_empty() => (self.formats_to_qualities(formats), false),
+                _ => (launch_site_standard_qualities(), true),
             };
 
             items.push(MediaItem {
@@ -452,6 +752,9 @@ impl YtDlpExtractorToolchain {
                 archived: false,
                 uploader: None,
                 upload_date: None,
+                fetch_kind: MediaFetchKind::Extractor,
+                qualities_are_presets: presets,
+                referer: None,
             });
         }
 
@@ -465,6 +768,9 @@ impl YtDlpExtractorToolchain {
             url: url.to_string(),
             items,
             source_name,
+            tier: tier_for_extractor_key(&info.extractor_key),
+            extractor_key: Some(info.extractor_key.clone()),
+            warnings: Vec::new(),
         })
     }
 
@@ -590,7 +896,8 @@ impl YtDlpExtractorToolchain {
 
         let suffix = match (has_video, has_audio) {
             (true, true) => String::new(),
-            (true, false) => " (video only)".to_string(),
+            // Downloaded with the best audio merged in, so not "video only" to the user.
+            (true, false) => String::new(),
             (false, true) => " (audio only)".to_string(),
             (false, false) => String::new(),
         };
@@ -626,14 +933,35 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         self.parse_probe_result(&json, url)
     }
 
+    fn probe_with_policy(
+        &self,
+        url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        policy: &ProbePolicy,
+    ) -> Result<ProbeResult, String> {
+        url::Url::parse(url)
+            .map_err(|e| format!("invalid URL '{url}': {e}"))?;
+        let json = self.run_probe_json(url, true, cookies, proxy, policy)?;
+        self.parse_probe_result_with_policy(&json, url, policy.allow_generic)
+    }
+
+    fn toolchain_status(&self) -> ToolchainStatus {
+        self.status()
+    }
+
     fn probe_item_qualities(
         &self,
         item_url: &str,
         cookies: &CookieChannel,
         proxy: &ProxySettings,
     ) -> Result<Vec<Quality>, String> {
-        let json = self.run_probe_json(item_url, false, cookies, proxy)?;
-        let result = self.parse_probe_result(&json, item_url)?;
+        let policy = ProbePolicy {
+            allow_generic: true,
+            ..ProbePolicy::default()
+        };
+        let json = self.run_probe_json(item_url, false, cookies, proxy, &policy)?;
+        let result = self.parse_probe_result_with_policy(&json, item_url, true)?;
         result
             .items
             .into_iter()
@@ -653,12 +981,37 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         proxy: &ProxySettings,
         output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
+        self.download_with_referer(
+            url,
+            format,
+            dest_dir,
+            stop,
+            media_extras,
+            cookies,
+            proxy,
+            output_template,
+            None,
+        )
+    }
+
+    fn download_with_referer(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+        stop: &AtomicBool,
+        media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        output_template: &str,
+        referer: Option<&str>,
+    ) -> Result<ExtractorDownloadOutcome, String> {
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
-        let format_selector = quality_id_to_ytdlp_format(format);
         let out_tmpl = dest_dir.join(output_template);
         let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
+        let format_selector = quality_id_to_ytdlp_format(format, ffmpeg_present);
 
         let mut args = vec![
             "--no-warnings".to_string(),
@@ -684,10 +1037,15 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
             args.push("--ffmpeg-location".to_string());
             args.push(ffmpeg_dir.display().to_string());
         }
+        if let Some(referer) = referer.filter(|r| !r.trim().is_empty()) {
+            args.push("--referer".to_string());
+            args.push(referer.to_string());
+        }
+        args.extend(self.runtime_args());
         args.push(url.to_string());
 
-        let bin = self.effective_binary_path();
-        let (cmd, _doh_guard) = ytdlp_command_with_optional_doh_dns(&bin, &args, url, proxy)?;
+        let launcher = self.effective_launcher();
+        let (cmd, _doh_guard) = ytdlp_command_with_optional_doh_dns(&launcher, &args, url, proxy)?;
         let result = run_command_interruptible(cmd, stop, Duration::from_millis(50));
 
         match result? {
@@ -699,10 +1057,15 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
             } => {
                 if !status.success() {
                     let stderr = String::from_utf8_lossy(&stderr);
-                    return Err(format!(
-                        "yt-dlp download failed (exit {:?}): {stderr}",
-                        status.code()
-                    ));
+                    let message = format!(
+                        "yt-dlp download failed (exit {:?}): {}",
+                        status.code(),
+                        stderr.trim()
+                    );
+                    return Err(match classify_ytdlp_failure(&stderr) {
+                        Some(code) => tag_error(code, message),
+                        None => message,
+                    });
                 }
 
                 let stdout = String::from_utf8_lossy(&stdout);
@@ -737,84 +1100,60 @@ enum InterruptibleOutput {
     Stopped,
 }
 
+/// Does `yt-dlp --list-impersonate-targets` list a usable Chrome target?
+///
+/// Without curl_cffi yt-dlp still prints the table, but every row says
+/// `(unavailable)`, and passing `--impersonate chrome` then aborts the whole run.
+fn chrome_impersonation_listed(listing: &str) -> bool {
+    listing.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.trim_start().starts_with("chrome") && !line.contains("unavailable")
+    })
+}
+
 /// Spawn `cmd`, poll `stop`, and hard-kill the child when stop is requested.
 fn run_command_interruptible(
     mut cmd: Command,
     stop: &AtomicBool,
     poll_interval: Duration,
 ) -> Result<InterruptibleOutput, String> {
-    if stop.load(Ordering::Acquire) {
-        return Ok(InterruptibleOutput::Stopped);
-    }
-
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn yt-dlp download: {e}"))?;
-
-    let stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| "yt-dlp download missing stdout pipe".to_string())?;
-    let stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| "yt-dlp download missing stderr pipe".to_string())?;
-
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let mut reader = stdout_pipe;
-        let _ = reader.read_to_end(&mut buf);
-        buf
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let mut reader = stderr_pipe;
-        let _ = reader.read_to_end(&mut buf);
-        buf
-    });
-
-    let status = loop {
-        if stop.load(Ordering::Acquire) {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_handle.join();
-            let _ = stderr_handle.join();
-            return Ok(InterruptibleOutput::Stopped);
-        }
-
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(poll_interval),
-            Err(e) => {
-                let _ = child.kill();
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!("failed while waiting for yt-dlp download: {e}"));
-            }
-        }
-    };
-
-    let stdout = stdout_handle.join().unwrap_or_else(|_| Vec::new());
-    let stderr = stderr_handle.join().unwrap_or_else(|_| Vec::new());
-
-    Ok(InterruptibleOutput::Finished {
-        status,
-        stdout,
-        stderr,
-    })
+    match run_command_with_deadline_polling(&mut cmd, Some(stop), None, poll_interval)
+        .map_err(|e| e.replace("failed to spawn", "failed to spawn yt-dlp download:"))?
+    {
+        CommandOutcome::Finished {
+            status,
+            stdout,
+            stderr,
+        } => Ok(InterruptibleOutput::Finished {
+            status,
+            stdout,
+            stderr,
+        }),
+        CommandOutcome::Stopped | CommandOutcome::TimedOut => Ok(InterruptibleOutput::Stopped),
+    }
 }
 
 /// Map a probe quality id to a yt-dlp `-f` selector.
-fn quality_id_to_ytdlp_format(quality_id: &str) -> String {
+///
+/// Video-only qualities (DASH sites such as YouTube) are merged with the best
+/// audio track, otherwise the file would have no sound. Merging needs ffmpeg;
+/// without it the selector falls back to the best combined format under the height.
+fn quality_id_to_ytdlp_format(quality_id: &str, can_merge: bool) -> String {
     match quality_id {
         "best" | "worst" => quality_id.to_string(),
         id if id.ends_with("-videoonly") => {
-            let height = id.trim_end_matches("-videoonly").trim_end_matches('p');
-            if height.chars().all(|c| c.is_ascii_digit()) {
-                format!("bestvideo[height={height}]/bestvideo[height<={height}]/bestvideo")
-            } else {
-                id.to_string()
+            let base = id.trim_end_matches("-videoonly");
+            let height = base.trim_end_matches('p');
+            let numeric = !height.is_empty() && height.chars().all(|c| c.is_ascii_digit());
+            match (numeric, can_merge) {
+                (true, true) => format!(
+                    "bestvideo[height={height}]+bestaudio/bestvideo[height<={height}]+bestaudio\
+                     /best[height<={height}]/best"
+                ),
+                (true, false) => format!("best[height<={height}]/best"),
+                (false, true) => format!("{base}+bestaudio/{base}/best"),
+                (false, false) => format!("{base}/best"),
             }
         }
         id if id.ends_with("-audio") || id.ends_with("k-audio") => {
@@ -915,6 +1254,15 @@ struct YtDlpEntry {
 }
 
 /// Stable MediaItem id prefix for a Launch Site extractor family.
+/// Tier reported for a yt-dlp result from its `extractor_key`.
+fn tier_for_extractor_key(extractor_key: &str) -> ExtractionTier {
+    if is_generic_extractor_key(extractor_key) {
+        ExtractionTier::GenericExtractor
+    } else {
+        ExtractionTier::Dedicated
+    }
+}
+
 fn item_id_prefix(extractor_key: &str) -> &'static str {
     if extractor_key.starts_with("XHamster") {
         "xh"
@@ -1591,7 +1939,7 @@ mod tests {
         });
 
         std::thread::sleep(Duration::from_millis(80));
-        stop.store(true, Ordering::Release);
+        stop.store(true, std::sync::atomic::Ordering::Release);
 
         let outcome = worker.join().expect("worker join").expect("interruptible wait");
         assert!(
@@ -1608,10 +1956,58 @@ mod tests {
     // ---- YtDlpConfig ----
 
     #[test]
+    fn probe_args_include_js_runtime_and_impersonation_only_when_supported() {
+        let rt = JsRuntime {
+            kind: crate::toolchain_discovery::JsRuntimeKind::Node,
+            path: PathBuf::from("/usr/bin/node"),
+            version: Some("22.22.0".into()),
+            supported: true,
+        };
+        let config = YtDlpConfig {
+            js_runtime: Some(rt),
+            remote_components: true,
+            ..YtDlpConfig::default()
+        };
+        let tc = YtDlpExtractorToolchain::new(config);
+        // Old yt-dlp without the flags: nothing extra is passed.
+        tc.set_supported_flags_for_test(&["-J"]);
+        let args = tc.probe_args("https://example.com/v", &CookieChannel::default(), &ProxySettings::default());
+        assert!(!args.iter().any(|a| a == "--js-runtimes"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--impersonate"), "{args:?}");
+        // Current yt-dlp: runtime, remote components and impersonation.
+        tc.set_supported_flags_for_test(&["--js-runtimes", "--remote-components", "--impersonate"]);
+        let args = tc.probe_args("https://example.com/v", &CookieChannel::default(), &ProxySettings::default());
+        assert!(args.windows(2).any(|w| w == ["--js-runtimes", "node:/usr/bin/node"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--remote-components", "ejs:github"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--impersonate", "chrome"]), "{args:?}");
+        assert_eq!(args.last().map(String::as_str), Some("https://example.com/v"));
+    }
+
+    #[test]
+    fn python_module_launcher_is_used_when_configured() {
+        let config = YtDlpConfig {
+            launcher: Some(YtDlpLauncher::PythonModule { python: PathBuf::from("/usr/bin/python3") }),
+            ..YtDlpConfig::default()
+        };
+        let tc = YtDlpExtractorToolchain::new(config);
+        assert_eq!(
+            tc.effective_launcher(),
+            YtDlpLauncher::PythonModule { python: PathBuf::from("/usr/bin/python3") }
+        );
+        let cmd = tc.effective_launcher().command();
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec!["-m", "yt_dlp"]);
+        assert_eq!(tc.effective_binary_path(), PathBuf::from("/usr/bin/python3"));
+    }
+
+    #[test]
     fn config_defaults_are_sensible() {
         let cfg = YtDlpConfig::default();
         assert_eq!(cfg.binary_path, PathBuf::from("yt-dlp"));
         assert!(!cfg.has_js_runtime);
+        assert!(cfg.launcher.is_none());
+        assert!(cfg.js_runtime.is_none());
+        assert!(!cfg.remote_components);
         assert_eq!(cfg.probe_timeout_secs, 30);
         assert!(cfg.plugin_dirs.is_empty());
     }
@@ -1678,7 +2074,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor("https://www.youtube.com/watch?v=abc", "Youtube")
+                .validate_extractor("https://www.youtube.com/watch?v=abc", "Youtube", false)
                 .is_ok()
         );
     }
@@ -1688,10 +2084,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor(
-                    "https://www.youtube.com/playlist?list=ABC",
-                    "YoutubePlaylist",
-                )
+                .validate_extractor("https://www.youtube.com/playlist?list=ABC", "YoutubePlaylist", false)
                 .is_ok()
         );
     }
@@ -1700,7 +2093,7 @@ mod tests {
     fn validate_generic_extractor_hard_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://example.com/video/12345", "Generic")
+            .validate_extractor("https://example.com/video/12345", "Generic", false)
             .unwrap_err();
         assert!(
             err.contains("generic extractor"),
@@ -1712,7 +2105,7 @@ mod tests {
     fn validate_generic_alias_extractor_hard_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://unknown.example.com/video", "GenericAlias")
+            .validate_extractor("https://unknown.example.com/video", "GenericAlias", false)
             .unwrap_err();
         assert!(
             err.contains("generic extractor"),
@@ -1725,7 +2118,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor("https://xhamster.com/videos/example-12345", "XHamster")
+                .validate_extractor("https://xhamster.com/videos/example-12345", "XHamster", false)
                 .is_ok()
         );
     }
@@ -1734,7 +2127,7 @@ mod tests {
     fn validate_unknown_extractor_for_known_site_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://www.youtube.com/watch?v=abc", "SomeUnknownExtractor")
+            .validate_extractor("https://www.youtube.com/watch?v=abc", "SomeUnknownExtractor", false)
             .unwrap_err();
         assert!(
             err.contains("extractor mismatch"),
@@ -1749,7 +2142,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor("https://example.com/video", "CustomExtractor")
+                .validate_extractor("https://example.com/video", "CustomExtractor", false)
                 .is_ok()
         );
     }
@@ -1758,7 +2151,7 @@ mod tests {
     fn validate_unknown_site_with_generic_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://example.com/video", "Generic")
+            .validate_extractor("https://example.com/video", "Generic", false)
             .unwrap_err();
         assert!(
             err.contains("generic extractor"),
@@ -1771,7 +2164,7 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(
             extractor
-                .validate_extractor("https://youtu.be/abc123", "Youtube")
+                .validate_extractor("https://youtu.be/abc123", "Youtube", false)
                 .is_ok()
         );
     }
@@ -1815,16 +2208,22 @@ mod tests {
         assert!(has_360p, "should have 360p quality, got: {qualities:?}");
         assert!(has_720p, "should have 720p quality, got: {qualities:?}");
 
-        // Should have video-only formats (137=1080p-videoonly, 247=720p-videoonly)
+        // 137 (1080p video-only) stays: it is downloaded with the best audio merged in.
+        // 247 (720p video-only) has the same label as combined 22 and collapses into it,
+        // so the user sees one "720p" choice.
         let has_1080p_videoonly = qualities.iter().any(|q| q.id == "1080p-videoonly");
-        let has_720p_60fps = qualities.iter().any(|q| q.id == "720p-videoonly");
         assert!(
             has_1080p_videoonly,
             "should have 1080p video-only, got: {qualities:?}"
         );
         assert!(
-            has_720p_60fps,
-            "should have 720p 60fps video-only, got: {qualities:?}"
+            !qualities.iter().any(|q| q.id == "720p-videoonly"),
+            "720p video-only should collapse into the combined 720p, got: {qualities:?}"
+        );
+        assert_eq!(
+            qualities.iter().filter(|q| q.label.starts_with("720p")).count(),
+            1,
+            "{qualities:?}"
         );
 
         // Should have audio-only format (140=130k-audio).
@@ -1840,7 +2239,7 @@ mod tests {
         assert_eq!(q18.label, "360p (640×360)");
 
         let q137 = qualities.iter().find(|q| q.id == "1080p-videoonly").unwrap();
-        assert_eq!(q137.label, "1080p (1920×1080) (video only)");
+        assert_eq!(q137.label, "1080p (1920×1080)");
 
         let q140 = qualities.iter().find(|q| q.id == "130k-audio").unwrap();
         assert_eq!(q140.label, "medium (audio only)");
@@ -1868,7 +2267,7 @@ mod tests {
         );
 
         // Should have exactly 5 unique qualities from our 6 formats
-        // (247 and 22 both resolve to 720p-videoonly label, dedupped)
+        // (247 and 22 both resolve to the 720p label and are deduplicated)
         assert!(
             qualities.len() >= 4,
             "should have at least 4 unique quality entries, got {}: {qualities:?}",
@@ -1974,10 +2373,7 @@ mod tests {
     fn validate_youtube_tab_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor(
-                "https://www.youtube.com/@ExampleChannel/videos",
-                "YoutubeTab",
-            )
+            .validate_extractor("https://www.youtube.com/@ExampleChannel/videos", "YoutubeTab", false)
             .is_ok());
     }
 
@@ -2087,10 +2483,7 @@ mod tests {
     fn validate_xhamster_user_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor(
-                "https://xhamster.com/creators/example-creator",
-                "XHamsterUser",
-            )
+            .validate_extractor("https://xhamster.com/creators/example-creator", "XHamsterUser", false)
             .is_ok());
     }
 
@@ -2182,7 +2575,7 @@ mod tests {
     fn xxxbp_wrong_extractor_hard_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://www.xxxbp.tv/v/12345", "SomeOther")
+            .validate_extractor("https://www.xxxbp.tv/v/12345", "SomeOther", false)
             .unwrap_err();
         assert!(
             err.contains("extractor mismatch"),
@@ -2276,7 +2669,8 @@ mod tests {
             .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &CookieChannel::default(), &ProxySettings::default())
             .unwrap();
         assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].qualities.len(), 5);
+        // 360p, 720p, 1080p (video-only, audio merged on download), audio.
+        assert_eq!(result.items[0].qualities.len(), 4);
     }
 
     #[test]
@@ -2349,7 +2743,7 @@ mod tests {
             audio_channels: None,
         };
         let label = extractor.format_label(&fmt);
-        assert_eq!(label, "1080p (1920×1080) (video only)");
+        assert_eq!(label, "1080p (1920×1080)");
     }
 
     #[test]
@@ -2407,11 +2801,29 @@ mod tests {
     #[test]
     fn quality_id_maps_to_ytdlp_height_selector() {
         assert_eq!(
-            quality_id_to_ytdlp_format("720p"),
+            quality_id_to_ytdlp_format("720p", true),
             "best[height=720]/best[height<=720]/best"
         );
-        assert_eq!(quality_id_to_ytdlp_format("best"), "best");
-        assert!(quality_id_to_ytdlp_format("720p-videoonly").contains("bestvideo"));
+        assert_eq!(quality_id_to_ytdlp_format("best", true), "best");
+    }
+
+    #[test]
+    fn video_only_quality_merges_best_audio_when_ffmpeg_is_present() {
+        let merged = quality_id_to_ytdlp_format("720p-videoonly", true);
+        assert_eq!(
+            merged,
+            "bestvideo[height=720]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+        );
+        // Without ffmpeg nothing can be merged: take a combined format instead.
+        assert_eq!(
+            quality_id_to_ytdlp_format("720p-videoonly", false),
+            "best[height<=720]/best"
+        );
+        assert_eq!(
+            quality_id_to_ytdlp_format("hls-1-videoonly", true),
+            "hls-1+bestaudio/hls-1/best"
+        );
+        assert_eq!(quality_id_to_ytdlp_format("hls-1-videoonly", false), "hls-1/best");
     }
 
     #[test]
@@ -2684,10 +3096,7 @@ mod tests {
     fn validate_luxuretv_plugin_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor(
-                "https://en.luxuretv.com/videos/sample-16982.html",
-                "LuxureTV",
-            )
+            .validate_extractor("https://en.luxuretv.com/videos/sample-16982.html", "LuxureTV", false)
             .is_ok());
     }
 
@@ -2695,7 +3104,7 @@ mod tests {
     fn validate_xxxbp_plugin_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor("https://xxxbp.tv/v/12345", "XxxbpTV")
+            .validate_extractor("https://xxxbp.tv/v/12345", "XxxbpTV", false)
             .is_ok());
     }
 
@@ -2763,5 +3172,89 @@ mod tests {
             .items
             .iter()
             .all(|i| !i.url.is_empty() && !i.qualities.is_empty()));
+    }
+
+    /// Regression: the probe used to fail with "missing stdout pipe" on every real
+    /// yt-dlp because the process runner did not capture output itself. This goes
+    /// through an actual child process rather than the in-memory fake.
+    #[cfg(unix)]
+    #[test]
+    fn probe_runs_a_real_child_process_and_parses_its_json() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("yt-dlp");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$*" in
+  *--help*) echo "  --impersonate TARGET   --js-runtimes RUNTIME" ;;
+  *--list-impersonate-targets*) echo "no impersonate targets" ;;
+  *--version*) echo "2099.01.01" ;;
+  *) cat <<'JSON'
+{"_type":"video","id":"abc123","title":"Real Process Video","extractor_key":"Youtube","extractor":"youtube",
+ "webpage_url":"https://www.youtube.com/watch?v=abc123","duration":12,
+ "formats":[{"format_id":"18","height":360,"ext":"mp4","vcodec":"avc1","acodec":"mp4a"},
+            {"format_id":"22","height":720,"ext":"mp4","vcodec":"avc1","acodec":"mp4a"}]}
+JSON
+  ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let toolchain = YtDlpExtractorToolchain::new(YtDlpConfig {
+            binary_path: script.clone(),
+            launcher: Some(YtDlpLauncher::Binary { path: script }),
+            ..YtDlpConfig::default()
+        });
+        let result = toolchain
+            .probe(
+                "https://www.youtube.com/watch?v=abc123",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
+            .expect("probe through a real process succeeds");
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].title, "Real Process Video");
+        assert!(result.items[0].qualities.len() >= 2, "{:?}", result.items[0].qualities);
+        assert_eq!(result.extractor_key.as_deref(), Some("Youtube"));
+    }
+
+    #[test]
+    fn impersonation_listing_distinguishes_available_from_unavailable() {
+        let with_curl_cffi = "[info] Available impersonate targets\n\
+            Client          OS           Source\n\
+            --------------------------------------\n\
+            Chrome-133      Macos-15     curl_cffi\n\
+            Safari-17.2     Ios-17.2     curl_cffi\n";
+        let without = "[info] Available impersonate targets\n\
+            Client    OS   Source\n\
+            --------------------------------------------\n\
+            Tor       -    curl_cffi>=0.11 (unavailable)\n\
+            Chrome    -    curl_cffi (unavailable)\n";
+        assert!(chrome_impersonation_listed(with_curl_cffi));
+        assert!(!chrome_impersonation_listed(without));
+        assert!(!chrome_impersonation_listed(""));
+        assert!(!chrome_impersonation_listed("Safari  -  curl_cffi\n"));
+    }
+
+    #[test]
+    fn playlist_entries_repeated_by_the_site_become_one_item() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let json = r#"{"_type":"playlist","id":"your-eshita","title":"your-eshita",
+            "extractor_key":"XHamsterUser","webpage_url":"https://xhamster.com/creators/your-eshita",
+            "entries":[
+              {"_type":"url","ie_key":"XHamster","url":"https://xhamster.com/videos/first-video-xhEt2mN"},
+              {"_type":"url","ie_key":"XHamster","url":"https://xhamster.com/videos/first-video-xhEt2mN"},
+              {"_type":"url","ie_key":"XHamster","url":"https://xhamster.com/videos/second-video-xhAb1cD"}
+            ]}"#;
+        let result = extractor
+            .parse_probe_result(json, "https://xhamster.com/creators/your-eshita")
+            .unwrap();
+        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(result.items.len(), 2, "{ids:?}");
+        let unique: HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len());
     }
 }

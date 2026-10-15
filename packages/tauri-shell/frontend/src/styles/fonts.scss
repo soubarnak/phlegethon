@@ -1,0 +1,47 @@
+// IBM Plex bundled locally (offline + CSP-safe). Family names must match
+// Carbon's $font-families so components pick them up.
+$plex-sans: "../../node_modules/@ibm/plex-sans/fonts/complete/woff2";
+$plex-mono: "../../node_modules/@ibm/plex-mono/fonts/complete/woff2";
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("#{$plex-sans}/IBMPlexSans-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("#{$plex-sans}/IBMPlexSans-Italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url("#{$plex-sans}/IBMPlexSans-Light.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("#{$plex-sans}/IBMPlexSans-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("#{$plex-sans}/IBMPlexSans-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("#{$plex-mono}/IBMPlexMono-Regular.woff2") format("woff2");
+}

@@ -4,11 +4,12 @@
 
 use crate::doh_proxy::{doh_override_map_for_url, start_doh_connect_proxy, DohProxyGuard};
 use crate::proxy_settings::ProxySettings;
+use crate::toolchain_discovery::YtDlpLauncher;
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::PathBuf;
+use std::process::Command;
 
 /// Keeps ephemeral DoH resources alive for the duration of a yt-dlp run.
 pub struct YtdlpDohRunGuard {
@@ -26,13 +27,13 @@ impl Drop for YtdlpDohRunGuard {
 
 /// Build a [`Command`] for yt-dlp, wrapping with DoH routing when needed.
 pub fn ytdlp_command_with_optional_doh_dns(
-    ytdlp_bin: &Path,
+    launcher: &YtDlpLauncher,
     args: &[String],
     url: &str,
     proxy: &ProxySettings,
 ) -> Result<(Command, YtdlpDohRunGuard), String> {
     if proxy.url.as_ref().is_some_and(|u| !u.trim().is_empty()) {
-        let mut cmd = Command::new(ytdlp_bin);
+        let mut cmd = launcher.command();
         cmd.args(args);
         return Ok((
             cmd,
@@ -46,7 +47,7 @@ pub fn ytdlp_command_with_optional_doh_dns(
     let map = match doh_override_map_for_url(url) {
         Ok(Some(m)) => m,
         Ok(None) | Err(_) => {
-            let mut cmd = Command::new(ytdlp_bin);
+            let mut cmd = launcher.command();
             cmd.args(args);
             return Ok((
                 cmd,
@@ -65,7 +66,7 @@ pub fn ytdlp_command_with_optional_doh_dns(
         proxied_args.push("--proxy".to_string());
         proxied_args.push(proxy_url);
         proxied_args.extend_from_slice(args);
-        let mut cmd = Command::new(ytdlp_bin);
+        let mut cmd = launcher.command();
         cmd.args(&proxied_args);
         return Ok((
             cmd,
@@ -92,7 +93,7 @@ pub fn ytdlp_command_with_optional_doh_dns(
         ));
     }
 
-    let mut cmd = Command::new(ytdlp_bin);
+    let mut cmd = launcher.command();
     cmd.args(args);
     Ok((
         cmd,
@@ -101,18 +102,6 @@ pub fn ytdlp_command_with_optional_doh_dns(
             proxy_guard: None,
         },
     ))
-}
-
-/// Convenience: run to completion (probe path).
-pub fn run_ytdlp_with_optional_doh_dns(
-    ytdlp_bin: &Path,
-    args: &[String],
-    url: &str,
-    proxy: &ProxySettings,
-) -> Result<Output, String> {
-    let (mut cmd, _guard) = ytdlp_command_with_optional_doh_dns(ytdlp_bin, args, url, proxy)?;
-    cmd.output()
-        .map_err(|e| format!("failed to execute yt-dlp: {e}"))
 }
 
 struct PythonLaunch {

@@ -122,6 +122,13 @@ impl DownloadArchive {
         self.entries.remove(media_id)
     }
 
+    /// Remove entries matching `pred`; returns how many were removed.
+    pub fn remove_where(&mut self, pred: impl Fn(&ArchiveEntry) -> bool) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| !pred(entry));
+        before - self.entries.len()
+    }
+
     /// Return all archive entries sorted by completion time (most recent first).
     pub fn list(&self) -> Vec<&ArchiveEntry> {
         let mut entries: Vec<&ArchiveEntry> = self.entries.values().collect();

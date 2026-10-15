@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Phlegethon
+GenericName=Download Manager
+Comment=Download videos, playlists and files from almost any website
+Exec=phlegethon
+Icon=phlegethon
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=download;video;playlist;yt-dlp;
+StartupNotify=true

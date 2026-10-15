@@ -1,6 +1,6 @@
 # Phlegethon
 
-A desktop download manager with first-class video intelligence, targeting Windows 11 and Debian Linux.
+A desktop download manager with first-class video intelligence, targeting Void Linux (glibc and musl) and released as an xbps package.
 
 ## Language
 
@@ -25,12 +25,12 @@ One of the four equal v1 must-have sources: YouTube, xxxbp.tv, luxuretv, and xHa
 _Avoid_: nice-to-have site, phased secondary extractor (for these four), silent generic fallback as “supported”
 
 **Download Core**:
-The shared Rust library that probes URLs, manages the download queue, resumes transfers, and writes files — used by both platform shells.
-_Avoid_: UI layer, per-platform download logic
+The Rust library that probes URLs, manages the download queue, resumes transfers, and writes files — linked directly into the Tauri shell as a Rust crate (no C ABI).
+_Avoid_: UI layer, per-platform download logic, FFI layers for shells that no longer exist
 
 **Platform Shell**:
-The OS-native UI host: WinUI 3 on Windows 11, Tauri 2 on Debian — both talk to the Download Core and follow the Geist-inspired design system.
-_Avoid_: single cross-platform UI framework (for this product), Electron
+The single UI host: a Tauri 2 webview shell on Linux (Void Linux is the release target) that talks to the Download Core and renders the IBM Carbon Design System UI. The former WinUI 3 shell was removed (see `docs/adr/0001-drop-windows-shell.md`).
+_Avoid_: a second shell per OS, Electron, Geist tokens (replaced by Carbon)
 
 **Extractor Toolchain**:
 The mature external media-extraction capability (e.g. yt-dlp-class) wrapped by the Download Core for probing and fetching Launch Site media; gaps are filled by Extractor Plugins first, with Download Core native handlers only when a site cannot be expressed as a plugin.

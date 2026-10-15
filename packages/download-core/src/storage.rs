@@ -5,6 +5,7 @@
 
 use crate::cookie_channel::CookieChannel;
 use crate::filename_template::DEFAULT_FILENAME_TEMPLATE;
+use crate::extractor::{ExtractionTier, ProbeTierSettings};
 use crate::proxy_settings::ProxySettings;
 use crate::sidecar_updates::SidecarUpdateSettings;
 use crate::integrity::ExpectedHash;
@@ -92,6 +93,8 @@ pub struct PersistedQueue {
     pub sidecar_update_settings: SidecarUpdateSettings,
     #[serde(default = "default_filename_template")]
     pub filename_template: String,
+    #[serde(default)]
+    pub probe_tier_settings: ProbeTierSettings,
     pub jobs: Vec<PersistedJob>,
 }
 
@@ -123,6 +126,12 @@ pub struct PersistedJob {
     pub media_uploader: Option<String>,
     #[serde(default)]
     pub media_upload_date: Option<String>,
+    #[serde(default)]
+    pub extraction_tier: Option<ExtractionTier>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub referer: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,7 +303,21 @@ pub fn load_filename_template(library_root: &Path) -> Result<String, String> {
     Ok(queue.filename_template)
 }
 
+/// Load probe tier (fallback chain) settings from the queue file, if present.
+pub fn load_probe_tier_settings(library_root: &Path) -> Result<ProbeTierSettings, String> {
+    let path = queue_path(library_root);
+    if !path.exists() {
+        return Ok(ProbeTierSettings::default());
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    Ok(queue.probe_tier_settings)
+}
+
 /// Build a persisted queue snapshot from live jobs.
+#[allow(clippy::too_many_arguments)]
 pub fn build_queue(
     jobs: &[Job],
     global_bandwidth_cap: Option<u64>,
@@ -306,6 +329,7 @@ pub fn build_queue(
     proxy_settings: &ProxySettings,
     sidecar_update_settings: &SidecarUpdateSettings,
     filename_template: &str,
+    probe_tier_settings: &ProbeTierSettings,
 ) -> PersistedQueue {
     PersistedQueue {
         version: QUEUE_VERSION,
@@ -318,6 +342,7 @@ pub fn build_queue(
         proxy_settings: proxy_settings.clone(),
         sidecar_update_settings: sidecar_update_settings.clone(),
         filename_template: filename_template.to_string(),
+        probe_tier_settings: *probe_tier_settings,
         jobs: jobs.iter().map(Job::to_persisted).collect(),
     }
 }
@@ -435,6 +460,7 @@ mod tests {
             &ProxySettings::default(),
             &SidecarUpdateSettings::default(),
             DEFAULT_FILENAME_TEMPLATE,
+            &ProbeTierSettings::default(),
         );
         save_queue(&root, &queue).unwrap();
 
@@ -527,6 +553,7 @@ mod tests {
             &ProxySettings::default(),
             &SidecarUpdateSettings::default(),
             DEFAULT_FILENAME_TEMPLATE,
+            &ProbeTierSettings::default(),
         );
         save_queue(&root, &queue).unwrap();
 

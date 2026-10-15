@@ -1,16 +1,26 @@
 [package]
 name = "phlegethon-tauri"
 version = "0.1.0"
-description = "Phlegethon Tauri Platform Shell — Debian native download manager"
+description = "Phlegethon Platform Shell — Tauri 2 download manager for Void Linux"
 authors = ["you"]
-license = ""
-repository = ""
+license = "MIT"
+repository = "https://github.com/soubarnak/phlegethon"
 edition = "2021"
 rust-version = "1.77.2"
 
+[[bin]]
+name = "phlegethon"
+path = "src/main.rs"
+
 [lib]
 name = "app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
+
+[features]
+# Embed the built frontend instead of loading the dev server. `cargo tauri build`
+# turns this on; plain `cargo build --release` (xbps-src, Makefile) must pass
+# `--features custom-protocol` or the window loads http://localhost:1420.
+custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -20,6 +30,7 @@ companion-protocol = { path = "../../companion-protocol" }
 crossbeam-channel = "0.5"
 dirs = "5"
 download-core = { path = "../../download-core" }
+phlegethon-shell-support = { path = "../../shell-support" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
@@ -30,3 +41,7 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-clipboard-manager = "2"
+
+[dev-dependencies]
+tempfile = "3"

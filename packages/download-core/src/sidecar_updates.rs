@@ -121,7 +121,31 @@ impl ToolchainManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogVersionEntry {
     /// Path to a toolchain binary file or plugin package directory.
+    ///
+    /// Empty for network entries until [`SidecarUpdateSource::materialize`] runs.
+    #[serde(default)]
     pub source_path: PathBuf,
+    /// Download URL for a network-backed toolchain asset.
+    #[serde(default)]
+    pub asset_url: Option<String>,
+    /// File name the asset is installed under (becomes the manifest `binary_name`).
+    #[serde(default)]
+    pub asset_name: Option<String>,
+    /// Expected SHA-256 (hex) of the asset, verified after download.
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+impl CatalogVersionEntry {
+    /// Entry backed by a local file or directory.
+    pub fn local(source_path: impl Into<PathBuf>) -> Self {
+        Self {
+            source_path: source_path.into(),
+            asset_url: None,
+            asset_name: None,
+            sha256: None,
+        }
+    }
 }
 
 /// Optional catalog listing fetchable sidecar versions.
@@ -158,9 +182,25 @@ pub struct RollbackSnapshot {
     pub backup_root: PathBuf,
 }
 
-/// Injectable update source — production reads `update-catalog.json`; tests use fakes.
+/// Injectable update source — production reads `update-catalog.json` (plugins)
+/// and GitHub releases (toolchain); tests use fakes.
 pub trait SidecarUpdateSource: Send + Sync {
     fn load_catalog(&self, sidecar_root: &Path) -> Result<UpdateCatalog, String>;
+
+    /// Make `entry` available as a local path (download + verify for network
+    /// sources). Default: the entry already points at a local path.
+    fn materialize(
+        &self,
+        _sidecar_root: &Path,
+        _component: SidecarComponent,
+        _version: &str,
+        entry: &CatalogVersionEntry,
+    ) -> Result<PathBuf, String> {
+        if entry.source_path.as_os_str().is_empty() {
+            return Err("catalog entry has no local source path".to_string());
+        }
+        Ok(entry.source_path.clone())
+    }
 }
 
 /// Default source: read `update-catalog.json` beside sidecar assets.
@@ -480,24 +520,49 @@ fn install_toolchain_version(
     sidecar_root: &Path,
     version: &str,
     entry: &CatalogVersionEntry,
+    source: &dyn SidecarUpdateSource,
 ) -> Result<(), String> {
-    let manifest = ToolchainManifest::stub(version);
+    let src = source.materialize(sidecar_root, SidecarComponent::Toolchain, version, entry)?;
+    let mut manifest = ToolchainManifest::stub(version);
+    if let Some(name) = entry.asset_name.as_deref().filter(|n| !n.is_empty()) {
+        manifest.binary_name = name.to_string();
+    }
     let dest = toolchain_binary_path(sidecar_root, &manifest);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    copy_file(&entry.source_path, &dest)?;
+    copy_file(&src, &dest)?;
+    mark_executable(&dest)?;
     write_toolchain_manifest(sidecar_root, &manifest)
+}
+
+/// Ensure an installed toolchain binary can be executed (no-op off Unix).
+pub fn mark_executable(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let mut perms = meta.permissions();
+        perms.set_mode(perms.mode() | 0o755);
+        fs::set_permissions(path, perms).map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 fn install_plugin_version(
     sidecar_root: &Path,
     version: &str,
     entry: &CatalogVersionEntry,
+    source: &dyn SidecarUpdateSource,
 ) -> Result<(), String> {
+    let src = source.materialize(sidecar_root, SidecarComponent::Plugin, version, entry)?;
     let mut manifest = PluginManifest::launch_sites_default();
     manifest.version = version.to_string();
-    install_plugin_package(sidecar_root, &entry.source_path, &manifest)?;
+    install_plugin_package(sidecar_root, &src, &manifest)?;
     Ok(())
 }
 
@@ -507,6 +572,7 @@ fn apply_component_if_needed(
     status: &SidecarComponentStatus,
     catalog: &UpdateCatalog,
     state: &mut SidecarRuntimeState,
+    source: &dyn SidecarUpdateSource,
 ) -> Result<Option<SidecarComponent>, String> {
     if !status.update_available {
         return Ok(None);
@@ -524,10 +590,35 @@ fn apply_component_if_needed(
     }
 
     match component {
-        SidecarComponent::Toolchain => install_toolchain_version(sidecar_root, version, entry)?,
-        SidecarComponent::Plugin => install_plugin_version(sidecar_root, version, entry)?,
+        SidecarComponent::Toolchain => install_toolchain_version(sidecar_root, version, entry, source)?,
+        SidecarComponent::Plugin => install_plugin_version(sidecar_root, version, entry, source)?,
     }
     Ok(Some(component))
+}
+
+/// Download (materialize) the pending toolchain update without touching the
+/// installed sidecar. Returns `(version, local_path)` when an update is due.
+///
+/// Lets shells run the network transfer outside the Core lock and then call
+/// [`apply_sidecar_updates`], whose `materialize` reuses the verified file.
+pub fn prefetch_toolchain_update(
+    sidecar_root: &Path,
+    settings: &SidecarUpdateSettings,
+    source: &dyn SidecarUpdateSource,
+) -> Result<Option<(String, PathBuf)>, String> {
+    let check = check_sidecar_updates(sidecar_root, settings, source)?;
+    if !check.toolchain.update_available {
+        return Ok(None);
+    }
+    let version = check
+        .toolchain
+        .available_version
+        .ok_or_else(|| "toolchain update available but no target version".to_string())?;
+    let catalog = source.load_catalog(sidecar_root)?;
+    let entry = catalog_entry(&catalog, SidecarComponent::Toolchain, &version)
+        .ok_or_else(|| format!("catalog missing toolchain version {version}"))?;
+    let path = source.materialize(sidecar_root, SidecarComponent::Toolchain, &version, entry)?;
+    Ok(Some((version, path)))
 }
 
 /// Apply available updates when idle. When transfers are active, defer instead of swapping.
@@ -572,6 +663,7 @@ pub fn apply_sidecar_updates(
         &check.toolchain,
         &catalog,
         runtime_state,
+        source,
     )? {
         applied.push(component);
     }
@@ -581,6 +673,7 @@ pub fn apply_sidecar_updates(
         &check.plugin,
         &catalog,
         runtime_state,
+        source,
     )? {
         applied.push(component);
     }
@@ -645,12 +738,15 @@ fn restore_toolchain_from_snapshot(
     let manifest: ToolchainManifest = serde_json::from_str(&raw)
         .map_err(|e| format!("parse rollback toolchain manifest: {e}"))?;
     let src = snapshot.backup_root.join(&manifest.binary_name);
+    let entry = CatalogVersionEntry {
+        asset_name: Some(manifest.binary_name.clone()),
+        ..CatalogVersionEntry::local(src)
+    };
     install_toolchain_version(
         sidecar_root,
         &snapshot.version,
-        &CatalogVersionEntry {
-            source_path: src,
-        },
+        &entry,
+        &FileSidecarUpdateSource,
     )
 }
 
@@ -723,9 +819,7 @@ mod tests {
             toolchain_latest: Some("2.0.0".to_string()),
             toolchain_versions: HashMap::from([(
                 "2.0.0".to_string(),
-                CatalogVersionEntry {
-                    source_path: new_binary,
-                },
+                CatalogVersionEntry::local(new_binary),
             )]),
             ..Default::default()
         });
@@ -754,9 +848,7 @@ mod tests {
             toolchain_latest: Some("2.0.0".to_string()),
             toolchain_versions: HashMap::from([(
                 "2.0.0".to_string(),
-                CatalogVersionEntry {
-                    source_path: newer,
-                },
+                CatalogVersionEntry::local(newer),
             )]),
             ..Default::default()
         });

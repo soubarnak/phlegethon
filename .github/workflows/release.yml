@@ -1,0 +1,136 @@
+name: Release
+
+# Push a tag like v0.1.0 (it must match `version=` in the xbps template) to build the
+# source tarball and the x86_64 xbps packages (glibc and musl) and publish them as a
+# GitHub release. Run it by hand (Actions > Release > Run workflow) to build without
+# publishing.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/tauri-shell/frontend/package-lock.json
+      - name: Rust (everything except the WebKit shell)
+        run: cargo test --workspace --exclude phlegethon-tauri --locked
+      - name: Extractor plugins
+        run: python3 packages/extractor-plugins/tests/test_parse_fixtures.py
+      - name: Frontend
+        working-directory: packages/tauri-shell/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
+
+  source:
+    name: Source tarball
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version=//p' packaging/void/srcpkgs/phlegethon/template)
+          cargo_version=$(awk -F'"' '/^\[workspace.package\]/{f=1} f&&/^version/{print $2; exit}' Cargo.toml)
+          tag=${GITHUB_REF_NAME#v}
+          echo "tag=$tag template=$version cargo=$cargo_version"
+          [ "$tag" = "$version" ] && [ "$tag" = "$cargo_version" ]
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/tauri-shell/frontend/package-lock.json
+      - name: Build the frontend
+        working-directory: packages/tauri-shell/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Make the tarball
+        run: scripts/make-dist-tarball.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  xbps:
+    name: xbps (${{ matrix.libc }})
+    needs: source
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [glibc, musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: source
+          path: dist
+      - name: Build with xbps-src in a Void container
+        run: |
+          docker run --rm --privileged -v "$PWD:/src" \
+            ghcr.io/void-linux/void-${{ matrix.libc }}-full \
+            /src/packaging/void/build-in-container.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbps-${{ matrix.libc }}
+          path: out/${{ matrix.libc }}/*.xbps
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: [test, xbps]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        working-directory: artifacts
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: true
+          body: |
+            Phlegethon ${{ github.ref_name }} for Void Linux (x86_64).
+
+            | File | For |
+            | --- | --- |
+            | `phlegethon-*.x86_64.xbps` | glibc Void |
+            | `phlegethon-*.x86_64-musl.xbps` | musl Void |
+            | `phlegethon-*.tar.gz` | source, with the prebuilt frontend, for xbps-src |
+
+            Install (pick the file for your libc):
+
+            ```sh
+            mkdir phlegethon-repo && cd phlegethon-repo
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/<file>.xbps
+            xbps-rindex -a *.xbps
+            sudo xbps-install --repository="$PWD" phlegethon
+            ```
+
+            It pulls in yt-dlp, ffmpeg, nodejs, xdg-utils, xdg-desktop-portal and dbus. Also install a portal backend for your desktop, for example `xdg-desktop-portal-gtk`. Check the download against `SHA256SUMS`.

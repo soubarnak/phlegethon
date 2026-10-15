@@ -1,0 +1,38 @@
+# Template file for 'phlegethon'
+pkgname=phlegethon
+version=0.1.0
+revision=1
+build_style=cargo
+# Both binaries from the workspace. `custom-protocol` embeds the frontend; without it
+# a release build would try to load the dev server at http://localhost:1420.
+make_build_args="-p phlegethon-tauri -p phlegethon-nmh --features phlegethon-tauri/custom-protocol"
+hostmakedepends="pkg-config"
+makedepends="libwebkit2gtk41-devel gtk+3-devel libsoup3-devel openssl-devel librsvg-devel"
+# yt-dlp and ffmpeg do the downloading and muxing. nodejs is the JavaScript runtime
+# yt-dlp needs for YouTube. xdg-desktop-portal gives the native folder chooser (the
+# app falls back to zenity, kdialog or a typed path without it); install a portal
+# backend for your desktop (xdg-desktop-portal-gtk, -kde, -wlr, ...).
+depends="yt-dlp ffmpeg nodejs xdg-utils xdg-desktop-portal dbus"
+short_desc="Download manager for videos, playlists and files from almost any site"
+maintainer="soubarnak <soubarnakarmakar@gmail.com>"
+license="MIT"
+homepage="https://github.com/soubarnak/phlegethon"
+# Tarball from scripts/make-dist-tarball.sh: tracked sources plus the prebuilt
+# packages/tauri-shell/frontend/dist, so no npm is needed inside xbps-src.
+distfiles="${homepage}/releases/download/v${version}/${pkgname}-${version}.tar.gz"
+checksum=0000000000000000000000000000000000000000000000000000000000000000
+# WebKitGTK and the Tauri stack are not set up for cross builds.
+nocross=yes
+
+do_install() {
+	vbin target/${RUST_TARGET}/release/phlegethon
+	vbin target/${RUST_TARGET}/release/phlegethon-nmh
+	vinstall packaging/linux/phlegethon.desktop 644 usr/share/applications
+	vinstall packaging/linux/com.phlegethon.app.metainfo.xml 644 usr/share/metainfo
+	for size in 32 128 256 512; do
+		vinstall packaging/linux/icons/hicolor/${size}x${size}/apps/phlegethon.png 644 \
+			usr/share/icons/hicolor/${size}x${size}/apps
+	done
+	vdoc docs/companion-setup.md
+	vlicense LICENSE
+}

@@ -144,7 +144,7 @@ mod tests {
     fn validate_accepts_absolute_cookie_file() {
         let channel = CookieChannel {
             cookies_from_browser: Some("edge".to_string()),
-            cookie_file: Some(Path::new("C:\\data\\cookies.txt").to_path_buf()),
+            cookie_file: Some(Path::new("/tmp/data/cookies.txt").to_path_buf()),
         };
         channel.validate().unwrap();
     }
