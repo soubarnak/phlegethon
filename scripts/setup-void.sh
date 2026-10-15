@@ -41,7 +41,7 @@ runtime=(yt-dlp ffmpeg nodejs xdg-utils xdg-desktop-portal dbus)
 # Optional native folder chooser used when no portal backend is running.
 fallback_pickers=(zenity)
 # What `scripts/build-linux.sh` needs on top.
-build=(base-devel git pkg-config rust cargo nodejs webkit2gtk41-devel gtk+3-devel libsoup3-devel openssl-devel librsvg-devel)
+build=(base-devel git pkg-config rust cargo nodejs libwebkit2gtk41-devel gtk+3-devel libsoup3-devel openssl-devel librsvg-devel)
 
 packages=("${runtime[@]}" "${fallback_pickers[@]}")
 [ "$runtime_only" -eq 0 ] && packages+=("${build[@]}")

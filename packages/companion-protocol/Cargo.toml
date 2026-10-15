@@ -2,6 +2,7 @@
 name = "companion-protocol"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Chrome Companion ↔ desktop hand-off protocol types and IPC"
 
 [dependencies]

@@ -16,7 +16,24 @@ luxuretv.com and xxxbp.tv have their own extractor plugins in this repo.
 
 ## Install on Void Linux
 
-The release artifact is an xbps package. Build it from source:
+The release artifact is an xbps package. The quickest way is to download it from the [GitHub releases](https://github.com/soubarnak/phlegethon/releases): `phlegethon-<version>_1.x86_64.xbps` for glibc, `phlegethon-<version>_1.x86_64-musl.xbps` for musl.
+
+```sh
+mkdir phlegethon-repo && cd phlegethon-repo
+curl -LO https://github.com/soubarnak/phlegethon/releases/download/v0.1.0/phlegethon-0.1.0_1.x86_64.xbps
+xbps-rindex -a *.xbps
+sudo xbps-install --repository="$PWD" phlegethon
+```
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. The same build runs locally in a Void container:
+
+```sh
+make dist      # frontend + source tarball
+docker run --rm --privileged -v "$PWD:/src" ghcr.io/void-linux/void-glibc-full /src/packaging/void/build-in-container.sh
+ls out/glibc/  # the .xbps
+```
+
+Or build it with xbps-src on your Void machine:
 
 ```sh
 scripts/setup-void.sh          # build and runtime dependencies (xbps-install)
@@ -75,7 +92,7 @@ Details: [docs/companion-setup.md](docs/companion-setup.md).
 
 ```sh
 make test             # Rust (no WebKit needed), plugin tests, frontend tests
-make test-shell       # the Tauri crate (needs webkit2gtk41-devel, gtk+3-devel, libsoup3-devel)
+make test-shell       # the Tauri crate (needs libwebkit2gtk41-devel, gtk+3-devel, libsoup3-devel)
 cd packages/tauri-shell/frontend && npm run dev     # UI in a browser, Tauri calls unavailable
 cargo tauri dev       # full app with hot reload (cargo install tauri-cli)
 make probe-check      # probe the reference URLs against the real toolchain

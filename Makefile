@@ -65,7 +65,7 @@ test-plugins:
 test-frontend:
 	cd $(FRONTEND) && $(NPM) run typecheck && $(NPM) test
 
-# The Tauri shell crate (needs webkit2gtk41-devel, gtk+3-devel, libsoup3-devel).
+# The Tauri shell crate (needs libwebkit2gtk41-devel, gtk+3-devel, libsoup3-devel).
 test-shell:
 	$(CARGO) test -p phlegethon-tauri
 

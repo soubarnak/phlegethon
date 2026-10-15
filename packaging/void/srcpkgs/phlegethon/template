@@ -7,7 +7,7 @@ build_style=cargo
 # a release build would try to load the dev server at http://localhost:1420.
 make_build_args="-p phlegethon-tauri -p phlegethon-nmh --features phlegethon-tauri/custom-protocol"
 hostmakedepends="pkg-config"
-makedepends="webkit2gtk41-devel gtk+3-devel libsoup3-devel openssl-devel librsvg-devel"
+makedepends="libwebkit2gtk41-devel gtk+3-devel libsoup3-devel openssl-devel librsvg-devel"
 # yt-dlp and ffmpeg do the downloading and muxing. nodejs is the JavaScript runtime
 # yt-dlp needs for YouTube. xdg-desktop-portal gives the native folder chooser (the
 # app falls back to zenity, kdialog or a typed path without it); install a portal
@@ -15,9 +15,7 @@ makedepends="webkit2gtk41-devel gtk+3-devel libsoup3-devel openssl-devel librsvg
 depends="yt-dlp ffmpeg nodejs xdg-utils xdg-desktop-portal dbus"
 short_desc="Download manager for videos, playlists and files from almost any site"
 maintainer="soubarnak <soubarnakarmakar@gmail.com>"
-# The repository carries no license file yet. Replace this and add vlicense below
-# once one is chosen.
-license="custom:Unspecified"
+license="MIT"
 homepage="https://github.com/soubarnak/phlegethon"
 # Tarball from scripts/make-dist-tarball.sh: tracked sources plus the prebuilt
 # packages/tauri-shell/frontend/dist, so no npm is needed inside xbps-src.
@@ -36,4 +34,5 @@ do_install() {
 			usr/share/icons/hicolor/${size}x${size}/apps
 	done
 	vdoc docs/companion-setup.md
+	vlicense LICENSE
 }

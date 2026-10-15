@@ -4,7 +4,7 @@
   <name>Phlegethon</name>
   <summary>Download videos, playlists and files from almost any website</summary>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>LicenseRef-proprietary</project_license>
+  <project_license>MIT</project_license>
   <description>
     <p>
       Phlegethon is a download manager. Paste or drop links, review what was found,
