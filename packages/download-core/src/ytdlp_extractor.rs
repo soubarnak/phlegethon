@@ -890,7 +890,8 @@ impl YtDlpExtractorToolchain {
 
         let suffix = match (has_video, has_audio) {
             (true, true) => String::new(),
-            (true, false) => " (video only)".to_string(),
+            // Downloaded with the best audio merged in, so not "video only" to the user.
+            (true, false) => String::new(),
             (false, true) => " (audio only)".to_string(),
             (false, false) => String::new(),
         };
@@ -1002,9 +1003,9 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
-        let format_selector = quality_id_to_ytdlp_format(format);
         let out_tmpl = dest_dir.join(output_template);
         let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
+        let format_selector = quality_id_to_ytdlp_format(format, ffmpeg_present);
 
         let mut args = vec![
             "--no-warnings".to_string(),
@@ -1128,15 +1129,25 @@ fn run_command_interruptible(
 }
 
 /// Map a probe quality id to a yt-dlp `-f` selector.
-fn quality_id_to_ytdlp_format(quality_id: &str) -> String {
+///
+/// Video-only qualities (DASH sites such as YouTube) are merged with the best
+/// audio track, otherwise the file would have no sound. Merging needs ffmpeg;
+/// without it the selector falls back to the best combined format under the height.
+fn quality_id_to_ytdlp_format(quality_id: &str, can_merge: bool) -> String {
     match quality_id {
         "best" | "worst" => quality_id.to_string(),
         id if id.ends_with("-videoonly") => {
-            let height = id.trim_end_matches("-videoonly").trim_end_matches('p');
-            if height.chars().all(|c| c.is_ascii_digit()) {
-                format!("bestvideo[height={height}]/bestvideo[height<={height}]/bestvideo")
-            } else {
-                id.to_string()
+            let base = id.trim_end_matches("-videoonly");
+            let height = base.trim_end_matches('p');
+            let numeric = !height.is_empty() && height.chars().all(|c| c.is_ascii_digit());
+            match (numeric, can_merge) {
+                (true, true) => format!(
+                    "bestvideo[height={height}]+bestaudio/bestvideo[height<={height}]+bestaudio\
+                     /best[height<={height}]/best"
+                ),
+                (true, false) => format!("best[height<={height}]/best"),
+                (false, true) => format!("{base}+bestaudio/{base}/best"),
+                (false, false) => format!("{base}/best"),
             }
         }
         id if id.ends_with("-audio") || id.ends_with("k-audio") => {
@@ -2191,16 +2202,22 @@ mod tests {
         assert!(has_360p, "should have 360p quality, got: {qualities:?}");
         assert!(has_720p, "should have 720p quality, got: {qualities:?}");
 
-        // Should have video-only formats (137=1080p-videoonly, 247=720p-videoonly)
+        // 137 (1080p video-only) stays: it is downloaded with the best audio merged in.
+        // 247 (720p video-only) has the same label as combined 22 and collapses into it,
+        // so the user sees one "720p" choice.
         let has_1080p_videoonly = qualities.iter().any(|q| q.id == "1080p-videoonly");
-        let has_720p_60fps = qualities.iter().any(|q| q.id == "720p-videoonly");
         assert!(
             has_1080p_videoonly,
             "should have 1080p video-only, got: {qualities:?}"
         );
         assert!(
-            has_720p_60fps,
-            "should have 720p 60fps video-only, got: {qualities:?}"
+            !qualities.iter().any(|q| q.id == "720p-videoonly"),
+            "720p video-only should collapse into the combined 720p, got: {qualities:?}"
+        );
+        assert_eq!(
+            qualities.iter().filter(|q| q.label.starts_with("720p")).count(),
+            1,
+            "{qualities:?}"
         );
 
         // Should have audio-only format (140=130k-audio).
@@ -2216,7 +2233,7 @@ mod tests {
         assert_eq!(q18.label, "360p (640×360)");
 
         let q137 = qualities.iter().find(|q| q.id == "1080p-videoonly").unwrap();
-        assert_eq!(q137.label, "1080p (1920×1080) (video only)");
+        assert_eq!(q137.label, "1080p (1920×1080)");
 
         let q140 = qualities.iter().find(|q| q.id == "130k-audio").unwrap();
         assert_eq!(q140.label, "medium (audio only)");
@@ -2244,7 +2261,7 @@ mod tests {
         );
 
         // Should have exactly 5 unique qualities from our 6 formats
-        // (247 and 22 both resolve to 720p-videoonly label, dedupped)
+        // (247 and 22 both resolve to the 720p label and are deduplicated)
         assert!(
             qualities.len() >= 4,
             "should have at least 4 unique quality entries, got {}: {qualities:?}",
@@ -2646,7 +2663,8 @@ mod tests {
             .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &CookieChannel::default(), &ProxySettings::default())
             .unwrap();
         assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].qualities.len(), 5);
+        // 360p, 720p, 1080p (video-only, audio merged on download), audio.
+        assert_eq!(result.items[0].qualities.len(), 4);
     }
 
     #[test]
@@ -2719,7 +2737,7 @@ mod tests {
             audio_channels: None,
         };
         let label = extractor.format_label(&fmt);
-        assert_eq!(label, "1080p (1920×1080) (video only)");
+        assert_eq!(label, "1080p (1920×1080)");
     }
 
     #[test]
@@ -2777,11 +2795,29 @@ mod tests {
     #[test]
     fn quality_id_maps_to_ytdlp_height_selector() {
         assert_eq!(
-            quality_id_to_ytdlp_format("720p"),
+            quality_id_to_ytdlp_format("720p", true),
             "best[height=720]/best[height<=720]/best"
         );
-        assert_eq!(quality_id_to_ytdlp_format("best"), "best");
-        assert!(quality_id_to_ytdlp_format("720p-videoonly").contains("bestvideo"));
+        assert_eq!(quality_id_to_ytdlp_format("best", true), "best");
+    }
+
+    #[test]
+    fn video_only_quality_merges_best_audio_when_ffmpeg_is_present() {
+        let merged = quality_id_to_ytdlp_format("720p-videoonly", true);
+        assert_eq!(
+            merged,
+            "bestvideo[height=720]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+        );
+        // Without ffmpeg nothing can be merged: take a combined format instead.
+        assert_eq!(
+            quality_id_to_ytdlp_format("720p-videoonly", false),
+            "best[height<=720]/best"
+        );
+        assert_eq!(
+            quality_id_to_ytdlp_format("hls-1-videoonly", true),
+            "hls-1+bestaudio/hls-1/best"
+        );
+        assert_eq!(quality_id_to_ytdlp_format("hls-1-videoonly", false), "hls-1/best");
     }
 
     #[test]

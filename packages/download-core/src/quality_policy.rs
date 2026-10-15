@@ -71,48 +71,34 @@ fn select_best_audio(qualities: &[Quality]) -> Option<String> {
 }
 
 fn select_best_video(qualities: &[Quality], policy: &DefaultQualityPolicy) -> Option<String> {
-    let mut best: Option<(u32, bool, &Quality)> = None;
+    // Video-only qualities count: the downloader merges the best audio into them.
+    // Ranking at equal height: combined first (no merge needed), then mp4.
+    let rank = |q: &Quality| (!is_video_only_quality(q), policy.prefer_mp4 && is_mp4_container(q));
+    let candidates: Vec<(u32, &Quality)> = qualities
+        .iter()
+        .filter(|q| !is_audio_quality(q))
+        .filter_map(|q| parse_video_height(&q.id).map(|h| (h, q)))
+        .collect();
 
-    for quality in qualities {
-        if is_audio_quality(quality) || is_video_only_quality(quality) {
-            continue;
-        }
-
-        let Some(height) = parse_video_height(&quality.id) else {
-            continue;
-        };
-
-        if height > policy.max_height {
-            continue;
-        }
-
-        let is_mp4 = is_mp4_container(quality);
-        let replace = match &best {
-            None => true,
-            Some((best_height, best_mp4, _)) => {
-                height > *best_height
-                    || (height == *best_height
-                        && policy.prefer_mp4
-                        && is_mp4
-                        && !*best_mp4)
-            }
-        };
-
-        if replace {
-            best = Some((height, is_mp4, quality));
-        }
-    }
-
-    if let Some((_, _, quality)) = best {
+    let under_cap = candidates
+        .iter()
+        .filter(|(h, _)| *h <= policy.max_height)
+        .max_by(|(ha, a), (hb, b)| ha.cmp(hb).then(rank(a).cmp(&rank(b))));
+    if let Some((_, quality)) = under_cap {
         return Some(quality.id.clone());
     }
 
-    // Fallback: "best" or first non-audio quality at or below cap when height is unknown.
+    // Everything is above the cap: take the smallest one rather than an arbitrary first entry.
+    if let Some((_, quality)) = candidates
+        .iter()
+        .min_by(|(ha, a), (hb, b)| ha.cmp(hb).then(rank(b).cmp(&rank(a))))
+    {
+        return Some(quality.id.clone());
+    }
+
+    // Heights unknown: "best", then the first non-audio quality.
     for quality in qualities {
-        if is_audio_quality(quality) {
-            continue;
-        }
-        if quality.id.eq_ignore_ascii_case("best") {
+        if !is_audio_quality(quality) && quality.id.eq_ignore_ascii_case("best") {
             return Some(quality.id.clone());
         }
     }
@@ -224,13 +210,37 @@ mod tests {
     }
 
     #[test]
-    fn skips_video_only_for_default_video_policy() {
-        let qualities = vec![
-            q("1080p-videoonly", "1080p (video only)"),
-            q("720p", "720p"),
-        ];
+    fn video_only_counts_because_audio_is_merged_in() {
+        let qualities = vec![q("1080p-videoonly", "1080p"), q("720p", "720p")];
+        let selected = select_default_quality(&qualities, &DefaultQualityPolicy::default(), false);
+        assert_eq!(selected.as_deref(), Some("1080p-videoonly"));
+    }
+
+    #[test]
+    fn combined_wins_over_video_only_at_equal_height() {
+        let qualities = vec![q("720p-videoonly", "720p"), q("720p", "720p")];
         let selected = select_default_quality(&qualities, &DefaultQualityPolicy::default(), false);
         assert_eq!(selected.as_deref(), Some("720p"));
+    }
+
+    /// The live YouTube result: combined only at 360p, the rest video-only.
+    #[test]
+    fn youtube_like_set_under_a_low_cap_picks_the_tallest_fitting_stream() {
+        let qualities = vec![
+            q("144p-videoonly", "144p"),
+            q("240p-videoonly", "240p"),
+            q("360p", "360p"),
+            q("130k-audio", "medium (audio only)"),
+        ];
+        let policy = DefaultQualityPolicy { max_height: 240, prefer_mp4: true };
+        assert_eq!(select_default_quality(&qualities, &policy, false).as_deref(), Some("240p-videoonly"));
+    }
+
+    #[test]
+    fn everything_above_the_cap_picks_the_smallest() {
+        let qualities = vec![q("1080p", "1080p"), q("480p", "480p"), q("720p-videoonly", "720p")];
+        let policy = DefaultQualityPolicy { max_height: 240, prefer_mp4: true };
+        assert_eq!(select_default_quality(&qualities, &policy, false).as_deref(), Some("480p"));
     }
 
     #[test]
