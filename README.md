@@ -79,6 +79,7 @@ make test-shell       # the Tauri crate (needs webkit2gtk41-devel, gtk+3-devel, 
 cd packages/tauri-shell/frontend && npm run dev     # UI in a browser, Tauri calls unavailable
 cargo tauri dev       # full app with hot reload (cargo install tauri-cli)
 make probe-check      # probe the reference URLs against the real toolchain
+make e2e-ui           # drive the real app window on every reference URL (WebDriver)
 ```
 
 A plain `cargo build --release` of the shell needs `--features phlegethon-tauri/custom-protocol`; without it the window loads the dev server URL. `scripts/build-linux.sh` and the xbps template pass it.

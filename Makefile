@@ -19,7 +19,7 @@ TARGET   = target/release
 ICON_SIZES = 32 128 256 512
 
 .PHONY: all build frontend install uninstall test test-shell test-rust test-plugins test-frontend \
-	desktop nmh-install dist xbps probe-check clean help
+	desktop nmh-install dist xbps probe-check e2e-ui clean help
 
 all: build
 
@@ -89,6 +89,11 @@ xbps:
 # Probe the reference URLs with the real toolchain (needs network and yt-dlp).
 probe-check:
 	scripts/probe-check.sh
+
+# Drive the real app window on every reference URL (needs a release build, tauri-driver,
+# webkit2gtk-driver, python3-selenium, Xvfb or a display, ffprobe and yt-dlp).
+e2e-ui:
+	xvfb-run -a -s "-screen 0 1400x900x24" python3 packages/tauri-shell/e2e/reference_ui.py $(E2E_ARGS)
 
 clean:
 	$(CARGO) clean

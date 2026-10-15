@@ -59,6 +59,31 @@ Run on 2026-10-14 from a Linux container with yt-dlp 2026.08.19, curl_cffi, node
 
 **YouTube from a datacenter address.** The probe lists formats, but the download is refused with HTTP 403, and plain `yt-dlp` fails the same way from this container. YouTube treats datacenter traffic as automated. The Core reports it as `needs_browser_cookies`, so the UI points at Settings, Cookies. On a home connection this is not expected; if it happens, supply browser cookies and keep yt-dlp current.
 
+## In the real app window
+
+`make e2e-ui` (`packages/tauri-shell/e2e/reference_ui.py`) starts the release binary under WebDriver for each row. It pastes the URL, clicks Add, and picks one item, or two from a listing, at the lowest quality. It then clicks Download, waits for **Completed** in the queue, and checks the file with ffprobe. Each row gets a fresh app with its own home directory.
+
+Run on 2026-10-15 with the same toolchain as above.
+
+| Row | Result | What was downloaded |
+| --- | --- | --- |
+| xhamster-video | PASS | 507 s, 144p, audio and video |
+| xhamster-creator | PASS | 2 videos, 144p, audio and video |
+| luxuretv-video | PASS | 96 s, 432p, audio and video |
+| xxxbp-video | PASS | 25 min, 144p, audio and video |
+| xxxbp-listing | PASS | 2 videos, 480p, audio and video |
+| youtube-video | BLOCKED | YouTube's bot check: "Sign in to confirm you're not a bot" |
+| youtube-playlist | BLOCKED | 182 items listed; loading formats hits the same bot check |
+| generic-page | PASS | 30 s, 360p, audio and video |
+| direct-file | PASS | 5 s, 540p, audio and video |
+
+In both YouTube rows the app shows the cookies hint. On a home connection, or with browser cookies set, YouTube is expected to work; this container is flagged as a bot.
+
+Bugs this run found and fixed:
+
+- **Repeated listing entries.** The xHamster creator page lists its newest video twice. Both copies had the same item id, so the sheet showed two ticked rows but counted one, and the second pick was never queued. Repeated entries are now dropped.
+- **Video-only qualities had no sound.** YouTube-style sites offer most heights as video-only streams. Those now download with the best audio merged in, and the default quality picker can choose them.
+
 ## What luxuretv needs
 
 luxuretv sits behind a Cloudflare managed challenge. Without help the probe fails with `needs_browser_cookies`.
