@@ -715,7 +715,10 @@ impl YtDlpExtractorToolchain {
         };
 
         let prefix = item_id_prefix(&info.extractor_key);
-        let mut items = Vec::new();
+        let mut items: Vec<MediaItem> = Vec::new();
+        // Listings can repeat an entry (the live xHamster creator page lists its newest
+        // video twice). Duplicate ids break selection counts and confirm, so keep the first.
+        let mut seen_ids = HashSet::new();
 
         for entry in info.entries.iter().flatten().flatten() {
             let Some(item_url) = entry
@@ -731,6 +734,9 @@ impl YtDlpExtractorToolchain {
             let Some(id) = playlist_entry_id(entry, &item_url) else {
                 continue;
             };
+            if !seen_ids.insert(id.clone()) {
+                continue;
+            }
             let title = playlist_entry_title(entry, &id);
 
             let (qualities, presets) = match &entry.formats {
@@ -3231,5 +3237,24 @@ esac
         assert!(!chrome_impersonation_listed(without));
         assert!(!chrome_impersonation_listed(""));
         assert!(!chrome_impersonation_listed("Safari  -  curl_cffi\n"));
+    }
+
+    #[test]
+    fn playlist_entries_repeated_by_the_site_become_one_item() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let json = r#"{"_type":"playlist","id":"your-eshita","title":"your-eshita",
+            "extractor_key":"XHamsterUser","webpage_url":"https://xhamster.com/creators/your-eshita",
+            "entries":[
+              {"_type":"url","ie_key":"XHamster","url":"https://xhamster.com/videos/first-video-xhEt2mN"},
+              {"_type":"url","ie_key":"XHamster","url":"https://xhamster.com/videos/first-video-xhEt2mN"},
+              {"_type":"url","ie_key":"XHamster","url":"https://xhamster.com/videos/second-video-xhAb1cD"}
+            ]}"#;
+        let result = extractor
+            .parse_probe_result(json, "https://xhamster.com/creators/your-eshita")
+            .unwrap();
+        let ids: Vec<&str> = result.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(result.items.len(), 2, "{ids:?}");
+        let unique: HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len());
     }
 }
