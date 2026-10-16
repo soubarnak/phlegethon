@@ -2,13 +2,47 @@
 """Pure HTML parsers for Phlegethon Launch Site Extractor Plugins.
 
 No yt-dlp import — CI tests these against HTML fixtures without network.
+
+The module name is Phlegethon-specific on purpose: every yt-dlp plugin shares the
+``yt_dlp_plugins.extractor`` namespace, so a generic name could collide.
 """
 
 from __future__ import annotations
 
+from html import unescape as html_unescape
 import re
 from typing import Any
 from urllib.parse import urljoin
+
+
+# Oldest yt-dlp the extractors work with. 2025.07.21 is the first release that
+# honours the ``impersonate`` format key (downloader/common.py), which the luxuretv
+# formats need to pass the Cloudflare check on the stream host. The request option
+# ``impersonate=True`` and ``yt_dlp.networking.exceptions.HTTPError`` are older.
+# Keep this equal to the ``yt-dlp>=`` requirement in pyproject.toml (a test checks it).
+MIN_YT_DLP_VERSION = '2025.07.21'
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in version.strip().split('.'):
+        digits = re.match(r'\d+', piece)
+        if not digits:
+            break
+        parts.append(int(digits.group(0)))
+    return tuple(parts)
+
+
+def yt_dlp_version_problem(current: str | None) -> str | None:
+    """A message when ``current`` is older than :data:`MIN_YT_DLP_VERSION`, else ``None``."""
+    have = _version_tuple(current or '')
+    need = _version_tuple(MIN_YT_DLP_VERSION)
+    if have and have >= need:
+        return None
+    return (
+        f'these Launch Site plugins need yt-dlp {MIN_YT_DLP_VERSION} or newer '
+        f'(found {current or "an unknown version"}); update yt-dlp'
+    )
 
 
 _HEIGHT_RE = re.compile(r'(\d{3,4})p', re.IGNORECASE)
@@ -52,7 +86,8 @@ def _abs(page_url: str, media_url: str) -> str:
 
 
 _PREVIEW_MARKERS = (
-    '_preview.', '/preview/', '/previews/', '/preview_', '/thumb', '_thumb.', '-preview.')
+    '_preview.', '/preview/', '/previews/', '/preview_', '/thumb/', '/thumbs/',
+    '/thumbnail/', '/thumbnails/', '_thumb.', '-preview.')
 
 
 def looks_like_preview(url: str) -> bool:
@@ -96,18 +131,22 @@ def _format_entry(
         'url': url,
         'format_id': fid,
         'format_note': note,
-        'ext': 'mp4' if '.m3u8' not in url.lower() else 'mp4',
+        'ext': 'webm' if re.search(r'\.webm(?:[?#]|$)', url, re.IGNORECASE) else 'mp4',
         'vcodec': 'avc1',
         'acodec': 'mp4a',
         'http_headers': {},
     }
     if h is not None:
         entry['height'] = h
-        entry['resolution'] = f'{int(h * 16 / 9)}x{h}' if h else None
     if '.m3u8' in url.lower():
         entry['protocol'] = 'm3u8_native'
         entry['format_id'] = f'hls-{fid}'
     return entry
+
+
+def url_has_video_id(url: str, video_id: str) -> bool:
+    """True when ``video_id`` appears in ``url`` as a whole number, not as part of a longer one."""
+    return bool(re.search(rf'(?<!\d){re.escape(video_id)}(?!\d)', url))
 
 
 def extract_formats(webpage: str, page_url: str) -> list[dict[str, Any]]:
@@ -156,10 +195,10 @@ def extract_formats(webpage: str, page_url: str) -> list[dict[str, Any]]:
 def extract_title(webpage: str) -> str | None:
     m = _OG_TITLE_RE.search(webpage)
     if m:
-        return m.group('title').strip()
+        return html_unescape(m.group('title')).strip()
     m = _TITLE_TAG_RE.search(webpage)
     if m:
-        return m.group('title').strip()
+        return html_unescape(m.group('title')).strip()
     return None
 
 
@@ -192,8 +231,12 @@ def build_info_dict(
     page_url: str,
     webpage: str,
     display_id: str | None = None,
+    require_video_id_in_url: bool = False,
 ) -> dict[str, Any]:
     formats = extract_formats(webpage, page_url)
+    if require_video_id_in_url:
+        # Layouts we have not seen: a related clip must never stand in for the video.
+        formats = [f for f in formats if url_has_video_id(f['url'], video_id)]
     if not formats:
         raise ValueError(f'no media formats found for {page_url}')
 
@@ -258,7 +301,7 @@ CLOUDFLARE_HELP = (
 XXXBP_API_URL = 'https://api.xxxbp.tv/hls'
 _XXXBP_TITLE_SUFFIX_RE = re.compile(r'\s*[-|–]\s*XXX\s?BP(?:[\s.]*TV)?\s*$', re.IGNORECASE)
 _XXXBP_CARD_RE = re.compile(
-    r'<a\s+[^>]*?href=["\'](?P<href>(?:https?://(?:www\.)?xxxbp\.tv)?/video/(?P<id>\d+)/(?P<slug>[^"\'/?#]+))["\'][^>]*>',
+    r'<a\s+[^>]*?href=["\'](?P<href>(?:https?://(?:[a-z0-9-]+\.)*xxxbp\.tv)?/video/(?P<id>\d+)/(?P<slug>[^"\'/?#]+))["\'][^>]*>',
     re.IGNORECASE,
 )
 _TITLE_ATTR_RE = re.compile(r'title=["\'](?P<title>[^"\']*)["\']', re.IGNORECASE)
@@ -271,19 +314,24 @@ def clean_xxxbp_title(title: str | None) -> str | None:
     return cleaned or None
 
 
-def xxxbp_api_formats(payload: dict[str, Any], referer: str) -> tuple[list[dict[str, Any]], str | None]:
+def xxxbp_api_formats(payload: Any, referer: str) -> tuple[list[dict[str, Any]], str | None]:
     """Turn the ``api.xxxbp.tv/hls`` JSON into progressive formats and the HLS master URL.
 
     The payload is ``{"master": <m3u8>, "links": [{"src": <m3u8>, "title": "720p"}],
     "mp4": [{"src": <mp4>, "title": "720p"}]}``. Progressive mp4 files are preferred
     over HLS: they download without ffmpeg and resume cleanly.
+
+    Raises ``ValueError`` when the body is not a JSON object.
     """
+    if not isinstance(payload, dict):
+        raise ValueError(f'unexpected source list from the xxxbp.tv API ({type(payload).__name__})')
     formats: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for item in payload.get('mp4') or []:
-        if not isinstance(item, dict):
+    mp4_items = payload.get('mp4')
+    for item in mp4_items if isinstance(mp4_items, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get('src'), str):
             continue
-        src = (item.get('src') or '').strip()
+        src = item['src'].strip()
         title = str(item.get('title') or '')
         if not src.startswith('http') or src in seen:
             continue
@@ -302,9 +350,9 @@ def xxxbp_api_formats(payload: dict[str, Any], referer: str) -> tuple[list[dict[
         }
         if height:
             fmt['height'] = height
-            fmt['width'] = int(height * 16 / 9)
         formats.append(fmt)
-    master = (payload.get('master') or '').strip() or None
+    raw_master = payload.get('master')
+    master = raw_master.strip() or None if isinstance(raw_master, str) else None
     return formats, master if master and master.startswith('http') else None
 
 
@@ -322,7 +370,7 @@ def xxxbp_listing_entries(html: str) -> list[dict[str, str]]:
             'id': video_id,
             'slug': m.group('slug'),
             'url': f'https://xxxbp.tv/video/{video_id}/{m.group("slug")}',
-            'title': (title_m.group('title').strip() if title_m else '') or m.group('slug').replace('-', ' '),
+            'title': (html_unescape(title_m.group('title')).strip() if title_m else '') or m.group('slug').replace('-', ' '),
         })
     return entries
 
@@ -340,7 +388,7 @@ def split_page_number(path: str) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 
 _LUXURE_VIDEO_LINK_RE = re.compile(
-    r'''href=["'](?P<url>(?:https?://(?:www\.|en\.)?luxuretv\.com)?/videos?/[^"'#?]*?-(?P<id>\d+)(?:\.html)?)["']''',
+    r'''href=["'](?P<url>(?:https?://(?:[a-z0-9-]+\.)*luxuretv\.com)?/videos?/[^"'#?]*?-(?P<id>\d+)(?:\.html)?)["']''',
     re.IGNORECASE,
 )
 _REL_NEXT_RE = re.compile(
@@ -471,8 +519,14 @@ def luxure_info(
     if not sources and isinstance(ld.get('contentUrl'), str) and not looks_like_image(ld['contentUrl']):
         sources = [{'url': ld['contentUrl'], 'type': 'video/mp4'}]
     if not sources:
-        return build_info_dict(
-            video_id=video_id, page_url=page_url, webpage=webpage, display_id=display_id)
+        # Neither the player nor JSON-LD matched. Accept only media whose URL carries
+        # this video's numeric id, so a related clip is never offered as the video.
+        info = build_info_dict(
+            video_id=video_id, page_url=page_url, webpage=webpage, display_id=display_id,
+            require_video_id_in_url=True)
+        for fmt in info['formats']:
+            fmt['impersonate'] = True
+        return info
 
     formats = []
     for index, source in enumerate(sources):
@@ -488,7 +542,8 @@ def luxure_info(
             # The stream sits behind the same Cloudflare check as the page.
             'impersonate': True,
         })
-    title = _LUXURE_TITLE_SUFFIX_RE.sub('', str(ld.get('name') or extract_title(webpage) or '')).strip()
+    title = _LUXURE_TITLE_SUFFIX_RE.sub(
+        '', html_unescape(str(ld.get('name') or extract_title(webpage) or ''))).strip()
     info: dict[str, Any] = {
         'id': video_id,
         'title': title or display_id or video_id,

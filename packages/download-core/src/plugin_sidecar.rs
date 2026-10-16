@@ -48,7 +48,7 @@ impl PluginManifest {
     /// Canonical manifest for the in-tree Launch Site plugin package.
     pub fn launch_sites_default() -> Self {
         Self {
-            version: "0.2.0".to_string(),
+            version: "0.2.1".to_string(),
             package: PLUGIN_PACKAGE_NAME.to_string(),
             extractors: ["LuxureTV", "LuxureTVList", "XxxbpTV", "XxxbpTVList"]
                 .into_iter()
@@ -170,9 +170,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 /// a fresh install works without any catalog, package layout or network.
 const BUNDLED_FILES: &[(&str, &str)] = &[
     (
-        "yt_dlp_plugins/extractor/_parse.py",
+        "yt_dlp_plugins/extractor/_phlegethon_parse.py",
         include_str!(
-            "../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/_parse.py"
+            "../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/_phlegethon_parse.py"
         ),
     ),
     (
@@ -326,7 +326,7 @@ mod tests {
         write_manifest(tmp.path(), &manifest).unwrap();
         let loaded = load_manifest(tmp.path()).unwrap();
         assert_eq!(loaded, manifest);
-        assert_eq!(loaded.version, "0.2.0");
+        assert_eq!(loaded.version, "0.2.1");
         assert!(loaded.extractors.contains(&"LuxureTV".to_string()));
         assert!(loaded.extractors.contains(&"XxxbpTV".to_string()));
         assert!(loaded.extractors.contains(&"XxxbpTVList".to_string()));
@@ -343,7 +343,7 @@ mod tests {
     fn needs_update_when_versions_differ() {
         let installed = PluginManifest::launch_sites_default();
         assert!(needs_update(&installed, "0.3.0"));
-        assert!(!needs_update(&installed, "0.2.0"));
+        assert!(!needs_update(&installed, "0.2.1"));
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
             .is_file());
 
         let loaded = load_manifest(&sidecar).unwrap();
-        assert_eq!(loaded.version, "0.2.0");
+        assert_eq!(loaded.version, "0.2.1");
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
         let base = plugin_dirs_path(tmp.path())
             .unwrap()
             .join(PLUGIN_PACKAGE_NAME);
-        for file in ["_parse.py", "luxuretv.py", "xxxbp.py"] {
+        for file in ["_phlegethon_parse.py", "luxuretv.py", "xxxbp.py"] {
             assert!(
                 base.join("yt_dlp_plugins/extractor").join(file).is_file(),
                 "{file}"

@@ -11,8 +11,9 @@ from yt_dlp.utils import (
     unified_timestamp,
     urlencode_postdata,
 )
+from yt_dlp.version import __version__ as YT_DLP_VERSION
 
-from yt_dlp_plugins.extractor._parse import (
+from yt_dlp_plugins.extractor._phlegethon_parse import (
     CLOUDFLARE_HELP,
     XXXBP_API_URL,
     clean_xxxbp_title,
@@ -20,9 +21,16 @@ from yt_dlp_plugins.extractor._parse import (
     split_page_number,
     xxxbp_api_formats,
     xxxbp_listing_entries,
+    yt_dlp_version_problem,
 )
 
 _BASE = 'https://xxxbp.tv'
+
+
+def _require_supported_yt_dlp():
+    problem = yt_dlp_version_problem(YT_DLP_VERSION)
+    if problem:
+        raise ExtractorError(f'xxxbp.tv: {problem}', expected=True)
 
 
 class XxxbpTVIE(InfoExtractor):
@@ -36,7 +44,7 @@ class XxxbpTVIE(InfoExtractor):
 
     IE_NAME = 'XxxbpTV'
     _VALID_URL = r'''(?x)
-        https?://(?:www\.)?xxxbp\.tv/
+        https?://(?:[a-z0-9-]+\.)*xxxbp\.tv/
         (?:video|v|videos|embed)/(?P<id>[0-9]+)(?:/(?P<display_id>[^/?\#]+))?/?
     '''
     _TESTS = [{
@@ -51,6 +59,7 @@ class XxxbpTVIE(InfoExtractor):
     }]
 
     def _real_extract(self, url):
+        _require_supported_yt_dlp()
         mobj = self._match_valid_url(url)
         video_id = mobj.group('id')
         display_id = mobj.group('display_id') or video_id
@@ -70,7 +79,10 @@ class XxxbpTVIE(InfoExtractor):
                 'Origin': _BASE,
                 'X-Requested-With': 'XMLHttpRequest',
             })
-        formats, master = xxxbp_api_formats(payload or {}, referer)
+        try:
+            formats, master = xxxbp_api_formats(payload, referer)
+        except ValueError as e:
+            raise ExtractorError(f'xxxbp.tv: {e}', expected=True) from e
         if master:
             hls_formats = self._extract_m3u8_formats(
                 master, video_id, 'mp4', m3u8_id='hls', headers={'Referer': referer}, fatal=False)
@@ -110,8 +122,8 @@ class XxxbpTVListIE(InfoExtractor):
     """
 
     IE_NAME = 'XxxbpTVList'
-    _VALID_URL = r'''(?x)
-        https?://(?:www\.)?xxxbp\.tv/
+    _VALID_URL = r'''(?ix)
+        https?://(?:[a-z0-9-]+\.)*xxxbp\.tv/
         (?P<path>
             (?!(?:video|v|videos|embed|api|member|legal|feedback|history|static|categories/a-z)(?:/|$|\?))
             [a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*?
@@ -136,8 +148,10 @@ class XxxbpTVListIE(InfoExtractor):
     def _fetch_page(self, base, page, playlist_id):
         page_url = base if page == 1 else f'{base}/{page}'
         try:
+            # Always fatal: a 429 or 5xx on page 3 must fail the listing, not end it early.
+            # Only a 404 past the first page means the listing ran out.
             webpage = self._download_webpage(
-                page_url, playlist_id, note=f'Downloading page {page}', fatal=page == 1)
+                page_url, playlist_id, note=f'Downloading page {page}')
         except ExtractorError as e:
             if page > 1 and isinstance(e.cause, HTTPError) and e.cause.status == 404:
                 return []
@@ -159,7 +173,8 @@ class XxxbpTVListIE(InfoExtractor):
                     item['url'], XxxbpTVIE, item['id'], video_title=item['title'])
 
     def _real_extract(self, url):
-        path = self._match_valid_url(url).group('path')
+        _require_supported_yt_dlp()
+        path = self._match_valid_url(url).group('path').lower()
         base_path, start_page = split_page_number(path)
         base = f'{_BASE}/{base_path}'
         playlist_id = base_path.replace('/', '-')

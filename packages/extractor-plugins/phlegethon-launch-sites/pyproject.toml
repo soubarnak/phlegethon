@@ -1,3 +1,21 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "phlegethon-yt-dlp-plugins"
+# Keep equal to "version" in ../plugins-manifest.json and the default in
+# packages/download-core/src/plugin_sidecar.rs (Python and Rust tests check the pair).
+version = "0.2.1"
+description = "Phlegethon-owned yt-dlp Extractor Plugins for luxuretv and xxxbp.tv"
+authors = [{ name = "Phlegethon" }]
+requires-python = ">=3.9"
+# Keep equal to MIN_YT_DLP_VERSION in yt_dlp_plugins/extractor/_phlegethon_parse.py
+# (a test checks it). The app installs the plugins by copying files, not through pip,
+# so the extractors also check the running yt-dlp version themselves.
+dependencies = ["yt-dlp>=2025.07.21"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yt_dlp_plugins*"]
+namespaces = true

@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<title>Sample Clip - LuxureTV</title>
+<meta property="og:title" content="Sample Clip - LuxureTV">
+</head>
+<body>
+<!-- Player markup and JSON-LD are gone (a redesign). The page still carries the
+     main stream in a script config, plus related clips whose ids merely resemble it. -->
+<div class="player-shell" data-video="100200"></div>
+<script>
+var playerConfig = {"file": "https://en.luxuretv.com/cf-stream/100200/a/b/c/d/e/abcde0002.mp4?md5=TOKEN&expires=1790000000", "label": "720p"};
+var related = [
+  "https://en.luxuretv.com/cf-stream/100201/f/0/0/1/1/f00110002.mp4",
+  "https://en.luxuretv.com/cf-stream/1002001/f/0/0/2/2/f00220002.mp4",
+  "https://en.luxuretv.com/cf-stream/2100200/f/0/0/3/3/f00330002.mp4"
+];
+</script>
+</body>
+</html>
