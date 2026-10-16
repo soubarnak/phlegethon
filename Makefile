@@ -18,7 +18,7 @@ FRONTEND = packages/tauri-shell/frontend
 TARGET   = target/release
 ICON_SIZES = 32 128 256 512
 
-.PHONY: all build frontend install uninstall test test-shell test-rust test-plugins test-extension test-frontend \
+.PHONY: all build frontend install uninstall test test-shell gen-types test-rust test-plugins test-extension test-frontend \
 	desktop nmh-install dist xbps probe-check e2e-ui clean help
 
 all: build
@@ -71,6 +71,10 @@ test-frontend:
 # The Tauri shell crate (needs libwebkit2gtk41-devel, gtk+3-devel, libsoup3-devel).
 test-shell:
 	$(CARGO) test -p phlegethon-tauri
+
+# Regenerate the TypeScript IPC types from the Rust serde types (ts-rs, `ts` feature). Needs the shell libraries too.
+gen-types:
+	scripts/gen-ts-types.sh
 
 desktop:
 	@command -v desktop-file-validate >/dev/null && desktop-file-validate packaging/linux/phlegethon.desktop \

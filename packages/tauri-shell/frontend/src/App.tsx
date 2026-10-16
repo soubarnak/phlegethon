@@ -109,7 +109,7 @@ function Shell() {
   const enqueueOne = useCallback(
     async (url: string, forceDirect = false) => {
       const result = await api.enqueueUrl(url, destination, forceDirect);
-      if (result.type === "ProbeThenConfirm") {
+      if (result.type === "probe_then_confirm") {
         queueProbe(result.url);
       } else {
         await refresh();

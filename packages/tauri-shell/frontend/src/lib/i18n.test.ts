@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import en from "@strings/en.json";
 import { getCurrentLocale, initLocale, t } from "./i18n";
@@ -37,6 +38,27 @@ describe("i18n", () => {
       }
     }
     expect([...missing]).toEqual([]);
+  });
+  it("never calls t() at module scope, where it runs before initLocale() (L-59)", () => {
+    const offenders: string[] = [];
+    for (const file of sources(path.resolve(__dirname, ".."))) {
+      const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      const visit = (node: ts.Node, insideFunction: boolean) => {
+        const isFunction = ts.isFunctionLike(node) || ts.isClassLike(node);
+        if (
+          !insideFunction &&
+          ts.isCallExpression(node) &&
+          ts.isIdentifier(node.expression) &&
+          node.expression.text === "t"
+        ) {
+          const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+          offenders.push(`${path.basename(file)}:${line + 1}`);
+        }
+        ts.forEachChild(node, (child) => visit(child, insideFunction || isFunction));
+      };
+      visit(source, false);
+    }
+    expect(offenders).toEqual([]);
   });
   it("covers the dynamic toolchain keys", () => {
     const table = en as Record<string, string>;

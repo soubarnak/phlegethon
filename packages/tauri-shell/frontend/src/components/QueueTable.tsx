@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   Button,
   DataTable,
@@ -62,7 +62,8 @@ interface QueueTableProps {
   hasAnyJobs: boolean;
 }
 
-const headers = [
+// Built on first render, not at module scope: t() at import time runs before initLocale() (L-59).
+const queueHeaders = () => [
   { key: "title", header: t("queue.col.title") },
   { key: "status", header: t("queue.col.status") },
   { key: "progress", header: t("queue.col.progress") },
@@ -134,7 +135,99 @@ function tierTag(tier: ExtractionTier | null) {
   }
 }
 
-const FILTERS = [
+interface QueueRowCellsProps {
+  job: JobRow;
+  actions: QueueActions;
+  isLast: boolean;
+}
+
+/**
+ * The cells of one queue row. Memoized (H-25): useJobs keeps a job's object identity until its
+ * fields change, so a progress tick on one job re-renders only that job's cells.
+ */
+const QueueRowCells = memo(function QueueRowCells({ job, actions, isLast }: QueueRowCellsProps) {
+  const pct = displayProgressPercent(job.bytes_downloaded, job.total_bytes);
+  const rate = job.status === "downloading" ? formatRate(job.speed_bps) : "";
+  const eta = job.status === "downloading" ? formatEta(estimateEtaSeconds(job.bytes_downloaded, job.total_bytes, job.speed_bps)) : "";
+  const helper = [
+    job.total_bytes != null
+      ? `${formatBytes(job.bytes_downloaded)} / ${formatBytes(job.total_bytes)}`
+      : job.bytes_downloaded > 0
+        ? formatBytes(job.bytes_downloaded)
+        : "",
+    rate,
+    eta ? t("queue.eta", { eta }) : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const progressStatus = job.status === "completed" ? "finished" : job.status === "failed" ? "error" : "active";
+  const canReveal = job.status === "completed" && !!job.path;
+  const isFirst = job.queue_index === 0;
+  return (
+    <>
+        <TableCell className={colClass("title")}>
+          <div className="ph-queue__title">
+            <span className="ph-queue__title-text" title={job.title}>
+              {job.title}
+            </span>
+            <span className="ph-queue__url" title={job.url}>
+              {job.url}
+            </span>
+            {job.status === "failed" && job.last_error && (
+              <JobError raw={job.last_error} />
+            )}
+          </div>
+        </TableCell>
+        <TableCell className={colClass("status")}>
+          <div className="ph-queue__tags">
+            <Tag size="sm" type={STATUS_TAG[job.status]} data-testid="status-tag">
+              {statusLabel(job.status)}
+            </Tag>
+            {tierTag(job.extraction_tier)}
+          </div>
+        </TableCell>
+        <TableCell className={colClass("progress")}>
+          <div className="ph-queue__progress">
+            <ProgressBar
+              size="small"
+              hideLabel
+              label={t("queue.progressFor", { title: job.title })}
+              helperText={helper || (job.status === "pending" ? t("queue.status.queued") : "")}
+              value={job.status === "completed" ? 100 : job.status === "pending" ? 0 : pct ?? undefined}
+              max={100}
+              status={progressStatus}
+            />
+          </div>
+        </TableCell>
+        <TableCell className={colClass("size")}>{job.total_bytes != null ? formatBytes(job.total_bytes) : "—"}</TableCell>
+        <TableCell className={colClass("actions")}>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.25rem" }}>
+            {(job.status === "pending" || job.status === "downloading") && (
+              <Button kind="ghost" size="sm" hasIconOnly renderIcon={Pause} iconDescription={t("queue.action.pause")} onClick={() => actions.pause(job.job_id)} />
+            )}
+            {job.status === "paused" && (
+              <Button kind="ghost" size="sm" hasIconOnly renderIcon={Play} iconDescription={t("queue.action.resume")} onClick={() => actions.resume(job.job_id)} />
+            )}
+            {job.status === "failed" && (
+              <Button kind="ghost" size="sm" hasIconOnly renderIcon={Renew} iconDescription={t("queue.action.retry")} onClick={() => actions.retry(job.job_id)} />
+            )}
+            <OverflowMenu size="sm" flipped aria-label={t("queue.rowMenu", { title: job.title })} iconDescription={t("queue.rowMenu", { title: job.title })}>
+              <OverflowMenuItem itemText={t("queue.action.moveUp")} disabled={isFirst} onClick={() => actions.moveUp(job)} />
+              <OverflowMenuItem itemText={t("queue.action.moveDown")} disabled={isLast} onClick={() => actions.moveDown(job)} />
+              <OverflowMenuItem itemText={t("queue.action.reveal")} disabled={!canReveal} onClick={() => actions.reveal(job)} />
+              <OverflowMenuItem itemText={t("queue.action.open")} disabled={!canReveal} onClick={() => actions.open(job)} />
+              <OverflowMenuItem itemText={t("queue.action.copyUrl")} onClick={() => actions.copyUrl(job)} />
+              <OverflowMenuItem itemText={t("queue.action.addMirror")} disabled={job.is_extractor || job.status === "completed"} onClick={() => actions.addMirror(job)} />
+              <OverflowMenuItem itemText={t("queue.action.bandwidthCap")} disabled={job.status === "completed"} onClick={() => actions.setJobCap(job)} />
+              <OverflowMenuItem hasDivider isDelete itemText={t("queue.action.discard")} onClick={() => actions.discard([job.job_id])} />
+            </OverflowMenu>
+          </div>
+        </TableCell>
+    </>
+        );
+});
+
+const queueFilters = () => [
   { id: QUEUE_FILTER_ALL, label: t("queue.filter.all") },
   { id: "queued", label: t("queue.filter.queued") },
   { id: "downloading", label: t("queue.filter.downloading") },
@@ -143,7 +236,7 @@ const FILTERS = [
   { id: "failed", label: t("queue.filter.failed") },
 ];
 
-const SORTS = [
+const queueSorts = () => [
   { id: QUEUE_SORT_QUEUE, label: t("queue.sort.queue") },
   { id: QUEUE_SORT_TITLE, label: t("queue.sort.title") },
   { id: QUEUE_SORT_STATUS, label: t("queue.sort.status") },
@@ -152,8 +245,11 @@ const SORTS = [
 
 export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState(FILTERS[0]);
-  const [sort, setSort] = useState(SORTS[0]);
+  const headers = useMemo(queueHeaders, []);
+  const filters = useMemo(queueFilters, []);
+  const sorts = useMemo(queueSorts, []);
+  const [filter, setFilter] = useState(filters[0]);
+  const [sort, setSort] = useState(sorts[0]);
   const narrow = useMediaQuery(NARROW_QUERY);
 
   const visible = useMemo(
@@ -267,7 +363,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                       hideLabel
                       titleText={t("queue.filter.label")}
                       label={t("queue.filter.label")}
-                      items={FILTERS}
+                      items={filters}
                       itemToString={(i) => i?.label ?? ""}
                       selectedItem={filter}
                       onChange={({ selectedItem }) => selectedItem && setFilter(selectedItem)}
@@ -278,7 +374,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                       hideLabel
                       titleText={t("queue.sort.label")}
                       label={t("queue.sort.label")}
-                      items={SORTS}
+                      items={sorts}
                       itemToString={(i) => i?.label ?? ""}
                       selectedItem={sort}
                       onChange={({ selectedItem }) => selectedItem && setSort(selectedItem)}
@@ -308,85 +404,10 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                       const job = byId.get(row.id);
                       if (!job) return null;
                       const { key, ...rowProps } = getRowProps({ row });
-                      const pct = displayProgressPercent(job.bytes_downloaded, job.total_bytes);
-                      const rate = job.status === "downloading" ? formatRate(job.speed_bps) : "";
-                      const eta = job.status === "downloading" ? formatEta(estimateEtaSeconds(job.bytes_downloaded, job.total_bytes, job.speed_bps)) : "";
-                      const helper = [
-                        job.total_bytes != null
-                          ? `${formatBytes(job.bytes_downloaded)} / ${formatBytes(job.total_bytes)}`
-                          : job.bytes_downloaded > 0
-                            ? formatBytes(job.bytes_downloaded)
-                            : "",
-                        rate,
-                        eta ? t("queue.eta", { eta }) : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" · ");
-                      const progressStatus = job.status === "completed" ? "finished" : job.status === "failed" ? "error" : "active";
-                      const canReveal = job.status === "completed" && !!job.path;
-                      const isFirst = job.queue_index === 0;
-                      const isLast = job.queue_index === jobs.length - 1;
                       return (
                         <TableRow key={key} {...rowProps} data-testid={`queue-row-${job.job_id}`}>
                           <TableSelectRow {...getSelectionProps({ row })} />
-                          <TableCell className={colClass("title")}>
-                            <div className="ph-queue__title">
-                              <span className="ph-queue__title-text" title={job.title}>
-                                {job.title}
-                              </span>
-                              <span className="ph-queue__url" title={job.url}>
-                                {job.url}
-                              </span>
-                              {job.status === "failed" && job.last_error && (
-                                <JobError raw={job.last_error} />
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell className={colClass("status")}>
-                            <div className="ph-queue__tags">
-                              <Tag size="sm" type={STATUS_TAG[job.status]} data-testid="status-tag">
-                                {statusLabel(job.status)}
-                              </Tag>
-                              {tierTag(job.extraction_tier)}
-                            </div>
-                          </TableCell>
-                          <TableCell className={colClass("progress")}>
-                            <div className="ph-queue__progress">
-                              <ProgressBar
-                                size="small"
-                                hideLabel
-                                label={t("queue.progressFor", { title: job.title })}
-                                helperText={helper || (job.status === "pending" ? t("queue.status.queued") : "")}
-                                value={job.status === "completed" ? 100 : job.status === "pending" ? 0 : pct ?? undefined}
-                                max={100}
-                                status={progressStatus}
-                              />
-                            </div>
-                          </TableCell>
-                          <TableCell className={colClass("size")}>{job.total_bytes != null ? formatBytes(job.total_bytes) : "—"}</TableCell>
-                          <TableCell className={colClass("actions")}>
-                            <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.25rem" }}>
-                              {(job.status === "pending" || job.status === "downloading") && (
-                                <Button kind="ghost" size="sm" hasIconOnly renderIcon={Pause} iconDescription={t("queue.action.pause")} onClick={() => actions.pause(job.job_id)} />
-                              )}
-                              {job.status === "paused" && (
-                                <Button kind="ghost" size="sm" hasIconOnly renderIcon={Play} iconDescription={t("queue.action.resume")} onClick={() => actions.resume(job.job_id)} />
-                              )}
-                              {job.status === "failed" && (
-                                <Button kind="ghost" size="sm" hasIconOnly renderIcon={Renew} iconDescription={t("queue.action.retry")} onClick={() => actions.retry(job.job_id)} />
-                              )}
-                              <OverflowMenu size="sm" flipped aria-label={t("queue.rowMenu", { title: job.title })} iconDescription={t("queue.rowMenu", { title: job.title })}>
-                                <OverflowMenuItem itemText={t("queue.action.moveUp")} disabled={isFirst} onClick={() => actions.moveUp(job)} />
-                                <OverflowMenuItem itemText={t("queue.action.moveDown")} disabled={isLast} onClick={() => actions.moveDown(job)} />
-                                <OverflowMenuItem itemText={t("queue.action.reveal")} disabled={!canReveal} onClick={() => actions.reveal(job)} />
-                                <OverflowMenuItem itemText={t("queue.action.open")} disabled={!canReveal} onClick={() => actions.open(job)} />
-                                <OverflowMenuItem itemText={t("queue.action.copyUrl")} onClick={() => actions.copyUrl(job)} />
-                                <OverflowMenuItem itemText={t("queue.action.addMirror")} disabled={job.is_extractor || job.status === "completed"} onClick={() => actions.addMirror(job)} />
-                                <OverflowMenuItem itemText={t("queue.action.bandwidthCap")} disabled={job.status === "completed"} onClick={() => actions.setJobCap(job)} />
-                                <OverflowMenuItem hasDivider isDelete itemText={t("queue.action.discard")} onClick={() => actions.discard([job.job_id])} />
-                              </OverflowMenu>
-                            </div>
-                          </TableCell>
+                          <QueueRowCells job={job} actions={actions} isLast={job.queue_index === jobs.length - 1} />
                         </TableRow>
                       );
                     })}
