@@ -485,7 +485,7 @@ impl EnrichPlan {
 
 enum UnlockedTransferPlan {
     SingleFetch {
-        job_index: usize,
+        job_id: String,
         bytes_received: u64,
         url: String,
         part_path: PathBuf,
@@ -502,7 +502,7 @@ enum UnlockedTransferPlan {
     },
     /// Multi-connection Range transfer (fresh job, server supports ranges, no cap).
     Segmented {
-        job_index: usize,
+        job_id: String,
         url: String,
         part_path: PathBuf,
         file_path: PathBuf,
@@ -516,7 +516,6 @@ enum UnlockedTransferPlan {
     /// Extractor Toolchain (yt-dlp) download; runs on its own thread while Core
     /// polls Job Destination growth for progress.
     ExtractorFetch {
-        job_index: usize,
         job_id: String,
         url: String,
         format: String,
@@ -537,7 +536,7 @@ enum UnlockedTransferPlan {
 
 enum UnlockedTransferOutcome {
     Fetched {
-        job_index: usize,
+        job_id: String,
         bytes_received: u64,
         part_path: PathBuf,
         file_path: PathBuf,
@@ -545,14 +544,14 @@ enum UnlockedTransferOutcome {
         failed_url: String,
     },
     Segmented {
-        job_index: usize,
+        job_id: String,
         part_path: PathBuf,
         file_path: PathBuf,
         failed_url: String,
         result: Result<(u64, u64, bool), String>,
     },
     Extracted {
-        job_index: usize,
+        job_id: String,
         dest: PathBuf,
         media_extras: MediaExtrasOptions,
         stop: Arc<AtomicBool>,
@@ -560,11 +559,21 @@ enum UnlockedTransferOutcome {
     },
 }
 
+impl UnlockedTransferOutcome {
+    fn job_id(&self) -> &str {
+        match self {
+            Self::Fetched { job_id, .. }
+            | Self::Segmented { job_id, .. }
+            | Self::Extracted { job_id, .. } => job_id,
+        }
+    }
+}
+
 impl UnlockedTransferPlan {
     fn run(self) -> UnlockedTransferOutcome {
         match self {
             Self::SingleFetch {
-                job_index,
+                job_id,
                 bytes_received,
                 url,
                 part_path,
@@ -595,7 +604,7 @@ impl UnlockedTransferPlan {
                     progress: Some(progress),
                 });
                 UnlockedTransferOutcome::Fetched {
-                    job_index,
+                    job_id,
                     bytes_received,
                     part_path,
                     file_path,
@@ -604,7 +613,7 @@ impl UnlockedTransferPlan {
                 }
             }
             Self::Segmented {
-                job_index,
+                job_id,
                 url,
                 part_path,
                 file_path,
@@ -627,7 +636,7 @@ impl UnlockedTransferPlan {
                 );
                 transfer_active.store(false, Ordering::Release);
                 UnlockedTransferOutcome::Segmented {
-                    job_index,
+                    job_id,
                     part_path,
                     file_path,
                     failed_url,
@@ -635,7 +644,6 @@ impl UnlockedTransferPlan {
                 }
             }
             Self::ExtractorFetch {
-                job_index,
                 job_id,
                 url,
                 format,
@@ -664,13 +672,13 @@ impl UnlockedTransferPlan {
                     stop: stop.clone(),
                     live_bytes,
                     event_tx,
-                    job_id,
+                    job_id: job_id.clone(),
                     total_for_progress,
                     referer,
                 });
                 transfer_active.store(false, Ordering::Release);
                 UnlockedTransferOutcome::Extracted {
-                    job_index,
+                    job_id,
                     dest,
                     media_extras,
                     stop,
@@ -1091,6 +1099,12 @@ impl Core {
             self.persist_queue_now()?;
         }
         Ok(())
+    }
+
+    /// Current queue position of a job. Positions shift on Discard and
+    /// reorder, so never hold one across a released lock.
+    fn job_index(&self, job_id: &str) -> Option<usize> {
+        self.jobs.iter().position(|j| j.id() == job_id)
     }
 
     fn resolve_known_total(&self, job_index: usize, url: &str) -> Option<u64> {
@@ -2518,7 +2532,7 @@ impl Core {
 
             let retry = {
                 let mut core = core.lock().map_err(|e| e.to_string())?;
-                core.finish_unlocked_transfer(&job_id, outcome)?
+                core.finish_unlocked_transfer(outcome)?
             };
             if !retry {
                 return Ok(());
@@ -2595,7 +2609,6 @@ impl Core {
             // `pause_requested` is also set by Discard (`signal_discard_stop`);
             // both Pause and Discard use it as the extractor stop signal.
             return Ok(Some(UnlockedTransferPlan::ExtractorFetch {
-                job_index: i,
                 job_id: job_id.to_string(),
                 url,
                 format,
@@ -2649,7 +2662,7 @@ impl Core {
 
                 transfer_active.store(true, Ordering::Release);
                 return Ok(Some(UnlockedTransferPlan::Segmented {
-                    job_index: i,
+                    job_id: job_id.to_string(),
                     url,
                     part_path,
                     file_path,
@@ -2704,7 +2717,7 @@ impl Core {
 
         transfer_active.store(true, Ordering::Release);
         Ok(Some(UnlockedTransferPlan::SingleFetch {
-            job_index: i,
+            job_id: job_id.to_string(),
             bytes_received,
             url,
             part_path,
@@ -2725,17 +2738,24 @@ impl Core {
     /// mirror failover loop should retry.
     fn finish_unlocked_transfer(
         &mut self,
-        job_id: &str,
         outcome: UnlockedTransferOutcome,
     ) -> Result<bool, String> {
+        // The queue can change while a transfer runs (Discard, reorder), so the
+        // job is always resolved by id here, never by a position recorded at
+        // plan time.
+        let job_id = outcome.job_id().to_string();
+        let job_id = job_id.as_str();
+        let Some(job_index) = self.job_index(job_id) else {
+            return Ok(false);
+        };
         match outcome {
             UnlockedTransferOutcome::Fetched {
-                job_index,
                 bytes_received,
                 part_path,
                 file_path,
                 outcome,
                 failed_url,
+                ..
             } => {
                 if outcome.paused {
                     self.sync_job_progress(job_id, bytes_received)?;
@@ -2784,19 +2804,19 @@ impl Core {
                         }
                         Ok(false)
                     }
-                    Err(err) => self.fail_or_failover(job_id, job_index, failed_url, err),
+                    Err(err) => self.fail_or_failover(job_id, failed_url, err),
                 }
             }
             UnlockedTransferOutcome::Segmented {
-                job_index,
                 part_path,
                 file_path,
                 failed_url,
                 result,
+                ..
             } => match result {
                 Err(err) => {
                     let _ = std::fs::remove_file(&part_path);
-                    self.fail_or_failover(job_id, job_index, failed_url, err)
+                    self.fail_or_failover(job_id, failed_url, err)
                 }
                 Ok((total_size, _bytes_written, paused)) => {
                     self.jobs[job_index].set_total_bytes(Some(total_size));
@@ -2830,11 +2850,11 @@ impl Core {
                 }
             },
             UnlockedTransferOutcome::Extracted {
-                job_index,
                 dest,
                 media_extras,
                 stop,
                 result,
+                ..
             } => {
                 let live_bytes = self.jobs[job_index].live_downloaded();
                 let total_for_progress = self.jobs[job_index].total_bytes();
@@ -2895,10 +2915,12 @@ impl Core {
     fn fail_or_failover(
         &mut self,
         job_id: &str,
-        job_index: usize,
         failed_url: String,
         err: String,
     ) -> Result<bool, String> {
+        let job_index = self
+            .job_index(job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
         if self.jobs[job_index].advance_mirror() {
             let next_url = self.jobs[job_index].url().to_string();
             self.event_tx
@@ -2932,7 +2954,7 @@ impl Core {
                 return Ok(());
             };
             let outcome = plan.run();
-            if !self.finish_unlocked_transfer(&job_id, outcome)? {
+            if !self.finish_unlocked_transfer(outcome)? {
                 return Ok(());
             }
         }

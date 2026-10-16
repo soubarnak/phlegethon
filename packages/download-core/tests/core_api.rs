@@ -5527,6 +5527,106 @@ fn reorder_does_not_preempt_active_transfer() {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: queue changes during a transfer (B-1)
+// ---------------------------------------------------------------------------
+
+/// Queue [paused A, B], then start B so its transfer runs while the test
+/// edits the queue. Returns the shared Core, A's id, B's id and the receiver.
+type TransferBehindPausedJob = (
+    Arc<Mutex<Core>>,
+    String,
+    String,
+    crossbeam_channel::Receiver<CoreEvent>,
+);
+
+fn start_transfer_behind_paused_job(library: &std::path::Path) -> TransferBehindPausedJob {
+    let http = slow_tracking_http_with_delay(
+        &[
+            ("https://example.com/a.zip", 64),
+            ("https://example.com/b.zip", 64),
+        ],
+        std::time::Duration::from_millis(400),
+    );
+    let (core, rx) = Core::new(Box::new(http), Box::new(fake_toolchain()));
+    let core = Arc::new(Mutex::new(core));
+    let (a_id, b_id) = {
+        let mut guard = core.lock().unwrap();
+        guard.set_library_root(library.to_path_buf()).unwrap();
+        let a = enqueue_direct_job_id(&mut guard, "https://example.com/a.zip");
+        let b = enqueue_direct_job_id(&mut guard, "https://example.com/b.zip");
+        guard.pause_job(&a).unwrap();
+        (a, b)
+    };
+    Core::dispatch_pending(Arc::clone(&core)).unwrap();
+    for _ in 0..100 {
+        if core.lock().unwrap().job_signals().is_transfer_active(&b_id) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        core.lock().unwrap().job_signals().is_transfer_active(&b_id),
+        "job B should be transferring"
+    );
+    (core, a_id, b_id, rx)
+}
+
+fn wait_for_completion(rx: &crossbeam_channel::Receiver<CoreEvent>, job_id: &str) -> bool {
+    for _ in 0..200 {
+        for ev in collect_events(rx) {
+            if matches!(&ev, CoreEvent::JobCompleted { job_id: id, .. } if id == job_id) {
+                return true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    false
+}
+
+#[test]
+fn discarding_an_earlier_job_during_a_transfer_does_not_break_the_transfer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, a_id, b_id, rx) = start_transfer_behind_paused_job(&tmp.path().join("library"));
+
+    core.lock().unwrap().discard_job(&a_id).unwrap();
+
+    assert!(
+        wait_for_completion(&rx, &b_id),
+        "job B should complete after job A is discarded"
+    );
+    let guard = core.lock().expect("Core mutex must not be poisoned");
+    let snapshots = guard.list_job_snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].job_id, b_id);
+    assert_eq!(snapshots[0].status, "completed");
+}
+
+#[test]
+fn reordering_during_a_transfer_completes_the_job_that_transferred() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (core, a_id, b_id, rx) = start_transfer_behind_paused_job(&tmp.path().join("library"));
+
+    core.lock().unwrap().reorder_job(0, 1).unwrap();
+
+    assert!(
+        wait_for_completion(&rx, &b_id),
+        "job B should complete after the queue is reordered"
+    );
+    let guard = core.lock().expect("Core mutex must not be poisoned");
+    let snapshots = guard.list_job_snapshots();
+    let a = snapshots.iter().find(|s| s.job_id == a_id).unwrap();
+    let b = snapshots.iter().find(|s| s.job_id == b_id).unwrap();
+    assert_eq!(a.status, "paused", "job A must not be completed by B");
+    assert_eq!(b.status, "completed");
+    let b_path = b.path.as_deref().expect("completed job has a path");
+    assert!(
+        b_path.ends_with("b.zip"),
+        "B should keep its own filename, got {b_path}"
+    );
+    assert!(std::path::Path::new(b_path).is_file());
+}
+
+// ---------------------------------------------------------------------------
 // Acceptance: Integrity Check (issue #51)
 // ---------------------------------------------------------------------------
 
