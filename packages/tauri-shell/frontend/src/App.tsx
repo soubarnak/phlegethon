@@ -199,9 +199,16 @@ function Shell() {
     let off: (() => void) | null = null;
     let cancelled = false;
     onCompanionIntent((intent) => companionHandler.current(intent))
-      .then((fn) => {
-        if (cancelled) fn();
-        else off = fn;
+      .then(async (fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        off = fn;
+        // The shell holds intents that arrived while the webview was loading and emits
+        // live ones only after this call. Subscribe first, so nothing falls in between (M-69).
+        const pending = await api.takePendingIntents();
+        if (!cancelled) pending.forEach((intent) => companionHandler.current(intent));
       })
       .catch(() => undefined);
     return () => {
