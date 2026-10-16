@@ -5825,40 +5825,41 @@ fn disk_precheck_allows_when_known_size_fits_with_margin() {
     assert_eq!(snap.status, "completed");
 }
 
-#[test]
-fn disk_precheck_allows_when_size_unknown() {
-    let body = vec![b'U'; 64];
+/// Run one unknown-size job against a volume reporting `free` bytes.
+fn run_unknown_size_job(free: u64) -> Vec<CoreEvent> {
     let http = SlowUnknownSizeHttp {
-        body: Arc::new(body.clone()),
+        body: Arc::new(vec![b'U'; 64]),
     };
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core_with_free_space(Box::new(http), 0);
+    let (mut core, rx) = make_core_with_free_space(Box::new(http), free);
     core.set_library_root(tmp.path().join("library")).unwrap();
-
-    let url = "https://example.com/unknown.bin";
-    let job_id = {
-        let outcome = core.enqueue(url, None).expect("enqueue should succeed");
-        match outcome {
-            EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
-            _ => panic!("expected direct enqueue"),
-        }
-    };
-
+    enqueue_direct_job_id(&mut core, "https://example.com/unknown.bin");
     core.process_pending().unwrap();
-    let events = collect_events(&rx);
+    collect_events(&rx)
+}
+
+#[test]
+fn disk_precheck_requires_the_safety_margin_when_size_unknown() {
+    let events = run_unknown_size_job(0);
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CoreEvent::JobFailed { error, .. } if error.contains("insufficient disk space")
+        )),
+        "a full disk must fail the job before it starts, got: {events:?}"
+    );
+}
+
+#[test]
+fn disk_precheck_allows_unknown_size_when_the_margin_is_free() {
+    let events = run_unknown_size_job(1 << 30);
 
     assert!(
         events
             .iter()
             .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
-        "unknown size should start even with zero reported free space, got: {events:?}"
-    );
-    assert!(
-        !events.iter().any(|e| match e {
-            CoreEvent::JobFailed { job_id: id, .. } => id == &job_id,
-            _ => false,
-        }),
-        "unknown size must not fail disk pre-check"
+        "unknown size starts when the safety margin is free, got: {events:?}"
     );
 }
 
@@ -8992,5 +8993,116 @@ fn slow_head_requests_do_not_hold_the_core_lock() {
         &job_id,
         "completed",
         std::time::Duration::from_secs(10),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: persisted progress, durability and state guards (L-5, L-7, L-14, M-9)
+// ---------------------------------------------------------------------------
+
+/// Single-connection origin that streams one byte per `delay`.
+#[derive(Clone)]
+struct DripHttp {
+    body: Vec<u8>,
+    delay: std::time::Duration,
+}
+
+impl HttpBackend for DripHttp {
+    fn fetch(
+        &self,
+        _url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        let total = self.body.len() as u64;
+        let start = range.map_or(0, |r| r.start.min(total)) as usize;
+        let mut written = 0u64;
+        for byte in &self.body[start..] {
+            let n = sink
+                .write(std::slice::from_ref(byte))
+                .map_err(|e| format!("sink write: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            written += n as u64;
+            std::thread::sleep(self.delay);
+        }
+        Ok(FetchResult {
+            total_length: total,
+            bytes_written: written,
+            ..Default::default()
+        })
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn file_size(&self, _url: &str) -> Result<u64, String> {
+        Ok(self.body.len() as u64)
+    }
+}
+
+#[test]
+fn queue_file_tracks_progress_while_a_transfer_runs() {
+    let http = DripHttp {
+        body: vec![b'd'; 40],
+        delay: std::time::Duration::from_millis(80),
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/drip.bin");
+
+    let core = Arc::new(Mutex::new(core));
+    let queue = root.join(".phlegethon").join("jobs.json");
+    let started = std::time::Instant::now();
+    let mut persisted = 0u64;
+    while started.elapsed() < std::time::Duration::from_millis(2500) {
+        Core::dispatch_pending(core.clone()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&queue).unwrap()).unwrap();
+        persisted = doc["jobs"][0]["bytes_received"].as_u64().unwrap_or(0);
+        let status = core
+            .lock()
+            .unwrap()
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .unwrap()
+            .status;
+        if persisted > 0 && status == "downloading" {
+            return;
+        }
+    }
+    panic!("jobs.json never showed progress of the running transfer (last: {persisted})");
+}
+
+#[test]
+fn segmented_part_is_preallocated_on_disk() {
+    let body = vec![7u8; 64 * 1024];
+    let mut http = ScriptedHttp::new(&[(SCRIPTED_URL, &body)]).then_at(
+        SCRIPTED_URL,
+        16 * 1024,
+        &[Reply::ErrorAfter(10)],
+    );
+    http.advertise_range = true;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+
+    run_until_finished(&mut core, &rx);
+
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(root.join("jobs").join(&job_id).join("object.bin.part")).unwrap();
+    assert_eq!(meta.len(), body.len() as u64);
+    assert!(
+        meta.blocks() * 512 >= body.len() as u64,
+        "the .part must reserve its blocks, not stay sparse ({} blocks)",
+        meta.blocks()
     );
 }

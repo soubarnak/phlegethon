@@ -265,11 +265,23 @@ impl Job {
     /// On-disk queue state for this job.
     pub fn persisted_state(&self) -> PersistedJobState {
         match self.state {
-            JobState::Pending if self.bytes_received > 0 => PersistedJobState::Downloading,
+            JobState::Pending if self.persisted_bytes() > 0 => PersistedJobState::Downloading,
             JobState::Pending => PersistedJobState::Pending,
             JobState::Paused => PersistedJobState::Paused,
             JobState::Failed => PersistedJobState::Failed,
             JobState::Completed => PersistedJobState::Completed,
+        }
+    }
+
+    /// Bytes to record in `jobs.json`: the segment total, or for a running
+    /// transfer the live count, so the file is not stale until the transfer ends.
+    fn persisted_bytes(&self) -> u64 {
+        if !self.segments.is_empty() {
+            self.segments_written()
+        } else if self.transfer_active.load(Ordering::Acquire) {
+            self.bytes_downloaded_snapshot()
+        } else {
+            self.bytes_received
         }
     }
 
@@ -281,11 +293,7 @@ impl Job {
             mirror_index: self.mirrors.current_index(),
             state: self.persisted_state(),
             destination: self.destination.clone(),
-            bytes_received: if self.segments.is_empty() {
-                self.bytes_received
-            } else {
-                self.segments_written()
-            },
+            bytes_received: self.persisted_bytes(),
             bandwidth_cap: self.bandwidth_cap,
             source: self.source.clone(),
             extractor_format: self.extractor_format.clone(),
@@ -629,8 +637,13 @@ impl Job {
         self.state == JobState::Completed
     }
 
-    pub fn mark_completed(&mut self) {
+    /// Pending → Completed. Returns `false`, changing nothing, from any other state.
+    pub fn mark_completed(&mut self) -> bool {
+        if self.state != JobState::Pending {
+            return false;
+        }
         self.state = JobState::Completed;
+        true
     }
 
     #[allow(dead_code)]
@@ -665,8 +678,13 @@ impl Job {
         }
     }
 
-    pub fn mark_failed(&mut self) {
+    /// Move to Failed. A Completed job stays Completed: returns `false` then.
+    pub fn mark_failed(&mut self) -> bool {
+        if self.state == JobState::Completed {
+            return false;
+        }
         self.state = JobState::Failed;
+        true
     }
 
     pub fn retry(&mut self) -> Result<(), String> {
@@ -715,5 +733,31 @@ mod tests {
         let rebuilt = job.bandwidth_bucket(&clock).unwrap();
         assert!(!Arc::ptr_eq(&first, &rebuilt));
         assert_eq!(rebuilt.lock().unwrap().rate(), 200);
+    }
+
+    fn sample_job() -> Job {
+        Job::new(
+            "https://example.com/a.bin".to_string(),
+            PathBuf::from("/tmp/phlegethon-job"),
+        )
+    }
+
+    #[test]
+    fn completed_job_cannot_be_marked_failed() {
+        let mut job = sample_job();
+        assert!(job.mark_completed());
+        assert!(!job.mark_failed());
+        assert_eq!(job.state(), JobState::Completed);
+    }
+
+    #[test]
+    fn only_a_pending_job_can_be_marked_completed() {
+        let mut job = sample_job();
+        job.pause().unwrap();
+        assert!(!job.mark_completed());
+        assert_eq!(job.state(), JobState::Paused);
+        assert!(job.mark_failed());
+        assert!(!job.mark_completed());
+        assert_eq!(job.state(), JobState::Failed);
     }
 }

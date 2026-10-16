@@ -76,7 +76,7 @@ fn run_single_fetch(params: &SingleFetchParams) -> SingleFetchOutcome {
     let paused = limited.was_paused();
     drop(limited);
 
-    if let Err(err) = part_file.flush() {
+    if let Err(err) = part_file.flush().and_then(|()| part_file.sync_all()) {
         return SingleFetchOutcome {
             fetch: Err(format!("flush partial {:?}: {err}", params.part_path)),
             bytes_written,
