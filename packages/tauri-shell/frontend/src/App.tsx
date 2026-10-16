@@ -16,7 +16,7 @@ import { Asleep, Light, Tools } from "@carbon/icons-react";
 import { api } from "@/tauri/api";
 import { onCompanionIntent } from "@/tauri/events";
 import { notificationPort } from "@/tauri/platform";
-import type { JobSnapshot, ToolchainStatus } from "@/tauri/types";
+import type { CompanionIntent, JobSnapshot, ToolchainStatus } from "@/tauri/types";
 import { buildBatchDiscardCopy, buildDiscardConfirmCopy, type DiscardConfirmCopy } from "@/lib/discardConfirm";
 import { maybeNotify, loadDesktopNotificationsEnabled, saveDesktopNotificationsEnabled } from "@/lib/notifications";
 import { resolveDuplicateUrl, processUrlInput, type DuplicateResolution } from "@/lib/urlInput";
@@ -94,17 +94,21 @@ function Shell() {
   }, [lastEvent, notificationsEnabled]);
 
   // ---- enqueue flow
+  const queueProbe = useCallback((url: string) => {
+    setProbeQueue((q) => (q.includes(url) ? q : [...q, url]));
+  }, []);
+
   const enqueueOne = useCallback(
     async (url: string, forceDirect = false) => {
       const result = await api.enqueueUrl(url, destination, forceDirect);
       if (result.type === "ProbeThenConfirm") {
-        setProbeQueue((q) => (q.includes(result.url) ? q : [...q, result.url]));
+        queueProbe(result.url);
       } else {
         await refresh();
         await kick();
       }
     },
-    [destination, refresh, kick],
+    [destination, refresh, kick, queueProbe],
   );
   const confirmDuplicate = useCallback(
     (match: ActiveJobMatch) =>
@@ -148,13 +152,31 @@ function Shell() {
     [confirmDuplicate, enqueueOne, toasts],
   );
 
-  // Companion (browser extension) hand-off.
+  // Companion (browser extension) hand-off. The shell has already acted on the URL:
+  // a direct file is enqueued but emits no core-event, and a page waits for a probe.
+  // Handle the outcome here; never run the URL through addUrls again.
+  const handleCompanionIntent = useCallback(
+    (intent: CompanionIntent) => {
+      switch (intent.result.type) {
+        case "enqueue_direct":
+          setTab(TAB_QUEUE);
+          void refresh().then(kick);
+          break;
+        case "probe_then_confirm":
+          queueProbe(intent.result.url);
+          break;
+      }
+    },
+    [kick, queueProbe, refresh],
+  );
+  // Subscribe once; the handler is read through a ref so it never re-subscribes (L-55).
+  const companionHandler = useRef(handleCompanionIntent);
+  companionHandler.current = handleCompanionIntent;
+
   useEffect(() => {
     let off: (() => void) | null = null;
     let cancelled = false;
-    onCompanionIntent((intent) => {
-      if (intent.url) void addUrls(intent.url);
-    })
+    onCompanionIntent((intent) => companionHandler.current(intent))
       .then((fn) => {
         if (cancelled) fn();
         else off = fn;
@@ -164,7 +186,7 @@ function Shell() {
       cancelled = true;
       off?.();
     };
-  }, [addUrls]);
+  }, []);
 
   // ---- probe lifecycle
   const advanceProbeQueue = useCallback(() => {
