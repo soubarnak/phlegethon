@@ -9,7 +9,6 @@ import type {
   ArchiveOutcome,
   CompanionIntent,
   CookieChannel,
-  CoreEvent,
   DefaultQualityPolicy,
   EnqueueResult,
   JobSnapshot,
