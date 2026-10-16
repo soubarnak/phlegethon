@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use crate::toolchain_discovery::{run_command_with_deadline_polling, CommandOutcome};
 
 /// User-facing toggles for optional media sidecars and embedding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +134,9 @@ pub enum PostprocessOutcome {
     Unchanged(PathBuf),
     /// Remux succeeded; returns final path.
     Remuxed(PathBuf),
+    /// The stop flag ended the remux (Pause or Discard); the partial output is removed and
+    /// the pre-remux file stays where it was.
+    Stopped,
     /// Remux failed; pre-remux file retained at `pre_remux_path`.
     Failed {
         error: String,
@@ -176,23 +182,30 @@ pub fn apply_remux_postprocess(
         .unwrap_or("output");
     let output = input.with_file_name(format!("{stem}.remux.mp4"));
 
-    let status = Command::new(&ffmpeg)
-        .arg("-y")
-        .arg("-i")
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.arg("-nostdin")
+        .args(["-loglevel", "error", "-y", "-i"])
         .arg(input)
-        .arg("-c")
-        .arg("copy")
-        .arg("-movflags")
-        .arg("+faststart")
-        .arg(&output)
-        .status();
+        .args(["-c", "copy", "-movflags", "+faststart"])
+        .arg(&output);
+    let outcome =
+        run_command_with_deadline_polling(&mut cmd, Some(stop), None, Duration::from_millis(50));
 
-    match status {
-        Ok(s) if s.success() && output.is_file() => PostprocessOutcome::Remuxed(output),
-        Ok(s) => PostprocessOutcome::Failed {
-            error: format!("ffmpeg remux failed (exit {:?})", s.code()),
-            pre_remux_path: input.to_path_buf(),
-        },
+    match outcome {
+        Ok(CommandOutcome::Finished { status, .. }) if status.success() && output.is_file() => {
+            PostprocessOutcome::Remuxed(output)
+        }
+        Ok(CommandOutcome::Finished { status, .. }) => {
+            let _ = std::fs::remove_file(&output);
+            PostprocessOutcome::Failed {
+                error: format!("ffmpeg remux failed (exit {:?})", status.code()),
+                pre_remux_path: input.to_path_buf(),
+            }
+        }
+        Ok(CommandOutcome::Stopped | CommandOutcome::TimedOut) => {
+            let _ = std::fs::remove_file(&output);
+            PostprocessOutcome::Stopped
+        }
         Err(e) => PostprocessOutcome::Failed {
             error: format!("failed to run ffmpeg remux: {e}"),
             pre_remux_path: input.to_path_buf(),
@@ -309,5 +322,82 @@ mod tests {
         let args = ytdlp_media_extras_args(&opts, true);
         assert!(args.iter().any(|a| a == "--embed-subs"));
         assert!(args.iter().any(|a| a == "--remux-video"));
+    }
+
+    #[cfg(unix)]
+    fn write_fake_ffmpeg(dir: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ffmpeg");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn remux_options() -> MediaExtrasOptions {
+        MediaExtrasOptions {
+            remux: true,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remux_postprocess_runs_ffmpeg_and_returns_the_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fake_ffmpeg(
+            tmp.path(),
+            "for a; do last=$a; done\necho remuxed > \"$last\"",
+        );
+        let input = tmp.path().join("clip.webm");
+        std::fs::write(&input, b"fake webm").unwrap();
+        let stop = AtomicBool::new(false);
+        match apply_remux_postprocess(&input, &remux_options(), Some(tmp.path()), &stop) {
+            PostprocessOutcome::Remuxed(p) => assert_eq!(p, tmp.path().join("clip.remux.mp4")),
+            other => panic!("expected Remuxed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_kills_the_whole_ffmpeg_process_tree_during_remux() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("grandchild.pid");
+        write_fake_ffmpeg(
+            tmp.path(),
+            &format!("sleep 60 &\necho $! > {}\nwait", pid_file.display()),
+        );
+        let input = tmp.path().join("clip.webm");
+        std::fs::write(&input, b"fake webm").unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let worker = {
+            let (dir, input, stop) = (tmp.path().to_path_buf(), input.clone(), stop.clone());
+            std::thread::spawn(move || {
+                apply_remux_postprocess(&input, &remux_options(), Some(&dir), &stop)
+            })
+        };
+        let started = std::time::Instant::now();
+        let grandchild: i32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "fake ffmpeg never started"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        stop.store(true, Ordering::Release);
+        let begun = std::time::Instant::now();
+        assert_eq!(worker.join().unwrap(), PostprocessOutcome::Stopped);
+        assert!(begun.elapsed() < Duration::from_secs(5));
+        assert!(crate::toolchain_discovery::wait_until_process_gone(
+            grandchild,
+            Duration::from_secs(5)
+        ));
+        assert!(!tmp.path().join("clip.remux.mp4").exists());
+        assert!(input.is_file());
     }
 }

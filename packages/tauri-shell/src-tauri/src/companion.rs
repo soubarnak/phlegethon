@@ -9,14 +9,14 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::AppState;
 
 #[derive(Serialize, Clone)]
-struct CompanionIntentEvent {
-    url: String,
-    result: CompanionResult,
+pub(crate) struct CompanionIntentEvent {
+    pub(crate) url: String,
+    pub(crate) result: CompanionResult,
 }
 
 /// Companion cookie files that a pending Probe-then-Confirm still needs, keyed by probed URL.
@@ -118,9 +118,7 @@ fn handle_companion_intent(app: &AppHandle, request: CompanionRequest) -> Compan
         result: result.clone(),
     };
 
-    if let Err(err) = app.emit("companion-intent", &event) {
-        log::warn!("failed to emit companion-intent: {err}");
-    }
+    crate::deliver_companion_intent(app, event);
 
     let _ = app.run_on_main_thread({
         let app = app.clone();
@@ -224,7 +222,10 @@ fn sweep_dir(dir: &Path, live: &HashSet<PathBuf>) -> std::io::Result<usize> {
     Ok(removed)
 }
 
-fn companion_result_from_outcome(_url: &str, outcome: EnqueueOutcome) -> CompanionResult {
+pub(crate) fn companion_result_from_outcome(
+    _url: &str,
+    outcome: EnqueueOutcome,
+) -> CompanionResult {
     match outcome {
         EnqueueOutcome::EnqueueDirect {
             job_id,

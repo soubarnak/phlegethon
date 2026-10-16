@@ -7,6 +7,7 @@ import type {
   ActiveJobMatch,
   ArchiveEntry,
   ArchiveOutcome,
+  CompanionIntent,
   CookieChannel,
   CoreEvent,
   DefaultQualityPolicy,
@@ -54,6 +55,8 @@ export const api = {
   // ---- Queue
   listJobs: () => invoke<JobSnapshot[]>("list_jobs"),
   processPending: () => invoke<void>("process_pending"),
+  /** Companion intents that arrived before mount. Call once on mount, after subscribing to `companion-intent` (M-69). */
+  takePendingIntents: () => invoke<CompanionIntent[]>("take_pending_intents"),
   pollEvents: () => invoke<CoreEvent[]>("poll_events"),
   pauseJob: (jobId: string) => invoke<void>("pause_job", { jobId }),
   resumeJob: (jobId: string) => invoke<void>("resume_job", { jobId }),

@@ -18,7 +18,7 @@ FRONTEND = packages/tauri-shell/frontend
 TARGET   = target/release
 ICON_SIZES = 32 128 256 512
 
-.PHONY: all build frontend install uninstall test test-shell test-rust test-plugins test-frontend \
+.PHONY: all build frontend install uninstall test test-shell test-rust test-plugins test-extension test-frontend \
 	desktop nmh-install dist xbps probe-check e2e-ui clean help
 
 all: build
@@ -52,11 +52,14 @@ uninstall:
 	rm -f $(DESTDIR)$(DATADIR)/doc/phlegethon/companion-setup.md
 	-rmdir $(DESTDIR)$(DATADIR)/doc/phlegethon
 
-test: test-rust test-plugins test-frontend
+test: test-rust test-plugins test-extension test-frontend
 
 # Everything that does not need WebKitGTK headers.
 test-rust:
 	$(CARGO) test --workspace --exclude phlegethon-tauri
+
+test-extension:
+	node --test packages/chrome-companion/session.test.js
 
 test-plugins:
 	python3 packages/extractor-plugins/tests/test_parse_fixtures.py

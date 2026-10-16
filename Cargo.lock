@@ -565,6 +565,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "url",
  "uuid",
 ]
 
@@ -920,6 +921,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "fs2",
+ "libc",
  "md-5",
  "quick-xml 0.42.0",
  "regex",
@@ -2781,6 +2783,7 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
  "tempfile",
 ]
 
@@ -4098,6 +4101,22 @@ dependencies = [
  "thiserror 2.0.19",
  "url",
  "windows 0.61.3",
+ "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-single-instance"
+version = "2.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "561cd99484561bc39c954768e7b41a66cebbe1ac3d9d081c34361f740c489e2c"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
  "zbus",
 ]
 

@@ -19,6 +19,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -556,7 +557,103 @@ fn cmd_prepare(cmd: &mut Command) -> &mut Command {
         .stderr(Stdio::piped())
 }
 
+/// How long to wait for the output readers once the child has exited or been killed.
+const READER_GRACE: Duration = Duration::from_millis(1500);
+
+/// Output captured from one pipe by a detached reader thread.
+struct PipeCapture {
+    buf: Arc<Mutex<Vec<u8>>>,
+    done: Arc<AtomicBool>,
+}
+
+impl PipeCapture {
+    fn spawn<R: std::io::Read + Send + 'static>(mut pipe: R) -> Self {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let (thread_buf, thread_done) = (Arc::clone(&buf), Arc::clone(&done));
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut b) = thread_buf.lock() {
+                            b.extend_from_slice(&chunk[..n]);
+                        }
+                    }
+                }
+            }
+            thread_done.store(true, Ordering::Release);
+        });
+        Self { buf, done }
+    }
+
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// Take what was captured so far.
+    fn take(&self) -> Vec<u8> {
+        self.buf
+            .lock()
+            .map(|mut b| std::mem::take(&mut *b))
+            .unwrap_or_default()
+    }
+}
+
+/// Wait up to [`READER_GRACE`] for both readers to reach EOF. Returns false when a
+/// descendant still holds a pipe open.
+fn wait_for_readers(readers: [&PipeCapture; 2]) -> bool {
+    let end = Instant::now() + READER_GRACE;
+    while !readers.iter().all(|r| r.is_done()) {
+        if Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+/// Put the child in its own process group and ask the kernel to kill it when the
+/// spawning thread dies, so it cannot outlive the app.
+fn own_the_process_tree(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        #[cfg(target_os = "linux")]
+        // SAFETY: the hook only calls `prctl`, which is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong);
+                Ok(())
+            });
+        }
+    }
+}
+
+/// Kill the child's whole process group, then the child itself. Call it only while the
+/// child is not yet reaped, or when the group is known to still have members, so the
+/// group id cannot belong to an unrelated process.
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: plain syscall; `pid` is the group id set by `process_group(0)`.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// [`run_command_with_deadline`] with an explicit poll interval.
+///
+/// The child leads its own process group. `stop`, `deadline` and a wait error kill the
+/// whole group (yt-dlp's ffmpeg included) and never block on the output readers: a
+/// descendant that escaped the group and holds a pipe open cannot stall the caller.
 pub fn run_command_with_deadline_polling(
     cmd: &mut Command,
     stop: Option<&AtomicBool>,
@@ -569,6 +666,7 @@ pub fn run_command_with_deadline_polling(
     let program = cmd.get_program().to_string_lossy().into_owned();
     // Output is always captured here; callers must not have to remember to pipe it.
     cmd_prepare(cmd);
+    own_the_process_tree(cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn {program}: {e}"))?;
@@ -581,58 +679,70 @@ pub fn run_command_with_deadline_polling(
         .stderr
         .take()
         .ok_or_else(|| format!("{program}: missing stderr pipe"))?;
-    let stdout_handle = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let mut reader = stdout_pipe;
-        let _ = reader.read_to_end(&mut buf);
-        buf
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let mut reader = stderr_pipe;
-        let _ = reader.read_to_end(&mut buf);
-        buf
-    });
-
-    let kill_and_join = |child: &mut std::process::Child| {
-        let _ = child.kill();
-        let _ = child.wait();
-    };
+    let stdout = PipeCapture::spawn(stdout_pipe);
+    let stderr = PipeCapture::spawn(stderr_pipe);
 
     let status = loop {
         if stop.is_some_and(|s| s.load(Ordering::Acquire)) {
-            kill_and_join(&mut child);
-            let _ = stdout_handle.join();
-            let _ = stderr_handle.join();
+            kill_process_tree(&mut child);
+            wait_for_readers([&stdout, &stderr]);
             return Ok(CommandOutcome::Stopped);
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
-            kill_and_join(&mut child);
-            let _ = stdout_handle.join();
-            let _ = stderr_handle.join();
+            kill_process_tree(&mut child);
+            wait_for_readers([&stdout, &stderr]);
             return Ok(CommandOutcome::TimedOut);
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(poll_interval),
             Err(e) => {
-                kill_and_join(&mut child);
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
+                kill_process_tree(&mut child);
+                wait_for_readers([&stdout, &stderr]);
                 return Err(format!("failed while waiting for {program}: {e}"));
             }
         }
     };
 
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
+    if !wait_for_readers([&stdout, &stderr]) {
+        // The child is gone but a descendant keeps a pipe open. The group still has a
+        // member, so its id is still ours: kill the stragglers.
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: plain syscall; the group is alive, so the id is not reusable.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+        }
+        wait_for_readers([&stdout, &stderr]);
+    }
     Ok(CommandOutcome::Finished {
         status,
-        stdout,
-        stderr,
+        stdout: stdout.take(),
+        stderr: stderr.take(),
     })
+}
+
+/// Wait until `pid` is gone or a zombie. Test helper shared with other modules' tests.
+#[cfg(all(test, unix))]
+pub(crate) fn wait_until_process_gone(pid: i32, within: Duration) -> bool {
+    let end = Instant::now() + within;
+    loop {
+        let gone = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.trim_start().starts_with('Z')),
+        };
+        if gone {
+            return true;
+        }
+        if Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -987,5 +1097,92 @@ mod tests {
         if cfg!(target_os = "linux") {
             assert_ne!(libc, Libc::Unknown);
         }
+    }
+
+    #[cfg(unix)]
+    fn read_pid_file(path: &Path) -> i32 {
+        let started = Instant::now();
+        loop {
+            if let Some(pid) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                return pid;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "no pid file");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_kills_grandchildren_and_returns_promptly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("pid");
+        let script = format!("sleep 60 &\necho $! > {}\nwait", pid_file.display());
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let worker = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", &script]);
+                run_command_with_deadline(cmd, Some(&stop), None).unwrap()
+            })
+        };
+        let grandchild = read_pid_file(&pid_file);
+        stop.store(true, Ordering::Release);
+        let begun = Instant::now();
+        let outcome = worker.join().unwrap();
+        assert!(matches!(outcome, CommandOutcome::Stopped), "{outcome:?}");
+        assert!(begun.elapsed() < Duration::from_secs(5));
+        assert!(wait_until_process_gone(grandchild, Duration::from_secs(5)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_kills_grandchildren() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("pid");
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            &format!("sleep 60 &\necho $! > {}\nwait", pid_file.display()),
+        ]);
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let outcome = run_command_with_deadline(cmd, None, Some(deadline)).unwrap();
+        assert!(matches!(outcome, CommandOutcome::TimedOut), "{outcome:?}");
+        assert!(wait_until_process_gone(
+            read_pid_file(&pid_file),
+            Duration::from_secs(5)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_the_pipes_does_not_stall_a_finished_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("pid");
+        let mut cmd = Command::new("sh");
+        // The shell exits at once; the background sleep keeps stdout and stderr open.
+        cmd.args([
+            "-c",
+            &format!("sleep 60 &\necho $! > {}\necho done", pid_file.display()),
+        ]);
+        let begun = Instant::now();
+        let outcome = run_command_with_deadline(cmd, None, None).unwrap();
+        assert!(
+            begun.elapsed() < Duration::from_secs(10),
+            "stalled on the pipes"
+        );
+        match outcome {
+            CommandOutcome::Finished { stdout, .. } => {
+                assert_eq!(String::from_utf8_lossy(&stdout).trim(), "done");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(wait_until_process_gone(
+            read_pid_file(&pid_file),
+            Duration::from_secs(5)
+        ));
     }
 }

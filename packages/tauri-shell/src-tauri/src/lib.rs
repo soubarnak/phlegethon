@@ -2,7 +2,17 @@
 //!
 //! Tauri commands expose the Core API to the frontend.
 
+// A release build without `custom-protocol` loads http://localhost:1420 into a webview
+// with full IPC access (M-58). Refuse to build it. `make build` and the xbps template
+// pass `--features phlegethon-tauri/custom-protocol`.
+#[cfg(all(not(debug_assertions), not(feature = "custom-protocol")))]
+compile_error!(
+    "release builds of phlegethon-tauri need `--features custom-protocol`: \
+     without it the window loads http://localhost:1420 instead of the embedded frontend"
+);
+
 mod companion;
+mod intents;
 
 use download_core::{
     ArchiveEntry, ArchiveOutcome, Core, CoreEvent, EnqueueOptions, EnqueueOutcome,
@@ -35,7 +45,9 @@ struct AppState {
     /// Summaries kept for `poll_events` after they were pushed as `core-event`.
     event_buffer: Mutex<Vec<EventSummary>>,
     library_root: Mutex<Option<PathBuf>>,
-    process_pending_busy: AtomicBool,
+    process_pending_busy: Arc<AtomicBool>,
+    /// Companion and second-launch intents waiting for the webview (M-69).
+    intents: intents::IntentInbox<companion::CompanionIntentEvent>,
     toolchain_status_cache: Mutex<Option<(Instant, ToolchainStatus)>>,
 }
 
@@ -74,7 +86,8 @@ impl AppState {
             event_rx: Mutex::new(Some(rx)),
             event_buffer: Mutex::new(Vec::new()),
             library_root: Mutex::new(None),
-            process_pending_busy: AtomicBool::new(false),
+            process_pending_busy: Arc::new(AtomicBool::new(false)),
+            intents: intents::IntentInbox::default(),
             toolchain_status_cache: Mutex::new(None),
         }
     }
@@ -682,31 +695,37 @@ fn notify_fallback(summary: String, body: String) -> Result<bool, String> {
     }
 }
 
-#[tauri::command]
-fn process_pending(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
-    // yt-dlp downloads can take minutes — don't block the UI invoke thread.
-    if state
-        .process_pending_busy
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        return Ok(());
+/// Holds the `process_pending` busy flag. Dropping it clears the flag, also when
+/// dispatch panics, so a panic cannot stop every later job from starting (M-52).
+struct BusyGuard(Arc<AtomicBool>);
+
+impl BusyGuard {
+    fn acquire(flag: &Arc<AtomicBool>) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self(Arc::clone(flag)))
     }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+#[tauri::command]
+fn process_pending(state: State<AppState>) -> Result<(), String> {
+    // yt-dlp downloads can take minutes — don't block the UI invoke thread.
+    let Some(guard) = BusyGuard::acquire(&state.process_pending_busy) else {
+        return Ok(());
+    };
+    let core = Arc::clone(&state.core);
 
     std::thread::spawn(move || {
-        let clear_busy = || {
-            if let Some(state) = app.try_state::<AppState>() {
-                state.process_pending_busy.store(false, Ordering::Release);
-            }
-        };
-
-        if let Some(state) = app.try_state::<AppState>() {
-            if let Err(e) = Core::dispatch_pending(Arc::clone(&state.core)) {
-                log::error!("dispatch_pending failed: {e}");
-            }
+        let _guard = guard;
+        if let Err(e) = Core::dispatch_pending(core) {
+            log::error!("dispatch_pending failed: {e}");
         }
-
-        clear_busy();
     });
     Ok(())
 }
@@ -997,15 +1016,91 @@ fn is_main_window_focused(app: tauri::AppHandle) -> Result<bool, String> {
     window.is_focused().map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+/// Show the main window and focus it. `show()` runs first: a hidden or minimized
+/// window cannot take focus, and a failed `set_focus()` must not leave it hidden (L-52).
+fn raise_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
-    window
-        .set_focus()
-        .map_err(|e| e.to_string())
-        .and_then(|_| window.show().map_err(|e| e.to_string()))
+    let shown = window.show().map_err(|e| e.to_string());
+    let _ = window.unminimize();
+    let focused = window.set_focus().map_err(|e| e.to_string());
+    shown.and(focused)
+}
+
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    raise_main_window(&app)
+}
+
+/// Send an intent to the webview, or keep it until the webview asks (M-69).
+pub(crate) fn deliver_companion_intent(
+    app: &tauri::AppHandle,
+    intent: companion::CompanionIntentEvent,
+) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if let Some(intent) = state.intents.deliver(intent) {
+        if let Err(err) = app.emit("companion-intent", &intent) {
+            log::warn!("failed to emit companion-intent: {err}");
+        }
+    }
+}
+
+/// Intents that arrived before the webview mounted. Calling this also tells the shell
+/// the webview now listens for `companion-intent`.
+#[tauri::command]
+fn take_pending_intents(
+    state: State<AppState>,
+) -> Result<Vec<companion::CompanionIntentEvent>, String> {
+    Ok(state.intents.take_pending())
+}
+
+/// HTTP(S) URLs in the argv of a second launch. `argv[0]` is the program path.
+fn urls_from_argv(argv: &[String]) -> Vec<String> {
+    argv.iter()
+        .skip(1)
+        .filter_map(|arg| download_core::normalize_url(arg))
+        .collect()
+}
+
+/// A second launch hands its URLs to this instance, which enqueues them like a
+/// Browser Companion hand-off, and brings its window to the front (H-19).
+fn handle_second_launch(app: &tauri::AppHandle, argv: Vec<String>) {
+    let urls = urls_from_argv(&argv);
+    let app = app.clone();
+    // Enqueue takes the Core lock: keep it off the plugin callback thread.
+    std::thread::spawn(move || {
+        for url in urls {
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let outcome = ensure_library_root(&state).and_then(|_| {
+                state
+                    .core
+                    .lock()
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut core| core.enqueue(&url, None))
+            });
+            match outcome {
+                Ok(outcome) => deliver_companion_intent(
+                    &app,
+                    companion::CompanionIntentEvent {
+                        url: url.clone(),
+                        result: companion::companion_result_from_outcome(&url, outcome),
+                    },
+                ),
+                Err(err) => log::warn!("could not enqueue {url} from second launch: {err}"),
+            }
+        }
+        let main_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Err(err) = raise_main_window(&main_app) {
+                log::warn!("could not focus main window: {err}");
+            }
+        });
+    });
 }
 
 /// Legacy polling path: events are pushed as `core-event`; this drains the
@@ -1129,28 +1224,59 @@ fn persist_library_root_preference(root: &Path) -> Result<(), String> {
 // Run
 // ---------------------------------------------------------------------------
 
+/// Directory for the log file, next to the other Phlegethon state.
+fn log_dir() -> PathBuf {
+    dirs_data_dir().join("logs")
+}
+
+/// Log to a file in release builds too (M-47): the companion receiver dying or a
+/// failed plugin install left no trace before. Debug builds also print to stdout.
+fn log_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+    let mut builder = tauri_plugin_log::Builder::default()
+        .level(log::LevelFilter::Info)
+        .clear_targets()
+        .target(Target::new(TargetKind::Folder {
+            path: log_dir(),
+            file_name: Some("phlegethon".to_string()),
+        }))
+        .max_file_size(2_000_000)
+        .rotation_strategy(RotationStrategy::KeepSome(3));
+    if cfg!(debug_assertions) {
+        builder = builder.target(Target::new(TargetKind::Stdout));
+    }
+    builder.build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must come first: a second launch has to exit before anything else starts.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            handle_second_launch(app, argv);
+        }))
+        .plugin(log_plugin())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(AppState::new())
-        .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+        .on_page_load(|webview, payload| {
+            // A reload drops the webview's listeners: buffer intents until it mounts again.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                if let Some(state) = webview.app_handle().try_state::<AppState>() {
+                    state.intents.stop_listening();
+                }
             }
-
+        })
+        .setup(|app| {
+            // Managed here, after the log plugin is installed: `AppState::new` logs, and
+            // those lines were dropped when it ran before the logger existed.
+            app.manage(AppState::new());
             let state: State<AppState> = app.state();
             let root = load_library_root_preference().unwrap_or_else(default_library_root);
             let sidecar_root = dirs_data_dir();
             {
-                let mut core = state.core.lock().unwrap();
+                let mut core = state.core.lock().map_err(|e| e.to_string())?;
                 if let Err(err) = core.set_sidecar_root(sidecar_root) {
                     log::warn!("sidecar root: {err}");
                 }
@@ -1159,13 +1285,13 @@ pub fn run() {
                 }
             }
             {
-                let mut stored = state.library_root.lock().unwrap();
+                let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
                 *stored = Some(root.clone());
             }
             let _ = persist_library_root_preference(&root);
 
             // Push Core events to the webview instead of making it poll.
-            if let Some(rx) = state.event_rx.lock().unwrap().take() {
+            if let Some(rx) = state.event_rx.lock().map_err(|e| e.to_string())?.take() {
                 start_event_drain(app.handle().clone(), rx);
             }
 
@@ -1249,6 +1375,7 @@ pub fn run() {
             is_main_window_focused,
             focus_main_window,
             poll_events,
+            take_pending_intents,
             list_history,
             list_history_by_outcome,
             remove_history_entry,
@@ -1279,6 +1406,53 @@ mod tests {
         let json = serde_json::to_value(&probe).unwrap();
         assert_eq!(json["type"], "ProbeThenConfirm");
         assert_eq!(json["url"], "https://example.com");
+    }
+
+    #[test]
+    fn busy_guard_blocks_a_second_dispatch_until_dropped() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let guard = BusyGuard::acquire(&flag).expect("first acquire");
+        assert!(BusyGuard::acquire(&flag).is_none());
+        drop(guard);
+        assert!(BusyGuard::acquire(&flag).is_some());
+    }
+
+    #[test]
+    fn busy_guard_clears_the_flag_when_dispatch_panics() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let guard = BusyGuard::acquire(&flag).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = guard;
+            panic!("dispatch blew up");
+        }));
+        assert!(result.is_err());
+        assert!(
+            BusyGuard::acquire(&flag).is_some(),
+            "busy flag stayed set after a panic"
+        );
+    }
+
+    #[test]
+    fn second_launch_argv_yields_only_http_urls() {
+        let argv = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            urls_from_argv(&argv(&[
+                "/usr/bin/phlegethon",
+                "--flag",
+                "https://example.com/a#frag",
+                "file:///etc/passwd",
+                "http://example.org/b/",
+            ])),
+            vec!["https://example.com/a", "http://example.org/b"]
+        );
+        // argv[0] is the program path, never a URL.
+        assert!(urls_from_argv(&argv(&["https://example.com/"])).is_empty());
+        assert!(urls_from_argv(&[]).is_empty());
+    }
+
+    #[test]
+    fn log_file_lives_under_the_data_dir() {
+        assert!(log_dir().starts_with(dirs_data_dir()));
     }
 
     #[test]

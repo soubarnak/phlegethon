@@ -6090,6 +6090,68 @@ fn media_extras_capabilities_report_ffmpeg_unavailable_by_default() {
     assert!(caps.embed_disabled_reason.is_some());
 }
 
+#[cfg(unix)]
+#[test]
+fn remux_runs_ffmpeg_and_completes_with_the_remuxed_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let ffmpeg_dir = tmp.path().join("ffmpeg-bin");
+    std::fs::create_dir_all(&ffmpeg_dir).unwrap();
+    let ffmpeg = ffmpeg_dir.join("ffmpeg");
+    std::fs::write(
+        &ffmpeg,
+        "#!/bin/sh\nfor a; do last=$a; done\necho remuxed > \"$last\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut fake = fake_toolchain();
+    fake.insert(
+        "https://www.youtube.com/watch?v=remux-run",
+        "Remux Run",
+        "https://cdn.example.com/clip.webm",
+        vec![("best", "best")],
+    );
+    fake.set_ffmpeg_dir(ffmpeg_dir);
+    let (mut core, rx) = Core::new(Box::new(NoRangeFakeHttp(fake_http())), Box::new(fake));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_default_media_extras(MediaExtrasOptions {
+        remux: true,
+        ..Default::default()
+    })
+    .unwrap();
+    core.probe("https://www.youtube.com/watch?v=remux-run")
+        .unwrap();
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=remux-run".into(),
+        items: vec![ItemSelection {
+            item_id: "item-1".into(),
+            quality_id: "best".into(),
+        }],
+        media_extras: None,
+    };
+    let job_id = core.confirm_probe_selection(&selection, None).unwrap()[0].clone();
+    assert!(core.job_media_extras(&job_id).unwrap().remux);
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CoreEvent::JobCompleted { job_id: id, .. } if id == &job_id
+        )),
+        "{events:?}"
+    );
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap();
+    assert!(PathBuf::from(&snap.destination)
+        .join("clip.remux.mp4")
+        .is_file());
+}
+
 #[test]
 fn remux_stripped_when_ffmpeg_unavailable_and_job_completes() {
     let tmp = tempfile::tempdir().unwrap();
@@ -6904,6 +6966,45 @@ fn rollback_restores_previous_toolchain_version_when_idle() {
     assert_eq!(
         installed.toolchain.installed_version.as_deref(),
         Some("1.0.0")
+    );
+}
+
+struct CountingSource {
+    inner: Arc<dyn SidecarUpdateSource>,
+    invalidations: std::sync::atomic::AtomicUsize,
+}
+
+impl SidecarUpdateSource for CountingSource {
+    fn load_catalog(&self, root: &std::path::Path) -> Result<UpdateCatalog, String> {
+        self.inner.load_catalog(root)
+    }
+    fn invalidate_cache(&self) {
+        self.invalidations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn manual_check_drops_the_cached_release_lookup() {
+    // L-25: the panel's Check button used to be served a lookup up to an hour old.
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    let counting = Arc::new(CountingSource {
+        inner: source,
+        invalidations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    core.set_sidecar_update_source(counting.clone());
+    let core = Arc::new(std::sync::Mutex::new(core));
+
+    Core::check_sidecar_updates_outside_lock(core).unwrap();
+
+    assert_eq!(
+        counting
+            .invalidations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
     );
 }
 

@@ -21,6 +21,9 @@ interface ToastApi {
   warning(title: string, subtitle?: string): void;
 }
 
+/** Stacked toasts beyond this many drop the oldest, so the stack never covers much of a narrow window (UI-3). */
+const MAX_TOASTS = 3;
+
 const ToastContext = createContext<ToastApi | null>(null);
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -33,7 +36,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const push = useCallback((toast: Omit<Toast, "id">) => {
     const id = nextId.current++;
-    setToasts((list) => [...list.slice(-4), { ...toast, id }]);
+    setToasts((list) => [...list.slice(-(MAX_TOASTS - 1)), { ...toast, id }]);
   }, []);
 
   const api = useMemo<ToastApi>(

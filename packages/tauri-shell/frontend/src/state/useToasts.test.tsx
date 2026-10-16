@@ -34,14 +34,14 @@ describe("useToasts", () => {
     expect(screen.getByText(/not available in your region/)).toBeInTheDocument();
   });
 
-  it("keeps only the five newest toasts", () => {
+  it("keeps only the three newest toasts (UI-3)", () => {
     const { result } = renderHook(() => useToasts(), { wrapper });
     act(() => {
       for (let i = 1; i <= 7; i++) result.current.info(`Toast ${i}`);
     });
     expect(screen.queryByText("Toast 1")).not.toBeInTheDocument();
-    expect(screen.queryByText("Toast 2")).not.toBeInTheDocument();
-    expect(screen.getByText("Toast 3")).toBeInTheDocument();
+    expect(screen.queryByText("Toast 4")).not.toBeInTheDocument();
+    expect(screen.getByText("Toast 5")).toBeInTheDocument();
     expect(screen.getByText("Toast 7")).toBeInTheDocument();
   });
 
