@@ -379,6 +379,7 @@ impl download_core::HttpBackend for StubHttp {
         Ok(download_core::FetchResult {
             total_length: len,
             bytes_written: written as u64,
+            ..Default::default()
         })
     }
 

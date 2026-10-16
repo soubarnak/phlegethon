@@ -17,7 +17,7 @@ The destination of the current wayfinding effort — a product and engineering s
 _Avoid_: MVP build, working prototype (as the map destination)
 
 **Chrome Companion**:
-A browser extension that hands URLs, cookies, or download intents to the desktop Download Manager; optional for the first shippable desktop slice. Cookie hand-off uses the same Core cookie channel as desktop `cookies-from-browser` / cookie-file settings.
+A browser extension that hands URLs, cookies, or download intents to the desktop Download Manager; optional for the first shippable desktop slice. Cookie hand-off reuses the Core cookie channel's shape (`cookies-from-browser` / cookie file) but applies it to the handed-off job only, as a per-job cookie session; it never replaces the user's persisted cookie settings.
 _Avoid_: required for basic downloads, browser-only downloader, a second unrelated cookie store
 
 **Launch Site**:
@@ -69,8 +69,8 @@ User action that removes a job from the queue; for in-flight, Paused, or Failed 
 _Avoid_: Cancel (as the product name for this action), Pause, deleting Completed outputs, leaving orphaned partials after removing an unfinished job
 
 **Resumable Transfer**:
-A download that can continue from the last successful byte after interruption (including app exit or crash), with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded. On relaunch, jobs that were Downloading auto-resume; user-Paused stay Paused; Failed stay Failed until Retry. For Extractor Toolchain jobs, Resume (and relaunch) runs yt-dlp again in the same Job Destination with the same format and output spec, and yt-dlp continues its own partial files.
-_Avoid_: restart-from-zero on every failure, silent delete of partials, requiring manual Resume after every crash for in-flight jobs
+A download that can continue from the last successful byte after interruption (including app exit or crash), with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded. On relaunch, jobs that were Downloading auto-resume; user-Paused stay Paused; Failed stay Failed until Retry. A single-connection job resumes at the `.part` length. A Segmented Transfer resumes from its persisted segment table (see ADR 0004): Pause, failure and crash keep every byte already written, and only the unfinished part of each segment is requested again. For Extractor Toolchain jobs, Resume (and relaunch) runs yt-dlp again in the same Job Destination with the same format and output spec, and yt-dlp continues its own partial files.
+_Avoid_: restart-from-zero on every failure, silent delete of partials, requiring manual Resume after every crash for in-flight jobs, treating a segmented `.part` length as progress
 
 **Segmented Transfer**:
 A general HTTP(S) download that uses multiple concurrent Range connections when the server allows, falling back to a single connection otherwise.

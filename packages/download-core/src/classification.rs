@@ -50,29 +50,13 @@ pub fn classify(url: &Url) -> Kind {
     Kind::ProbeThenConfirm
 }
 
-/// Known Launch Site domains (equal v1 must-haves).
+/// Known Launch Site hosts, including their subdomains (equal v1 must-haves).
 ///
-/// URLs matching these domains always classify as `ProbeThenConfirm`
-/// regardless of path or extension.
+/// URLs matching these hosts always classify as `ProbeThenConfirm`
+/// regardless of path or extension. The table lives in `launch_sites.rs`.
 pub fn is_launch_site(url: &Url) -> bool {
-    const LAUNCH_SITES: &[&str] = &[
-        "youtube.com",
-        "www.youtube.com",
-        "m.youtube.com",
-        "youtu.be",
-        "xhamster.com",
-        "www.xhamster.com",
-        "xhamster.desi",
-        "xhamster2.com",
-        "xhamster3.com",
-        "luxuretv.com",
-        "www.luxuretv.com",
-        "en.luxuretv.com",
-        "xxxbp.tv",
-        "www.xxxbp.tv",
-    ];
     url.host_str()
-        .map(|host| LAUNCH_SITES.contains(&host))
+        .map(crate::launch_sites::is_launch_site_host)
         .unwrap_or(false)
 }
 
@@ -196,5 +180,21 @@ mod tests {
     fn classify_unknown_extension_is_probe() {
         let u = Url::parse("https://example.com/somefile.xyz").unwrap();
         assert_eq!(classify(&u), Kind::ProbeThenConfirm);
+    }
+
+    #[test]
+    fn launch_site_subdomains_are_launch_sites() {
+        for u in [
+            "https://m.xhamster.com/videos/x-1",
+            "https://music.youtube.com/watch?v=abc",
+            "https://en.xxxbp.tv/v/1",
+        ] {
+            let url = Url::parse(u).unwrap();
+            assert!(is_launch_site(&url), "{u}");
+            assert_eq!(classify(&url), Kind::ProbeThenConfirm, "{u}");
+        }
+        assert!(!is_launch_site(
+            &Url::parse("https://notyoutube.com/a").unwrap()
+        ));
     }
 }
