@@ -198,6 +198,10 @@ pub trait HttpBackend: Send + Sync {
 }
 
 /// Browser-like User-Agent for page fetches (many sites 403 bare clients).
+/// Overall deadline for a page probe request (HEAD, or GET of the capped body). The agent's
+/// connect and read timeouts do not stop a server that sends one byte every few seconds.
+const PAGE_REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+
 const PAGE_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
     (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 // Production HTTP backend (ureq-based)
@@ -422,7 +426,11 @@ impl HttpBackend for ProdHttpBackend {
 
     fn head_info(&self, url: &str) -> Result<HeadInfo, String> {
         let client = self.client(url)?;
-        let head = client.head(url).set("User-Agent", PAGE_USER_AGENT).call();
+        let head = client
+            .head(url)
+            .set("User-Agent", PAGE_USER_AGENT)
+            .timeout(PAGE_REQUEST_DEADLINE)
+            .call();
         let resp = match head {
             Ok(resp) => resp,
             // Some servers reject HEAD; ask for the first byte instead.
@@ -431,6 +439,7 @@ impl HttpBackend for ProdHttpBackend {
                     .get(url)
                     .set("User-Agent", PAGE_USER_AGENT)
                     .set("Range", "bytes=0-0")
+                    .timeout(PAGE_REQUEST_DEADLINE)
                     .call()
                     .map_err(|e| format!("GET(range 0-0) {url}: {e}"))?
             }
@@ -463,6 +472,7 @@ impl HttpBackend for ProdHttpBackend {
             .get(url)
             .set("User-Agent", PAGE_USER_AGENT)
             .set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+            .timeout(PAGE_REQUEST_DEADLINE)
             .call()
             .map_err(|e| format!("GET {url}: {e}"))?;
         let content_type = resp.header("Content-Type").map(str::to_string);

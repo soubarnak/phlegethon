@@ -98,14 +98,15 @@ pub trait PageSniffer: Send + Sync {
 // ---------------------------------------------------------------------------
 
 const MEDIA_EXTENSIONS: &[&str] = &[
-    "mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "ts", "mp3", "m4a", "aac", "ogg", "opus",
-    "flac", "wav",
+    "mp4", "m4v", "webm", "mkv", "mov", "avi", "flv", "mp3", "m4a", "aac", "ogg", "opus", "flac",
+    "wav",
 ];
 
 fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid sniff regex"))
 }
 
+static BASE_TAG_RE: OnceLock<Regex> = OnceLock::new();
 static META_RE: OnceLock<Regex> = OnceLock::new();
 static VIDEO_SRC_RE: OnceLock<Regex> = OnceLock::new();
 static SOURCE_TAG_RE: OnceLock<Regex> = OnceLock::new();
@@ -148,13 +149,33 @@ fn attrs(tag: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// Decode HTML character references in one pass, so `&amp;lt;` becomes `&lt;`, not `<`.
 fn html_unescape(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
+    static ENTITY_RE: OnceLock<Regex> = OnceLock::new();
+    re(
+        &ENTITY_RE,
+        r"&(#[xX][0-9a-fA-F]{1,6}|#[0-9]{1,7}|[a-zA-Z]{2,6});",
+    )
+    .replace_all(s, |c: &regex::Captures| {
+        let name = &c[1];
+        let decoded = if let Some(hex) = name.strip_prefix("#x").or(name.strip_prefix("#X")) {
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        } else if let Some(dec) = name.strip_prefix('#') {
+            dec.parse::<u32>().ok().and_then(char::from_u32)
+        } else {
+            match name {
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "nbsp" => Some(' '),
+                _ => None,
+            }
+        };
+        decoded.map_or_else(|| c[0].to_string(), String::from)
+    })
+    .into_owned()
 }
 
 fn json_unescape(s: &str) -> String {
@@ -183,6 +204,21 @@ pub fn classify_media_url(url: &str) -> Option<SniffedKind> {
     None
 }
 
+/// [`classify_media_url`] for URLs found in `<video>` and `<source>` tags, where a `.ts`
+/// file is an MPEG transport stream. Anywhere else `.ts` is usually TypeScript.
+fn classify_player_media_url(url: &str) -> Option<SniffedKind> {
+    classify_media_url(url).or_else(|| {
+        let parsed = Url::parse(url).ok()?;
+        parsed
+            .path()
+            .to_ascii_lowercase()
+            .ends_with(".ts")
+            .then(|| SniffedKind::DirectFile {
+                ext: "ts".to_string(),
+            })
+    })
+}
+
 /// Resolve `candidate` against `base`, keeping only http(s) results.
 fn resolve(base: &Url, candidate: &str) -> Option<String> {
     let trimmed = candidate.trim();
@@ -207,6 +243,13 @@ fn looks_like_preview(url: &str) -> bool {
 
 /// Extract media URLs from an HTML document. Pure; no network.
 pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
+    // The first `<base href>` is the base for every relative URL in the document.
+    let document_base = re(&BASE_TAG_RE, r#"(?is)<base\b[^>]*>"#)
+        .find_iter(html)
+        .find_map(|m| attrs(m.as_str()).get("href").cloned())
+        .and_then(|href| base.join(href.trim()).ok())
+        .filter(|u| matches!(u.scheme(), "http" | "https"));
+    let base = document_base.as_ref().unwrap_or(base);
     let mut out: Vec<SniffedMedia> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -252,7 +295,7 @@ pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
         let a = attrs(m.as_str());
         if let Some(src) = a.get("src").or_else(|| a.get("data-src")) {
             if let Some(url) = resolve(base, src) {
-                let kind = classify_media_url(&url).unwrap_or(SniffedKind::DirectFile {
+                let kind = classify_player_media_url(&url).unwrap_or(SniffedKind::DirectFile {
                     ext: "mp4".to_string(),
                 });
                 push(url, kind, None, SniffSource::VideoTag);
@@ -274,7 +317,7 @@ pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
         let Some(url) = resolve(base, src) else {
             continue;
         };
-        let kind = match classify_media_url(&url) {
+        let kind = match classify_player_media_url(&url) {
             Some(k) => k,
             None if ty.contains("mpegurl") => SniffedKind::Hls,
             None if ty.starts_with("video/") || ty.starts_with("audio/") => {
@@ -534,23 +577,30 @@ pub fn media_items_from_sniff(
     page_title: Option<&str>,
     media: Vec<SniffedMedia>,
 ) -> Vec<MediaItem> {
-    let mut groups: Vec<(String, MediaFetchKind, Vec<(SniffedMedia, Quality)>)> = Vec::new();
+    // Variants share an item only when they share host and file stem: `a.example/clip_480.mp4`
+    // and `b.example/clip_720.mp4` are different files.
+    type Group = (String, String, MediaFetchKind, Vec<(SniffedMedia, Quality)>);
+    let mut groups: Vec<Group> = Vec::new();
     for m in media {
         let quality = quality_from_hints(&m.url, m.label_hint.as_deref(), None);
         let (stem, fetch_kind) = match m.kind {
             SniffedKind::DirectFile { .. } => (stem_of(&m.url), MediaFetchKind::DirectHttp),
             SniffedKind::Hls | SniffedKind::Dash => (m.url.clone(), MediaFetchKind::Extractor),
         };
+        let host = Url::parse(&m.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+            .unwrap_or_default();
         match groups
             .iter_mut()
-            .find(|(s, k, _)| *s == stem && *k == fetch_kind)
+            .find(|(s, h, k, _)| *s == stem && *h == host && *k == fetch_kind)
         {
-            Some((_, _, entries)) => {
+            Some((_, _, _, entries)) => {
                 if !entries.iter().any(|(_, q)| q.id == quality.id) {
                     entries.push((m, quality));
                 }
             }
-            None => groups.push((stem, fetch_kind, vec![(m, quality)])),
+            None => groups.push((stem, host, fetch_kind, vec![(m, quality)])),
         }
     }
 
@@ -558,7 +608,7 @@ pub fn media_items_from_sniff(
     groups
         .into_iter()
         .enumerate()
-        .map(|(idx, (stem, fetch_kind, mut entries))| {
+        .map(|(idx, (stem, _host, fetch_kind, mut entries))| {
             entries.sort_by(|a, b| {
                 let ha = height_hint(None, &a.1.id).unwrap_or(0);
                 let hb = height_hint(None, &b.1.id).unwrap_or(0);
@@ -607,8 +657,40 @@ pub fn split_quality_url(quality_id: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// HLS and DASH manifest content types. The manifest is a playlist that yt-dlp turns into
+/// a stream; downloading it as a plain file saves a few kilobytes of text.
+fn is_manifest_content_type(content_type: &str) -> bool {
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        ct.as_str(),
+        "application/vnd.apple.mpegurl"
+            | "application/x-mpegurl"
+            | "application/mpegurl"
+            | "audio/mpegurl"
+            | "audio/x-mpegurl"
+            | "application/dash+xml"
+    )
+}
+
+fn is_manifest_url(url: &str) -> bool {
+    matches!(
+        classify_media_url(url),
+        Some(SniffedKind::Hls | SniffedKind::Dash)
+    )
+}
+
 /// Whether a `Content-Type` means "not an HTML page".
+///
+/// HLS and DASH manifests are not plain files either, so they report `false` here.
 pub fn is_binary_content_type(content_type: &str) -> bool {
+    if is_manifest_content_type(content_type) {
+        return false;
+    }
     let ct = content_type
         .split(';')
         .next()
@@ -660,8 +742,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            // Work on bytes: slicing the `str` here panics inside a multi-byte character.
+            let hex = |b: u8| (b as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
             }
@@ -672,10 +756,18 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+fn head_is_manifest(head: &HeadInfo) -> bool {
+    head.content_type
+        .as_deref()
+        .is_some_and(is_manifest_content_type)
+        || is_manifest_url(&head.final_url)
+}
+
 /// Build the `Binary` outcome from HEAD metadata, or `None` for pages.
 pub fn binary_outcome_from_head(head: &HeadInfo) -> Option<SniffOutcome> {
     let ct = head.content_type.as_deref()?;
-    if !is_binary_content_type(ct) {
+    // A manifest can arrive as `application/octet-stream`; its extension still gives it away.
+    if !is_binary_content_type(ct) || is_manifest_url(&head.final_url) {
         return None;
     }
     Some(SniffOutcome::Binary {
@@ -707,18 +799,35 @@ impl HtmlPageSniffer {
 impl PageSniffer for HtmlPageSniffer {
     fn sniff_head(&self, url: &str, proxy: &ProxySettings) -> Result<SniffOutcome, String> {
         self.http.apply_proxy_settings(proxy)?;
+        // A manifest goes to yt-dlp, which turns the playlist into the stream.
+        if is_manifest_url(url) {
+            return Ok(SniffOutcome::Nothing);
+        }
         let head = self.http.head_info(url)?;
         Ok(binary_outcome_from_head(&head).unwrap_or(SniffOutcome::Nothing))
     }
 
     fn sniff(&self, url: &str, proxy: &ProxySettings) -> Result<SniffOutcome, String> {
         self.http.apply_proxy_settings(proxy)?;
+        if is_manifest_url(url) {
+            return Ok(SniffOutcome::Nothing);
+        }
         if let Ok(head) = self.http.head_info(url) {
             if let Some(binary) = binary_outcome_from_head(&head) {
                 return Ok(binary);
             }
+            if head_is_manifest(&head) {
+                return Ok(SniffOutcome::Nothing);
+            }
         }
         let (bytes, content_type, final_url) = self.http.fetch_capped(url, MAX_SNIFF_BYTES)?;
+        if content_type
+            .as_deref()
+            .is_some_and(is_manifest_content_type)
+            || is_manifest_url(&final_url)
+        {
+            return Ok(SniffOutcome::Nothing);
+        }
         if let Some(ct) = content_type.as_deref() {
             if is_binary_content_type(ct) {
                 return Ok(SniffOutcome::Binary {
@@ -976,5 +1085,127 @@ mod tests {
             ..head
         };
         assert!(binary_outcome_from_head(&page).is_none());
+    }
+
+    fn head(content_type: &str, final_url: &str) -> HeadInfo {
+        HeadInfo {
+            content_type: Some(content_type.to_string()),
+            content_length: Some(512),
+            accept_ranges: false,
+            final_url: final_url.to_string(),
+            content_disposition: None,
+        }
+    }
+
+    #[test]
+    fn hls_and_dash_manifests_are_not_plain_file_downloads() {
+        for ct in [
+            "application/vnd.apple.mpegurl",
+            "application/x-mpegURL; charset=utf-8",
+            "audio/mpegurl",
+            "application/dash+xml",
+        ] {
+            assert!(!is_binary_content_type(ct), "{ct}");
+            assert_eq!(
+                binary_outcome_from_head(&head(ct, "https://h.example/live/index")),
+                None,
+                "{ct}"
+            );
+        }
+        // A generic content type is caught by the extension.
+        for url in [
+            "https://h.example/live/index.m3u8?t=1",
+            "https://h.example/a.mpd",
+        ] {
+            assert_eq!(
+                binary_outcome_from_head(&head("application/octet-stream", url)),
+                None,
+                "{url}"
+            );
+        }
+        // Real files stay plain downloads.
+        assert!(binary_outcome_from_head(&head("video/mp4", "https://h.example/a.mp4")).is_some());
+    }
+
+    #[test]
+    fn content_disposition_with_a_multibyte_character_after_percent_does_not_panic() {
+        assert_eq!(
+            filename_from_content_disposition(r#"attachment; filename="50%€.zip""#).as_deref(),
+            Some("50%€.zip")
+        );
+        assert_eq!(
+            filename_from_content_disposition(r#"attachment; filename="100%é""#).as_deref(),
+            Some("100%é")
+        );
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename=a%20b.zip").as_deref(),
+            Some("a b.zip")
+        );
+    }
+
+    #[test]
+    fn base_href_resolves_relative_media() {
+        let html = r#"<html><head><base href="https://cdn.example.com/assets/"></head>
+            <body><video src="clip_720.mp4"></video><a href="../x/other.mp4">o</a></body></html>"#;
+        let urls: Vec<String> = sniff_html(&base(), html)
+            .into_iter()
+            .map(|m| m.url)
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://cdn.example.com/assets/clip_720.mp4",
+                "https://cdn.example.com/x/other.mp4"
+            ]
+        );
+    }
+
+    #[test]
+    fn html_entities_decode_once_and_numeric_forms_work() {
+        assert_eq!(html_unescape("a &amp;lt; b"), "a &lt; b");
+        assert_eq!(
+            html_unescape("Tom &#38; Jerry &#x26; co"),
+            "Tom & Jerry & co"
+        );
+        assert_eq!(html_unescape("&#8364;5 &unknown; &"), "€5 &unknown; &");
+    }
+
+    #[test]
+    fn ts_files_are_media_only_inside_player_tags() {
+        let html = r#"<a href="/src/app.ts">source</a>
+            <video><source src="/live/seg1.ts"></video>"#;
+        let urls: Vec<String> = sniff_html(&base(), html)
+            .into_iter()
+            .map(|m| m.url)
+            .collect();
+        assert_eq!(urls, vec!["https://example.com/live/seg1.ts"]);
+    }
+
+    #[test]
+    fn variants_on_different_hosts_are_different_items() {
+        let media = vec![
+            SniffedMedia {
+                url: "https://a.example.com/clip_480.mp4".into(),
+                kind: SniffedKind::DirectFile { ext: "mp4".into() },
+                label_hint: None,
+                source: SniffSource::SourceTag,
+            },
+            SniffedMedia {
+                url: "https://b.example.com/clip_720.mp4".into(),
+                kind: SniffedKind::DirectFile { ext: "mp4".into() },
+                label_hint: None,
+                source: SniffSource::SourceTag,
+            },
+            SniffedMedia {
+                url: "https://a.example.com/clip_720.mp4".into(),
+                kind: SniffedKind::DirectFile { ext: "mp4".into() },
+                label_hint: None,
+                source: SniffSource::SourceTag,
+            },
+        ];
+        let items = media_items_from_sniff("https://example.com/p", None, media);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].qualities.len(), 2);
+        assert_eq!(items[1].qualities.len(), 1);
     }
 }
