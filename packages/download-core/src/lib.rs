@@ -43,6 +43,7 @@ pub use toolchain_discovery::{
     classify_ytdlp_failure, detect_libc, error_code, error_code_hint, tag_error, EjsStatus,
     JsRuntime, JsRuntimeKind, Libc, PlatformInfo, ToolInfo, ToolchainStatus, YtDlpLauncher,
     YtDlpSource, ERROR_CODE_NEEDS_BROWSER_COOKIES, ERROR_CODE_NEEDS_JS_RUNTIME, ERROR_CODE_TIMEOUT,
+    ERROR_CODE_TOOLCHAIN_MISSING,
 };
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
@@ -54,9 +55,10 @@ pub use disk_space::{
 pub use download_archive::{ArchiveEntry, ArchiveOutcome, DownloadArchive};
 pub use event::CoreEvent;
 pub use extractor::{
-    is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain,
-    FakeExtractorToolchain, ItemSelection, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult,
-    ProbeSelection, ProbeTierSettings, Quality, DEFAULT_PROBE_TIMEOUT_SECS,
+    is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorProgress,
+    ExtractorToolchain, FakeExtractorToolchain, ItemSelection, MediaFetchKind, MediaItem,
+    ProbePolicy, ProbeResult, ProbeSelection, ProbeTierSettings, Quality,
+    DEFAULT_PROBE_TIMEOUT_SECS,
 };
 pub use filename_template::{
     media_item_raw_id, prepare_extractor_output, render_template, resolve_collision,
@@ -425,10 +427,16 @@ impl ProbePlan {
             }
         }
 
-        Err(format!(
+        // Keep yt-dlp's `[code]` at the front so shells still show the cookie, timeout,
+        // JS-runtime or geo hint for it.
+        let message = format!(
             "no downloadable media found for {}. yt-dlp: {ytdlp_error}{sniff_note}",
             self.url
-        ))
+        );
+        Err(match error_code(&ytdlp_error) {
+            Some(code) => tag_error(code, message),
+            None => message,
+        })
     }
 }
 
@@ -873,8 +881,9 @@ struct ExtractorFetchParams {
 }
 
 /// Run an Extractor Toolchain download on a worker thread and emit
-/// [`CoreEvent::JobProgress`] from on-disk growth under the Job Destination
-/// until it finishes or stops. Runs without the Core mutex.
+/// [`CoreEvent::JobProgress`] until it finishes or stops. Progress comes from the byte
+/// counts the toolchain reports; a toolchain that reports none is measured by the
+/// on-disk size of the Job Destination. Runs without the Core mutex.
 fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownloadOutcome, String> {
     let ExtractorFetchParams {
         extractor,
@@ -894,8 +903,11 @@ fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownload
     } = params;
     let (result_tx, result_rx) = mpsc::channel();
     let dest_worker = dest.clone();
+    // Latest progress the toolchain reported; `None` until it reports anything.
+    let reported: Arc<Mutex<Option<ExtractorProgress>>> = Arc::new(Mutex::new(None));
+    let reported_worker = Arc::clone(&reported);
     std::thread::spawn(move || {
-        let outcome = extractor.download_with_referer(
+        let outcome = extractor.download_with_progress(
             &url,
             &format,
             &dest_worker,
@@ -905,24 +917,43 @@ fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownload
             &proxy,
             &output_spec,
             referer.as_deref(),
+            &move |p| {
+                if let Ok(mut slot) = reported_worker.lock() {
+                    *slot = Some(p);
+                }
+            },
         );
         let _ = result_tx.send(outcome);
     });
 
-    let mut last_emitted: Option<u64> = None;
+    let mut last_emitted: Option<(u64, Option<u64>)> = None;
     loop {
         match result_rx.try_recv() {
             Ok(outcome) => break outcome,
             Err(mpsc::TryRecvError::Empty) => {
-                let on_disk = storage::destination_byte_total(&dest);
-                if last_emitted != Some(on_disk) {
-                    live_bytes.store(on_disk, Ordering::Release);
+                // Prefer the toolchain's own byte counts; a recursive size walk of the
+                // destination counts both files of a merge and the merged output.
+                let current = match reported.lock().ok().and_then(|slot| *slot) {
+                    Some(p) => {
+                        let total = match (p.total_bytes, total_for_progress) {
+                            (Some(a), Some(b)) => Some(a.max(b)),
+                            (a, b) => a.or(b),
+                        };
+                        (
+                            total.map_or(p.downloaded_bytes, |t| p.downloaded_bytes.min(t)),
+                            total,
+                        )
+                    }
+                    None => (storage::destination_byte_total(&dest), total_for_progress),
+                };
+                if last_emitted != Some(current) {
+                    live_bytes.store(current.0, Ordering::Release);
                     let _ = event_tx.send(CoreEvent::JobProgress {
                         job_id: job_id.clone(),
-                        bytes_downloaded: on_disk,
-                        total_bytes: total_for_progress,
+                        bytes_downloaded: current.0,
+                        total_bytes: current.1,
                     });
-                    last_emitted = Some(on_disk);
+                    last_emitted = Some(current);
                 }
                 std::thread::sleep(EXTRACTOR_DISK_POLL_INTERVAL);
             }
@@ -3029,7 +3060,7 @@ impl Core {
                 self.finalize_failed_job(
                     job_id,
                     i,
-                    "extractor cannot resume partial download; use Retry".into(),
+                    "extractor cannot resume a partial download".into(),
                 )?;
                 return Ok(None);
             }
