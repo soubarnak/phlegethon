@@ -206,6 +206,16 @@ fn default_tier() -> ExtractionTier {
     ExtractionTier::Dedicated
 }
 
+/// Download progress a toolchain reports while it runs.
+///
+/// `downloaded_bytes` and `total_bytes` cover every file the toolchain fetches for the job
+/// (yt-dlp downloads video and audio as separate files), so the pair never exceeds 100 %.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtractorProgress {
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
 /// Result of an Extractor Toolchain download attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractorDownloadOutcome {
@@ -328,6 +338,37 @@ pub trait ExtractorToolchain: Send + Sync {
         )
     }
 
+    /// [`ExtractorToolchain::download_with_referer`] that also reports progress.
+    ///
+    /// Default ignores `progress`; Core then falls back to measuring the Job Destination
+    /// on disk. Production reports bytes parsed from yt-dlp's `--progress-template`.
+    #[allow(clippy::too_many_arguments)]
+    fn download_with_progress(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+        stop: &AtomicBool,
+        media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        output_template: &str,
+        referer: Option<&str>,
+        _progress: &(dyn Fn(ExtractorProgress) + Send + Sync),
+    ) -> Result<ExtractorDownloadOutcome, String> {
+        self.download_with_referer(
+            url,
+            format,
+            dest_dir,
+            stop,
+            media_extras,
+            cookies,
+            proxy,
+            output_template,
+            referer,
+        )
+    }
+
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
     fn download(
         &self,
@@ -368,6 +409,8 @@ pub struct FakeExtractorToolchain {
     ffmpeg_dir: Option<std::path::PathBuf>,
     /// Whether the fake continues its own partial file like yt-dlp does.
     resume_supported: bool,
+    /// Progress the fake reports before it writes its output (tests).
+    reported_progress: Vec<ExtractorProgress>,
     /// Destination directory of every `download` call (tests).
     download_dests: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     /// Count of [`ExtractorToolchain::apply_sidecar_root`] calls (tests).
@@ -426,6 +469,11 @@ impl FakeExtractorToolchain {
     /// files, and report resume support to Core.
     pub fn enable_resume(&mut self) {
         self.resume_supported = true;
+    }
+
+    /// Report these progress values (one per 120 ms) before the fake download finishes.
+    pub fn report_progress(&mut self, progress: Vec<ExtractorProgress>) {
+        self.reported_progress = progress;
     }
 
     /// Destination directory of every `download` call so far.
@@ -589,6 +637,35 @@ impl ExtractorToolchain for FakeExtractorToolchain {
 
     fn supports_extractor_resume(&self) -> bool {
         self.resume_supported
+    }
+
+    fn download_with_progress(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+        stop: &AtomicBool,
+        media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        output_template: &str,
+        _referer: Option<&str>,
+        progress: &(dyn Fn(ExtractorProgress) + Send + Sync),
+    ) -> Result<ExtractorDownloadOutcome, String> {
+        for p in &self.reported_progress {
+            progress(*p);
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        self.download(
+            url,
+            format,
+            dest_dir,
+            stop,
+            media_extras,
+            cookies,
+            proxy,
+            output_template,
+        )
     }
 
     fn apply_sidecar_root(&self, _root: &std::path::Path) {

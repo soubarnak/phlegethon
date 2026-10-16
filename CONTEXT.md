@@ -69,7 +69,7 @@ User action that removes a job from the queue; for in-flight, Paused, or Failed 
 _Avoid_: Cancel (as the product name for this action), Pause, deleting Completed outputs, leaving orphaned partials after removing an unfinished job
 
 **Resumable Transfer**:
-A download that can continue from the last successful byte after interruption (including app exit or crash), with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded. On relaunch, jobs that were Downloading auto-resume; user-Paused stay Paused; Failed stay Failed until Retry.
+A download that can continue from the last successful byte after interruption (including app exit or crash), with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded. On relaunch, jobs that were Downloading auto-resume; user-Paused stay Paused; Failed stay Failed until Retry. For Extractor Toolchain jobs, Resume (and relaunch) runs yt-dlp again in the same Job Destination with the same format and output spec, and yt-dlp continues its own partial files.
 _Avoid_: restart-from-zero on every failure, silent delete of partials, requiring manual Resume after every crash for in-flight jobs
 
 **Segmented Transfer**:

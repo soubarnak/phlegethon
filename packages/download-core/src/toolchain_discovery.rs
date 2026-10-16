@@ -592,6 +592,14 @@ impl PipeCapture {
         self.done.load(Ordering::Acquire)
     }
 
+    /// Copy the bytes captured after the first `from` bytes.
+    fn read_from(&self, from: usize) -> Vec<u8> {
+        self.buf
+            .lock()
+            .map(|b| b.get(from..).map(<[u8]>::to_vec).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
     /// Take what was captured so far.
     fn take(&self) -> Vec<u8> {
         self.buf
@@ -660,6 +668,19 @@ pub fn run_command_with_deadline_polling(
     deadline: Option<Instant>,
     poll_interval: Duration,
 ) -> Result<CommandOutcome, String> {
+    run_command_observing(cmd, stop, deadline, poll_interval, None)
+}
+
+/// [`run_command_with_deadline_polling`] that also hands every new chunk of stdout to
+/// `observer` while the child runs (called from the polling thread, once per poll).
+/// The full output is still returned at the end.
+pub fn run_command_observing(
+    cmd: &mut Command,
+    stop: Option<&AtomicBool>,
+    deadline: Option<Instant>,
+    poll_interval: Duration,
+    mut observer: Option<&mut dyn FnMut(&[u8])>,
+) -> Result<CommandOutcome, String> {
     if stop.is_some_and(|s| s.load(Ordering::Acquire)) {
         return Ok(CommandOutcome::Stopped);
     }
@@ -682,7 +703,19 @@ pub fn run_command_with_deadline_polling(
     let stdout = PipeCapture::spawn(stdout_pipe);
     let stderr = PipeCapture::spawn(stderr_pipe);
 
+    let mut observed = 0usize;
+    let mut observe = |stdout: &PipeCapture, observed: &mut usize| {
+        if let Some(observer) = observer.as_deref_mut() {
+            let chunk = stdout.read_from(*observed);
+            if !chunk.is_empty() {
+                *observed += chunk.len();
+                observer(&chunk);
+            }
+        }
+    };
+
     let status = loop {
+        observe(&stdout, &mut observed);
         if stop.is_some_and(|s| s.load(Ordering::Acquire)) {
             kill_process_tree(&mut child);
             wait_for_readers([&stdout, &stderr]);
@@ -716,6 +749,7 @@ pub fn run_command_with_deadline_polling(
         }
         wait_for_readers([&stdout, &stderr]);
     }
+    observe(&stdout, &mut observed);
     Ok(CommandOutcome::Finished {
         status,
         stdout: stdout.take(),

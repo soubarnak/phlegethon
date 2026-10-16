@@ -19,17 +19,17 @@
 use crate::cookie_channel::{ytdlp_cookie_args, CookieChannel};
 use crate::doh_ytdlp::ytdlp_command_with_optional_doh_dns;
 use crate::extractor::{
-    is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain,
-    MediaFetchKind, MediaItem, ProbePolicy, ProbeResult, Quality,
+    is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorProgress,
+    ExtractorToolchain, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult, Quality,
 };
 use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtrasOptions};
 use crate::proxy_settings::{ytdlp_proxy_args, ProxySettings};
 use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
 use crate::toolchain_discovery::{
     classify_ytdlp_failure, detect_js_runtime, discover_ytdlp, find_in_path, path_dirs_from_env,
-    python_has_module, run_command_with_deadline_polling, tag_error, tool_version,
-    ytdlp_js_runtime_args, CommandOutcome, DiscoveryEnv, EjsStatus, JsRuntime, PlatformInfo,
-    ToolInfo, ToolchainStatus, YtDlpLauncher, YtDlpSource, ERROR_CODE_TIMEOUT,
+    python_has_module, run_command_observing, run_command_with_deadline_polling, tag_error,
+    tool_version, ytdlp_js_runtime_args, CommandOutcome, DiscoveryEnv, EjsStatus, JsRuntime,
+    PlatformInfo, ToolInfo, ToolchainStatus, YtDlpLauncher, YtDlpSource, ERROR_CODE_TIMEOUT,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -602,6 +602,12 @@ impl YtDlpExtractorToolchain {
             "--print".to_string(),
             "after_move:filepath".to_string(),
             "--no-playlist".to_string(),
+            // `--print` implies `--quiet`; `--progress` brings the progress lines back,
+            // one per update, in a template Core can parse.
+            "--progress".to_string(),
+            "--newline".to_string(),
+            "--progress-template".to_string(),
+            PROGRESS_TEMPLATE.to_string(),
         ];
         for arg in ytdlp_media_extras_args(media_extras, ffmpeg_present) {
             args.push(arg);
@@ -1087,6 +1093,33 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         output_template: &str,
         referer: Option<&str>,
     ) -> Result<ExtractorDownloadOutcome, String> {
+        self.download_with_progress(
+            url,
+            format,
+            dest_dir,
+            stop,
+            media_extras,
+            cookies,
+            proxy,
+            output_template,
+            referer,
+            &|_| {},
+        )
+    }
+
+    fn download_with_progress(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+        stop: &AtomicBool,
+        media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        output_template: &str,
+        referer: Option<&str>,
+        progress: &(dyn Fn(ExtractorProgress) + Send + Sync),
+    ) -> Result<ExtractorDownloadOutcome, String> {
         ensure_http_url(url)?;
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
@@ -1104,7 +1137,13 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
 
         let launcher = self.effective_launcher();
         let (cmd, _doh_guard) = ytdlp_command_with_optional_doh_dns(&launcher, &args, url, proxy)?;
-        let result = run_command_interruptible(cmd, stop, Duration::from_millis(50));
+        let mut tracker = ProgressTracker::default();
+        let mut observe = |bytes: &[u8]| {
+            if let Some(p) = tracker.feed(bytes) {
+                progress(p);
+            }
+        };
+        let result = run_command_interruptible(cmd, stop, Duration::from_millis(50), &mut observe);
 
         match result? {
             InterruptibleOutput::Stopped => Ok(ExtractorDownloadOutcome::Stopped),
@@ -1147,6 +1186,102 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
     }
 }
 
+/// yt-dlp `--progress-template` for downloads. Tab separated: marker, status, bytes
+/// downloaded, exact total, estimated total, and the file being written (`NA` when absent).
+const PROGRESS_TEMPLATE: &str = "download:PHLEGETHON_PROGRESS\t%(progress.status)s\t\
+%(progress.downloaded_bytes)s\t%(progress.total_bytes)s\t%(progress.total_bytes_estimate)s\t\
+%(progress.filename)s";
+const PROGRESS_MARKER: &str = "PHLEGETHON_PROGRESS\t";
+
+/// Sums yt-dlp's per-file progress lines into one figure for the job.
+///
+/// yt-dlp downloads the video and the audio of a merge as separate files and restarts
+/// its counters for each. Counting per file and summing keeps `downloaded` from passing
+/// `total` or going backwards when the second file starts.
+#[derive(Default)]
+struct ProgressTracker {
+    /// Bytes of a line that has not ended yet.
+    carry: Vec<u8>,
+    /// Per file: (downloaded, total), in the order the files first appeared.
+    files: Vec<(String, u64, Option<u64>)>,
+    last: Option<ExtractorProgress>,
+}
+
+impl ProgressTracker {
+    /// Feed stdout bytes; returns the new aggregate when it changed.
+    fn feed(&mut self, bytes: &[u8]) -> Option<ExtractorProgress> {
+        self.carry.extend_from_slice(bytes);
+        let mut changed = false;
+        while let Some(end) = self.carry.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.carry.drain(..=end).collect();
+            changed |= self.apply_line(&String::from_utf8_lossy(&line));
+        }
+        if !changed {
+            return None;
+        }
+        let progress = self.aggregate();
+        if self.last == Some(progress) {
+            return None;
+        }
+        self.last = Some(progress);
+        Some(progress)
+    }
+
+    fn apply_line(&mut self, line: &str) -> bool {
+        let Some(rest) = line.trim_end().strip_prefix(PROGRESS_MARKER) else {
+            return false;
+        };
+        let fields: Vec<&str> = rest.split('\t').collect();
+        let [status, downloaded, total, estimate, filename] = fields[..] else {
+            return false;
+        };
+        let number = |s: &str| {
+            s.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|n| *n >= 0.0)
+                .map(|n| n as u64)
+        };
+        let Some(downloaded) = number(downloaded) else {
+            return false;
+        };
+        let total = number(total)
+            .or_else(|| number(estimate))
+            .filter(|t| *t > 0);
+        let entry = match self
+            .files
+            .iter_mut()
+            .position(|(name, ..)| name == filename)
+        {
+            Some(i) => &mut self.files[i],
+            None => {
+                self.files.push((filename.to_string(), 0, None));
+                self.files.last_mut().expect("just pushed")
+            }
+        };
+        entry.1 = entry.1.max(downloaded);
+        entry.2 = match (entry.2, total) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        if status == "finished" {
+            // A finished file is complete even when yt-dlp knew no total.
+            entry.2 = Some(entry.2.map_or(entry.1, |t| t.max(entry.1)));
+            entry.1 = entry.2.unwrap_or(entry.1);
+        }
+        true
+    }
+
+    fn aggregate(&self) -> ExtractorProgress {
+        let downloaded: u64 = self.files.iter().map(|(_, d, _)| d).sum();
+        let total = self.files.iter().map(|(_, _, t)| *t).sum::<Option<u64>>();
+        ExtractorProgress {
+            downloaded_bytes: total.map_or(downloaded, |t| downloaded.min(t)),
+            total_bytes: total,
+        }
+    }
+}
+
 /// Outcome of waiting on a child process that may be hard-killed on stop.
 #[derive(Debug)]
 enum InterruptibleOutput {
@@ -1174,9 +1309,10 @@ fn run_command_interruptible(
     mut cmd: Command,
     stop: &AtomicBool,
     poll_interval: Duration,
+    observer: &mut dyn FnMut(&[u8]),
 ) -> Result<InterruptibleOutput, String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    match run_command_with_deadline_polling(&mut cmd, Some(stop), None, poll_interval)
+    match run_command_observing(&mut cmd, Some(stop), None, poll_interval, Some(observer))
         .map_err(|e| e.replace("failed to spawn", "failed to spawn yt-dlp download:"))?
     {
         CommandOutcome::Finished {
@@ -2003,7 +2139,12 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let mut cmd = Command::new("sleep");
             cmd.arg("30");
-            run_command_interruptible(cmd, &stop_for_worker, Duration::from_millis(20))
+            run_command_interruptible(
+                cmd,
+                &stop_for_worker,
+                Duration::from_millis(20),
+                &mut |_| {},
+            )
         });
 
         std::thread::sleep(Duration::from_millis(80));
@@ -3477,5 +3618,151 @@ esac
     fn ytdlp_reports_resume_support() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor.supports_extractor_resume());
+    }
+
+    fn progress_line(status: &str, downloaded: &str, total: &str, file: &str) -> String {
+        format!("PHLEGETHON_PROGRESS\t{status}\t{downloaded}\t{total}\tNA\t{file}\n")
+    }
+
+    #[test]
+    fn progress_sums_video_and_audio_files_and_never_exceeds_the_total() {
+        let mut tracker = ProgressTracker::default();
+        let mut seen: Vec<ExtractorProgress> = Vec::new();
+        let lines = [
+            progress_line("downloading", "400", "1000", "v.f137.mp4"),
+            progress_line("finished", "1000", "1000", "v.f137.mp4"),
+            progress_line("downloading", "100", "200", "v.f140.m4a"),
+            progress_line("finished", "200", "200", "v.f140.m4a"),
+            "[Merger] Merging formats into \"v.mp4\"\n".to_string(),
+        ];
+        for line in &lines {
+            seen.extend(tracker.feed(line.as_bytes()));
+        }
+        assert!(seen
+            .iter()
+            .all(|p| p.total_bytes.is_none_or(|t| p.downloaded_bytes <= t)));
+        assert!(
+            seen.windows(2)
+                .all(|w| w[0].downloaded_bytes <= w[1].downloaded_bytes),
+            "bytes went backwards: {seen:?}"
+        );
+        assert_eq!(
+            seen.last(),
+            Some(&ExtractorProgress {
+                downloaded_bytes: 1200,
+                total_bytes: Some(1200)
+            })
+        );
+    }
+
+    #[test]
+    fn progress_lines_split_across_reads_and_noise_are_handled() {
+        let mut tracker = ProgressTracker::default();
+        let line = progress_line("downloading", "50", "100", "a.mp4");
+        let (first, second) = line.as_bytes().split_at(17);
+        assert_eq!(tracker.feed(b"[download] Destination: a.mp4\n"), None);
+        assert_eq!(tracker.feed(first), None);
+        assert_eq!(
+            tracker.feed(second),
+            Some(ExtractorProgress {
+                downloaded_bytes: 50,
+                total_bytes: Some(100)
+            })
+        );
+        // Same figures again: no new report.
+        assert_eq!(tracker.feed(line.as_bytes()), None);
+        // Garbage in the numeric fields is ignored.
+        assert_eq!(
+            tracker.feed(progress_line("downloading", "NA", "NA", "a.mp4").as_bytes()),
+            None
+        );
+    }
+
+    #[test]
+    fn progress_without_a_known_total_reports_bytes_only() {
+        let mut tracker = ProgressTracker::default();
+        assert_eq!(
+            tracker.feed(progress_line("downloading", "123", "NA", "live.ts").as_bytes()),
+            Some(ExtractorProgress {
+                downloaded_bytes: 123,
+                total_bytes: None
+            })
+        );
+    }
+
+    #[test]
+    fn download_args_ask_yt_dlp_for_parseable_progress() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let args = extractor.download_args(
+            "https://example.com/v",
+            "best",
+            Path::new("/tmp/dest"),
+            &MediaExtrasOptions::default(),
+            &CookieChannel::default(),
+            &ProxySettings::default(),
+            "%(title)s.%(ext)s",
+            None,
+        );
+        assert!(args.iter().any(|a| a == "--progress"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--newline"), "{args:?}");
+        let template = args
+            .windows(2)
+            .find(|w| w[0] == "--progress-template")
+            .map(|w| w[1].as_str())
+            .expect("progress template");
+        assert!(
+            template.starts_with("download:PHLEGETHON_PROGRESS\t"),
+            "{template}"
+        );
+        assert_eq!(template.matches('\t').count(), 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_reports_progress_while_the_child_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("fake-yt-dlp");
+        let out = tmp.path().join("out.mp4");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'PHLEGETHON_PROGRESS\\tdownloading\\t10\\t100\\tNA\\ta.mp4\\n'\n\
+                 sleep 0.4\nprintf 'PHLEGETHON_PROGRESS\\tfinished\\t100\\t100\\tNA\\ta.mp4\\n'\n\
+                 echo x > {out}\necho {out}\n",
+                out = out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig {
+            binary_path: script,
+            ..YtDlpConfig::default()
+        });
+        let seen = std::sync::Mutex::new(Vec::new());
+        let stop = AtomicBool::new(false);
+        let outcome = extractor
+            .download_with_progress(
+                "https://example.com/v",
+                "best",
+                tmp.path(),
+                &stop,
+                &MediaExtrasOptions::default(),
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+                "%(title)s.%(ext)s",
+                None,
+                &|p| seen.lock().unwrap().push((p, Instant::now())),
+            )
+            .unwrap();
+        assert!(matches!(outcome, ExtractorDownloadOutcome::Completed(_)));
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].0.downloaded_bytes, 10);
+        assert_eq!(seen[1].0.downloaded_bytes, 100);
+        assert!(
+            seen[1].1.duration_since(seen[0].1) >= Duration::from_millis(200),
+            "first report must arrive while the child still runs"
+        );
     }
 }

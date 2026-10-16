@@ -1048,6 +1048,56 @@ fn resume_after_pause_reruns_a_resumable_extractor_in_the_same_destination() {
 }
 
 #[test]
+fn extractor_progress_comes_from_the_toolchain_not_from_the_destination_size() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=progress-ext",
+        "Progress Video",
+        "https://cdn.youtube.com/progress-ext.mp4",
+        vec![("720p", "720p")],
+    );
+    toolchain.report_progress(vec![
+        ExtractorProgress {
+            downloaded_bytes: 50,
+            total_bytes: Some(100),
+        },
+        ExtractorProgress {
+            downloaded_bytes: 100,
+            total_bytes: Some(100),
+        },
+    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.probe("https://www.youtube.com/watch?v=progress-ext")
+        .unwrap();
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=progress-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_id = core.confirm_probe_selection(&selection, None).unwrap()[0].clone();
+    collect_events(&rx);
+    core.process_pending().unwrap();
+    let progress: Vec<(u64, Option<u64>)> = collect_events(&rx)
+        .into_iter()
+        .filter_map(|e| match e {
+            CoreEvent::JobProgress {
+                job_id: id,
+                bytes_downloaded,
+                total_bytes,
+            } if id == job_id => Some((bytes_downloaded, total_bytes)),
+            _ => None,
+        })
+        .collect();
+    assert!(progress.contains(&(50, Some(100))), "{progress:?}");
+    assert!(progress.contains(&(100, Some(100))), "{progress:?}");
+}
+
+#[test]
 fn pause_on_completed_job_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, _rx) = make_core(Box::new(fake_http()));
