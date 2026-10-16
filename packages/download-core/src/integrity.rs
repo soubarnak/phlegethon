@@ -3,6 +3,7 @@
 //! Verify only when an expected hash is available (metalink, sidecar, or
 //! user-supplied). Mismatch marks the job Failed and leaves the file on disk.
 
+use crate::metalink;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -31,6 +32,14 @@ impl ExpectedHash {
     pub fn parse(algorithm: &str, digest: &str) -> Result<Self, String> {
         let algorithm = parse_algorithm(algorithm)?;
         let digest = normalize_hex_digest(digest)?;
+        let want = digest_hex_len(algorithm);
+        if digest.len() != want {
+            return Err(format!(
+                "{} digest must be {want} hex characters, got {}",
+                algorithm_label(algorithm),
+                digest.len()
+            ));
+        }
         Ok(Self { algorithm, digest })
     }
 
@@ -55,6 +64,32 @@ impl ExpectedHash {
         Self::from_sidecar_line(line)
     }
 
+    /// Parse sidecar contents and return the digest listed for `filename`.
+    ///
+    /// Rows are GNU `sha256sum` style: `DIGEST  name` or `DIGEST *name` (binary
+    /// marker). A row with no name is a bare single-file digest and applies to
+    /// any file. Errors when no row matches, so a multi-file `SHA256SUMS` can
+    /// never check a job against another file's digest.
+    pub fn from_sidecar_for_file(text: &str, filename: &str) -> Result<Self, String> {
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (token, rest) = match line.split_once(char::is_whitespace) {
+                Some((token, rest)) => (token, rest.trim_start()),
+                None => (line, ""),
+            };
+            let name = rest.strip_prefix('*').unwrap_or(rest);
+            if !name.is_empty() && !sidecar_name_matches(name, filename) {
+                continue;
+            }
+            let digest = normalize_hex_digest(token)?;
+            let algorithm = infer_algorithm_from_digest_len(digest.len())?;
+            return Ok(Self { algorithm, digest });
+        }
+        Err(format!("sidecar has no checksum entry for {filename}"))
+    }
+
     /// Verify `path` against this expected digest.
     pub fn verify_file(&self, path: &Path) -> Result<(), String> {
         let actual = compute_file_digest(path, self.algorithm)?;
@@ -72,40 +107,17 @@ impl ExpectedHash {
     }
 }
 
-/// Extract the first usable hash from a Metalink / `.meta4` document.
+/// Extract the best usable hash from a Metalink / `.meta4` document.
 ///
-/// When multiple hashes are present, prefers sha-256, then sha-1, then md5.
+/// Reads only `<hash>` elements that are direct children of `<file>` (or of
+/// its Metalink 3 `<verification>` wrapper). `<pieces>` hashes, hashes without
+/// a `type`, and digests whose length does not fit the algorithm are skipped.
+/// When several remain, prefers sha-256, then sha-1, then md5.
 pub fn hash_from_metalink(xml: &str) -> Option<ExpectedHash> {
-    let mut found: Vec<ExpectedHash> = Vec::new();
-    for tag_start in xml.match_indices("<hash").map(|(i, _)| i) {
-        let tag = &xml[tag_start..];
-        let type_start = tag.find("type=\"").or_else(|| tag.find("type='"))?;
-        let quote_byte = tag.as_bytes()[type_start + 5];
-        let quote = quote_byte as char;
-        let value_start = type_start + 6;
-        let rest = &tag[value_start..];
-        let value_end = rest.find(quote)?;
-        let algorithm = &rest[..value_end];
-
-        let content_start = match tag.find('>') {
-            Some(pos) => tag_start + pos + 1,
-            None => continue,
-        };
-        let end_tag = match xml[content_start..].find("</hash>") {
-            Some(pos) => content_start + pos,
-            None => continue,
-        };
-        let digest = xml[content_start..end_tag].trim();
-        if digest.is_empty() {
-            continue;
-        }
-        if let Ok(hash) = ExpectedHash::parse(algorithm, digest) {
-            found.push(hash);
-        }
-    }
-
-    found
+    metalink::parse(xml)
+        .hashes
         .into_iter()
+        .filter_map(|h| ExpectedHash::parse(&h.algorithm?, &h.digest).ok())
         .min_by_key(|h| hash_preference(h.algorithm))
 }
 
@@ -114,6 +126,21 @@ fn hash_preference(algorithm: HashAlgorithm) -> u8 {
         HashAlgorithm::Sha256 => 0,
         HashAlgorithm::Sha1 => 1,
         HashAlgorithm::Md5 => 2,
+    }
+}
+
+/// Whether a sidecar row's name column refers to `filename` (exact, `./name`,
+/// or the final path component of a relative path).
+fn sidecar_name_matches(name: &str, filename: &str) -> bool {
+    let name = name.strip_prefix("./").unwrap_or(name);
+    name == filename || name.rsplit('/').next() == Some(filename)
+}
+
+fn digest_hex_len(algorithm: HashAlgorithm) -> usize {
+    match algorithm {
+        HashAlgorithm::Md5 => 32,
+        HashAlgorithm::Sha1 => 40,
+        HashAlgorithm::Sha256 => 64,
     }
 }
 
@@ -275,5 +302,107 @@ mod tests {
     fn hash_from_metalink_returns_none_without_hash_tags() {
         let xml = r#"<metalink><file name="x"><url>https://x</url></file></metalink>"#;
         assert!(hash_from_metalink(xml).is_none());
+    }
+
+    const SHA256_A: &str = "2c70e12b7a0646f92279e427156332ef536f35ba97c38fa0e0b0af397203f2e7";
+    const SHA256_B: &str = "3b6d4a3a489a373b911a1de7befe6d679674f3f119b85a1c31a2054496c104ca";
+
+    #[test]
+    fn hash_from_metalink_keeps_file_hash_when_pieces_follow_without_type() {
+        // H-15: the old scanner returned None for the whole document here.
+        let xml = format!(
+            r#"<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+                <file name="a.iso">
+                    <hash type="sha-256">{SHA256_A}</hash>
+                    <pieces length="1024" type="sha-256">
+                        <hash>{SHA256_B}</hash>
+                        <hash>{SHA256_B}</hash>
+                    </pieces>
+                </file>
+            </metalink>"#
+        );
+        let hash = hash_from_metalink(&xml).unwrap();
+        assert_eq!(hash.algorithm, HashAlgorithm::Sha256);
+        assert_eq!(hash.digest, SHA256_A);
+    }
+
+    #[test]
+    fn hash_from_metalink_ignores_piece_hashes_with_a_later_type() {
+        // H-15: a piece digest must never be stored under another hash's type.
+        let xml = format!(
+            r#"<metalink><file name="a.iso">
+                <pieces length="1024" type="sha-1">
+                    <hash>{SHA256_B}</hash>
+                </pieces>
+                <hash type="md5">098f6bcd4621d373cade4e832627b4f6</hash>
+            </file></metalink>"#
+        );
+        let hash = hash_from_metalink(&xml).unwrap();
+        assert_eq!(hash.algorithm, HashAlgorithm::Md5);
+        assert_eq!(hash.digest, "098f6bcd4621d373cade4e832627b4f6");
+    }
+
+    #[test]
+    fn hash_from_metalink_skips_hash_without_type() {
+        let xml = format!(
+            r#"<metalink><file name="a"><hash>{SHA256_B}</hash>
+               <hash type="sha-256">{SHA256_A}</hash></file></metalink>"#
+        );
+        assert_eq!(hash_from_metalink(&xml).unwrap().digest, SHA256_A);
+    }
+
+    #[test]
+    fn hash_from_metalink_rejects_wrong_digest_length_for_algorithm() {
+        // A 40-char digest labelled sha-256 is not a sha-256 digest.
+        let xml = r#"<metalink><file name="a">
+            <hash type="sha-256">a9993e364706816aba3e25717850c26c9cd0d89d</hash>
+        </file></metalink>"#;
+        assert!(hash_from_metalink(xml).is_none());
+    }
+
+    #[test]
+    fn hash_from_metalink_only_reads_direct_file_children() {
+        let xml = format!(
+            r#"<metalink><file name="a">
+                <other><hash type="sha-256">{SHA256_B}</hash></other>
+            </file></metalink>"#
+        );
+        assert!(hash_from_metalink(&xml).is_none());
+    }
+
+    // --- Checksum sidecar (M-17) ---
+
+    #[test]
+    fn sidecar_for_file_picks_the_row_for_the_job_filename() {
+        let text = format!("{SHA256_A}  other.iso\n{SHA256_B}  file.zip\n");
+        let hash = ExpectedHash::from_sidecar_for_file(&text, "file.zip").unwrap();
+        assert_eq!(hash.digest, SHA256_B);
+    }
+
+    #[test]
+    fn sidecar_for_file_handles_binary_marker() {
+        let text = format!("{SHA256_A} *file.zip\n");
+        let hash = ExpectedHash::from_sidecar_for_file(&text, "file.zip").unwrap();
+        assert_eq!(hash.digest, SHA256_A);
+    }
+
+    #[test]
+    fn sidecar_for_file_errors_when_no_row_matches() {
+        let text = format!("{SHA256_A}  other.iso\n");
+        let err = ExpectedHash::from_sidecar_for_file(&text, "file.zip").unwrap_err();
+        assert!(err.contains("file.zip"), "got: {err}");
+    }
+
+    #[test]
+    fn sidecar_for_file_accepts_bare_digest() {
+        let hash =
+            ExpectedHash::from_sidecar_for_file(&format!("{SHA256_A}\n"), "file.zip").unwrap();
+        assert_eq!(hash.digest, SHA256_A);
+    }
+
+    #[test]
+    fn sidecar_for_file_keeps_spaces_in_filename() {
+        let text = format!("{SHA256_A}  my file.zip\n");
+        assert!(ExpectedHash::from_sidecar_for_file(&text, "my file.zip").is_ok());
     }
 }
