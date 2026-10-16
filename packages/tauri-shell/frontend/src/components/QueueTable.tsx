@@ -67,7 +67,7 @@ const headers = [
   { key: "status", header: t("queue.col.status") },
   { key: "progress", header: t("queue.col.progress") },
   { key: "size", header: t("queue.col.size") },
-  { key: "actions", header: "" },
+  { key: "actions", header: t("queue.col.actions") },
 ];
 
 /** Column key to cell class: lets the stylesheet size, hide or restack columns by width (UI-1). */
@@ -198,8 +198,10 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
           getToolbarProps,
           selectedRows,
         }) => {
-          const selectedIds = selectedRows.map((r) => r.id);
-          const selectedJobs = selectedIds.map((id) => byId.get(id)).filter((j): j is JobRow => !!j);
+          // Only rows still in the filtered view count: Carbon may keep a selection for a row the
+          // filter has hidden, and Discard deletes files (M-68).
+          const selectedJobs = selectedRows.map((r) => byId.get(r.id)).filter((j): j is JobRow => !!j);
+          const selectedIds = selectedJobs.map((j) => j.job_id);
           const batchProps = getBatchActionProps();
           // Below the narrow breakpoint the labelled buttons no longer fit the bar, so show icons with tooltips (UI-4).
           const batchButton = (label: string) => (narrow ? { hasIconOnly: true, iconDescription: label } : {});
@@ -295,7 +297,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                         const { key, ...headerProps } = getHeaderProps({ header });
                         return (
                           <TableHeader key={key} {...headerProps} className={colClass(header.key)}>
-                            {header.header}
+                            {header.key === "actions" ? <span className="cds--visually-hidden">{header.header}</span> : header.header}
                           </TableHeader>
                         );
                       })}

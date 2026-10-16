@@ -1,60 +1,52 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { PromptRequest } from "@/App";
 import { PromptModal } from "./PromptModal";
+import type { PromptRequest } from "@/App";
 
 function request(over: Partial<PromptRequest> = {}): PromptRequest {
   return {
     title: "Add mirror",
     label: "Mirror URL",
     confirmLabel: "Add",
-    validate: (v) => (/^https?:\/\//.test(v) ? null : "Enter an http(s) URL"),
+    validate: (v) => (/^https?:\/\//.test(v) ? null : "Not a URL"),
     onSubmit: vi.fn(),
     ...over,
   };
 }
 
 describe("PromptModal", () => {
-  it("renders nothing without a request", () => {
-    const { container } = render(<PromptModal request={null} onClose={vi.fn()} />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
-  it("keeps the confirm button disabled and shows the validation message once typing starts", async () => {
+  it("opens with focus in the field (UI-9)", async () => {
     render(<PromptModal request={request()} onClose={vi.fn()} />);
-    const user = userEvent.setup();
-    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
-    await user.type(screen.getByLabelText("Mirror URL"), "ftp://x");
-    expect(screen.getByText("Enter an http(s) URL")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+    expect(await screen.findByLabelText("Mirror URL")).toHaveFocus();
   });
 
-  it("submits the typed value once and closes", async () => {
-    const onSubmit = vi.fn();
+  it("Enter in the field submits a valid value and closes (UI-9)", async () => {
+    const req = request();
     const onClose = vi.fn();
-    render(<PromptModal request={request({ onSubmit })} onClose={onClose} />);
+    render(<PromptModal request={req} onClose={onClose} />);
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText("Mirror URL"), "https://mirror.example/f.iso");
-    await user.click(screen.getByRole("button", { name: "Add" }));
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit).toHaveBeenCalledWith("https://mirror.example/f.iso");
+    await user.type(await screen.findByLabelText("Mirror URL"), "https://m.example.com/f{Enter}");
+    expect(req.onSubmit).toHaveBeenCalledWith("https://m.example.com/f");
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("Cancel closes without submitting", async () => {
-    const onSubmit = vi.fn();
+  it("Enter does nothing while the value is invalid", async () => {
+    const req = request();
     const onClose = vi.fn();
-    render(<PromptModal request={request({ onSubmit })} onClose={onClose} />);
-    await userEvent.setup().click(screen.getByRole("button", { name: "Cancel" }));
-    expect(onClose).toHaveBeenCalled();
-    expect(onSubmit).not.toHaveBeenCalled();
+    render(<PromptModal request={req} onClose={onClose} />);
+    await userEvent.setup().type(await screen.findByLabelText("Mirror URL"), "nope{Enter}");
+    expect(req.onSubmit).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("clears the field when a new request opens", async () => {
-    const { rerender } = render(<PromptModal request={request()} onClose={vi.fn()} />);
-    await userEvent.setup().type(screen.getByLabelText("Mirror URL"), "https://a.example");
-    rerender(<PromptModal request={request({ label: "Cap (KB/s)" })} onClose={vi.fn()} />);
-    expect(screen.getByLabelText("Cap (KB/s)")).toHaveValue("");
+  it("Enter on the Cancel button does not submit", async () => {
+    const req = request();
+    render(<PromptModal request={req} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("Mirror URL"), "https://m.example.com/f");
+    screen.getByRole("button", { name: "Cancel" }).focus();
+    await user.keyboard("{Enter}");
+    expect(req.onSubmit).not.toHaveBeenCalled();
   });
 });

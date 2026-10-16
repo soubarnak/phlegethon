@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { QueueTable, type QueueActions } from "./QueueTable";
@@ -102,6 +102,26 @@ describe("QueueTable", () => {
     await user.click(screen.getByRole("checkbox", { name: /select all/i }));
     await user.click(screen.getByRole("button", { name: "Discard" }));
     expect(a.discard).toHaveBeenCalledWith(expect.arrayContaining(["dl", "pa", "fa", "ok", "gx"]));
+  });
+
+  // Carbon 1.118 already drops a hidden row from `selectedRows`, so this passes without the explicit
+// visible-selection filter in QueueTable too. It pins the behaviour in case a Carbon upgrade changes it.
+it("batch discard leaves out selected rows the filter has hidden (M-68)", async () => {
+    const a = actions();
+    render(<QueueTable jobs={jobs} actions={a} hasAnyJobs />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("checkbox", { name: /select all/i }));
+    // The search field sits behind the batch bar while rows are selected.
+    fireEvent.change(screen.getByRole("searchbox", { hidden: true }), { target: { value: "failed" } });
+    expect(screen.queryByTestId("queue-row-dl")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    expect(a.discard).toHaveBeenCalledTimes(1);
+    expect(a.discard).toHaveBeenCalledWith(["fa"]);
+  });
+
+  it("labels the actions column for assistive technology (UI-16)", () => {
+    render(<QueueTable jobs={jobs} actions={actions()} hasAnyJobs />);
+    expect(screen.getByRole("columnheader", { name: "Actions" })).toBeInTheDocument();
   });
 
   describe("batch actions below the narrow breakpoint (UI-4)", () => {
