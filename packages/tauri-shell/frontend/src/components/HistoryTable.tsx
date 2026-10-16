@@ -122,16 +122,16 @@ export function HistoryTable({ refreshKey, onRedownload }: HistoryTableProps) {
           <Table size="md" aria-label={t("history.title")}>
             <TableHead>
               <TableRow>
-                <TableHeader>{t("queue.col.title")}</TableHeader>
-                <TableHeader>{t("queue.col.status")}</TableHeader>
-                <TableHeader>{t("history.col.when")}</TableHeader>
-                <TableHeader />
+                <TableHeader className="ph-history__col ph-history__col--title">{t("queue.col.title")}</TableHeader>
+                <TableHeader className="ph-history__col ph-history__col--status">{t("queue.col.status")}</TableHeader>
+                <TableHeader className="ph-history__col ph-history__col--when">{t("history.col.when")}</TableHeader>
+                <TableHeader className="ph-history__col ph-history__col--actions" />
               </TableRow>
             </TableHead>
             <TableBody>
               {visible.map((entry) => (
                 <TableRow key={entry.media_id} data-testid={`history-row-${entry.media_id}`}>
-                  <TableCell>
+                  <TableCell className="ph-history__col ph-history__col--title">
                     <div className="ph-history__title" title={entry.title}>
                       {entry.title}
                     </div>
@@ -139,13 +139,13 @@ export function HistoryTable({ refreshKey, onRedownload }: HistoryTableProps) {
                       {entry.url}
                     </div>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="ph-history__col ph-history__col--status">
                     <Tag size="sm" type={entry.outcome === "Completed" ? "green" : "red"}>
                       {entry.outcome === "Completed" ? t("queue.status.completed") : t("queue.status.failed")}
                     </Tag>
                   </TableCell>
-                  <TableCell>{formatTimestamp(entry.completed_at_unix_secs)}</TableCell>
-                  <TableCell>
+                  <TableCell className="ph-history__col ph-history__col--when">{formatTimestamp(entry.completed_at_unix_secs)}</TableCell>
+                  <TableCell className="ph-history__col ph-history__col--actions">
                     <div style={{ display: "flex", justifyContent: "flex-end" }}>
                       <OverflowMenu size="sm" flipped aria-label={t("queue.rowMenu", { title: entry.title })} iconDescription={t("queue.rowMenu", { title: entry.title })}>
                         <OverflowMenuItem itemText={t("queue.action.reveal")} onClick={() => void reveal(entry)} />

@@ -17,7 +17,7 @@
         "title": "Phlegethon",
         "width": 960,
         "height": 640,
-        "minWidth": 480,
+        "minWidth": 360,
         "minHeight": 320,
         "resizable": true,
         "fullscreen": false,

@@ -27,6 +27,7 @@
   "queue.action.pause": "Pause",
   "queue.action.resume": "Resume",
   "queue.action.retry": "Retry",
+  "queue.batch.cancel": "Cancel",
   "queue.action.discard": "Discard",
   "queue.action.reveal": "Reveal in folder",
   "queue.action.open": "Open file",
