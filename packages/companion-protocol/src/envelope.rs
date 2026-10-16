@@ -60,7 +60,7 @@ impl CompanionRequest {
             return Err(format!("URL must be http(s), got: {url}"));
         }
         if let Some(session) = &self.session {
-            session.validate()?;
+            session.validate_for_url(url)?;
         }
         Ok(())
     }
@@ -151,6 +151,33 @@ mod tests {
             session: None,
         };
         assert_eq!(req.effective_url(), "https://cdn.example.com/video.mp4");
+    }
+
+    #[test]
+    fn validate_rejects_cookie_for_unrelated_host() {
+        let mut req = CompanionRequest {
+            v: PROTOCOL_VERSION,
+            op: "enqueue".to_string(),
+            request_id: "r".to_string(),
+            page_url: "https://example.com/watch".to_string(),
+            media_url: None,
+            intent: CompanionIntent::default(),
+            referrer: None,
+            session: Some(CompanionSession {
+                cookies: vec![crate::cookies::CompanionCookie {
+                    name: "sid".to_string(),
+                    value: "v".to_string(),
+                    domain: ".evil.example".to_string(),
+                    path: "/".to_string(),
+                    secure: false,
+                    http_only: false,
+                    expiration_date: 0,
+                }],
+            }),
+        };
+        assert!(req.validate().unwrap_err().contains("does not cover host"));
+        req.session.as_mut().unwrap().cookies[0].domain = ".example.com".to_string();
+        req.validate().unwrap();
     }
 
     #[test]
