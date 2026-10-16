@@ -29,7 +29,7 @@ impl Default for DefaultQualityPolicy {
 
 /// Select the default quality id from `qualities` using the active policy.
 ///
-/// Returns `None` when `qualities` is empty.
+/// Returns `None` when `qualities` is empty, or in audio-only mode when no quality is audio.
 pub fn select_default_quality(
     qualities: &[Quality],
     policy: &DefaultQualityPolicy,
@@ -63,11 +63,8 @@ fn select_best_audio(qualities: &[Quality]) -> Option<String> {
         }
     }
 
-    if let Some((_, quality)) = best {
-        return Some(quality.id.clone());
-    }
-
-    qualities.first().map(|q| q.id.clone())
+    // No audio entry: the first quality can be a 2160p video stream, so offer nothing.
+    best.map(|(_, quality)| quality.id.clone())
 }
 
 fn select_best_video(qualities: &[Quality], policy: &DefaultQualityPolicy) -> Option<String> {
@@ -264,6 +261,28 @@ mod tests {
     fn empty_qualities_returns_none() {
         assert_eq!(
             select_default_quality(&[], &DefaultQualityPolicy::default(), false),
+            None
+        );
+    }
+
+    #[test]
+    fn audio_only_mode_returns_none_when_no_audio_quality_exists() {
+        let qualities = vec![
+            Quality {
+                id: "2160p".into(),
+                label: "2160p".into(),
+                size_bytes: None,
+                container: Some("mp4".into()),
+            },
+            Quality {
+                id: "720p".into(),
+                label: "720p".into(),
+                size_bytes: None,
+                container: Some("mp4".into()),
+            },
+        ];
+        assert_eq!(
+            select_default_quality(&qualities, &DefaultQualityPolicy::default(), true),
             None
         );
     }
