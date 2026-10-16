@@ -233,7 +233,9 @@ impl<'a, W: Write> TransferWriter<'a, W> {
             return;
         };
         let downloaded = progress.live_bytes.fetch_add(delta, Ordering::AcqRel) + delta;
-        let _ = progress.event_tx.send(CoreEvent::JobProgress {
+        // Progress is cumulative, so a dropped event costs nothing but a slightly older
+        // number. A bounded channel must never stall the transfer thread.
+        let _ = progress.event_tx.try_send(CoreEvent::JobProgress {
             job_id: progress.job_id.clone(),
             bytes_downloaded: downloaded,
             total_bytes: progress.total_bytes,
@@ -352,6 +354,38 @@ mod tests {
         clock.advance(Duration::from_secs(1));
         assert_eq!(bucket.consume(10), 10);
         assert_eq!(bucket.consume(1), 0);
+    }
+
+    #[test]
+    fn a_full_event_channel_never_blocks_the_transfer() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let done = std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let paused = AtomicBool::new(false);
+            let mut writer = TransferWriter::new(&mut sink, None, None, &paused).with_progress(
+                TransferProgress {
+                    job_id: "job".into(),
+                    event_tx: tx,
+                    total_bytes: None,
+                    live_bytes: Arc::new(AtomicU64::new(0)),
+                },
+            );
+            for _ in 0..50 {
+                writer.write_all(&[0u8; 8]).unwrap();
+            }
+            writer.bytes_written()
+        });
+        // Nobody reads `rx`: with a blocking send the writer would hang on write two.
+        let started = std::time::Instant::now();
+        while !done.is_finished() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "transfer blocked"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(done.join().unwrap(), 400);
+        drop(rx);
     }
 
     #[test]

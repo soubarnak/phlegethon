@@ -13,6 +13,7 @@ compile_error!(
 
 mod companion;
 mod intents;
+mod progress;
 
 use download_core::{
     ArchiveEntry, ArchiveOutcome, Core, CoreEvent, EnqueueOptions, EnqueueOutcome,
@@ -34,16 +35,12 @@ use tauri_plugin_opener::OpenerExt;
 
 /// How long a Toolchain status snapshot is reused before re-probing tools.
 const TOOLCHAIN_STATUS_TTL: Duration = Duration::from_secs(30);
-/// Upper bound for buffered events awaiting `poll_events` (legacy polling path).
-const EVENT_BUFFER_CAP: usize = 2048;
 
 struct AppState {
     core: Arc<Mutex<Core>>,
     job_signals: Arc<JobSignals>,
     /// Core event receiver; taken by the drain thread in `setup`.
     event_rx: Mutex<Option<crossbeam_channel::Receiver<CoreEvent>>>,
-    /// Summaries kept for `poll_events` after they were pushed as `core-event`.
-    event_buffer: Mutex<Vec<EventSummary>>,
     library_root: Mutex<Option<PathBuf>>,
     process_pending_busy: Arc<AtomicBool>,
     /// Companion and second-launch intents waiting for the webview (M-69).
@@ -84,7 +81,6 @@ impl AppState {
             core: Arc::new(Mutex::new(core)),
             job_signals,
             event_rx: Mutex::new(Some(rx)),
-            event_buffer: Mutex::new(Vec::new()),
             library_root: Mutex::new(None),
             process_pending_busy: Arc::new(AtomicBool::new(false)),
             intents: intents::IntentInbox::default(),
@@ -119,7 +115,7 @@ impl From<EnqueueOutcome> for EnqueueResult {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type")]
 enum EventSummary {
     JobProgress {
@@ -154,6 +150,32 @@ enum EventSummary {
         next_url: String,
         error: String,
     },
+}
+
+impl EventSummary {
+    fn job_id(&self) -> Option<&str> {
+        match self {
+            EventSummary::JobProgress { job_id, .. }
+            | EventSummary::JobCompleted { job_id, .. }
+            | EventSummary::JobFailed { job_id, .. }
+            | EventSummary::JobPaused { job_id }
+            | EventSummary::JobResumed { job_id }
+            | EventSummary::JobRetried { job_id }
+            | EventSummary::JobDiscarded { job_id }
+            | EventSummary::JobMirrorFailover { job_id, .. } => Some(job_id),
+        }
+    }
+
+    /// The job stops reporting progress after this event, until a retry or resume.
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            EventSummary::JobCompleted { .. }
+                | EventSummary::JobFailed { .. }
+                | EventSummary::JobPaused { .. }
+                | EventSummary::JobDiscarded { .. }
+        )
+    }
 }
 
 fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
@@ -209,34 +231,46 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
     }
 }
 
-/// Forward Core events to the webview as `core-event` and keep a copy for `poll_events`.
+/// Forward Core events to the webview as `core-event`, with progress limited to about
+/// 5 Hz per job (H-25). The thread never takes the Core lock, so a Core thread that
+/// blocks on a full event channel is always released.
 fn start_event_drain(app: tauri::AppHandle, rx: crossbeam_channel::Receiver<CoreEvent>) {
     std::thread::spawn(move || {
-        while let Ok(evt) = rx.recv() {
-            if matches!(
-                evt,
-                CoreEvent::JobCompleted { .. } | CoreEvent::JobDiscarded { .. }
-            ) {
-                // Own thread: the sweep takes the Core lock, which a long process_pending can hold,
-                // and the event drain must keep delivering progress to the webview.
-                let app = app.clone();
-                std::thread::spawn(move || companion::sweep_cookie_files(&app));
-            }
-            let Some(summary) = event_to_summary(&evt) else {
-                continue;
-            };
-            if let Err(err) = app.emit("core-event", &summary) {
+        let emit = |summary: &EventSummary| {
+            if let Err(err) = app.emit("core-event", summary) {
                 log::warn!("failed to emit core-event: {err}");
             }
-            if let Some(state) = app.try_state::<AppState>() {
-                if let Ok(mut buf) = state.event_buffer.lock() {
-                    if buf.len() >= EVENT_BUFFER_CAP {
-                        let overflow = buf.len() + 1 - EVENT_BUFFER_CAP;
-                        buf.drain(..overflow);
+        };
+        let mut coalescer = progress::ProgressCoalescer::new(progress::PROGRESS_INTERVAL);
+        loop {
+            let wait = coalescer
+                .next_flush_in(Instant::now())
+                .unwrap_or(Duration::from_secs(3600));
+            match rx.recv_timeout(wait) {
+                Ok(evt) => {
+                    if matches!(
+                        evt,
+                        CoreEvent::JobCompleted { .. } | CoreEvent::JobDiscarded { .. }
+                    ) {
+                        // Own thread: the sweep takes the Core lock, which a long process_pending
+                        // can hold, and the event drain must keep delivering progress.
+                        let app = app.clone();
+                        std::thread::spawn(move || companion::sweep_cookie_files(&app));
                     }
-                    buf.push(summary);
+                    if let Some(summary) = event_to_summary(&evt) {
+                        coalescer
+                            .push(summary, Instant::now())
+                            .iter()
+                            .for_each(emit);
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    coalescer.flush_all().iter().for_each(emit);
+                    break;
                 }
             }
+            coalescer.flush_due(Instant::now()).iter().for_each(emit);
         }
     });
 }
@@ -263,21 +297,47 @@ fn parse_optional_destination(destination: Option<String>) -> Option<PathBuf> {
     })
 }
 
+/// Give Core a Library Root and record it as set only after Core accepted it (H-8).
+/// A root Core refuses (for example a corrupt `jobs.json`) must not look set, or every
+/// later command fails with "Library Root not set" and nothing says why.
+fn adopt_library_root(
+    core: &mut Core,
+    stored: &mut Option<PathBuf>,
+    root: PathBuf,
+) -> Result<(), String> {
+    core.set_library_root(root.clone())?;
+    *stored = Some(root);
+    Ok(())
+}
+
+/// Changing the Library Root reloads the queue and replaces the live Job objects,
+/// so a running transfer would lose its job or run twice (H-7).
+fn check_root_change_allowed(active_transfers: usize) -> Result<(), String> {
+    if active_transfers > 0 {
+        return Err(
+            "The Library Root cannot change while downloads are running. Pause them first."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn ensure_library_root(state: &AppState) -> Result<PathBuf, String> {
     let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
     if let Some(ref root) = *stored {
         return Ok(root.clone());
     }
-    let default_root = default_library_root();
+    // The saved preference first: falling back to the default root would silently
+    // move the user to another queue when the saved one failed to load.
+    let root = load_library_root_preference().unwrap_or_else(default_library_root);
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.set_library_root(default_root.clone())?;
-    *stored = Some(default_root.clone());
-    Ok(default_root)
+    adopt_library_root(&mut core, &mut stored, root.clone())?;
+    Ok(root)
 }
 
 #[tauri::command]
-fn enqueue_url(
-    state: State<AppState>,
+async fn enqueue_url(
+    state: State<'_, AppState>,
     url: String,
     destination: Option<String>,
     force_direct: Option<bool>,
@@ -313,15 +373,15 @@ async fn probe_url(
 }
 
 #[tauri::command]
-fn cancel_probe(state: State<AppState>, url: String) -> Result<bool, String> {
+async fn cancel_probe(state: State<'_, AppState>, url: String) -> Result<bool, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.cancel_probe(&url))
 }
 
 #[tauri::command]
-fn clear_pending_probe(
+async fn clear_pending_probe(
     app: tauri::AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     url: String,
 ) -> Result<(), String> {
     {
@@ -348,14 +408,14 @@ async fn enrich_probe_item_qualities(
 }
 
 #[tauri::command]
-fn get_probe_tier_settings(state: State<AppState>) -> Result<ProbeTierSettings, String> {
+async fn get_probe_tier_settings(state: State<'_, AppState>) -> Result<ProbeTierSettings, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.probe_tier_settings())
 }
 
 #[tauri::command]
-fn set_probe_tier_settings(
-    state: State<AppState>,
+async fn set_probe_tier_settings(
+    state: State<'_, AppState>,
     settings: ProbeTierSettings,
 ) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
@@ -374,14 +434,12 @@ async fn get_toolchain_status(
         }
     }
     let core = core_handle(&app)?;
+    // `--version` probes run subprocesses: Core snapshots the extractor handle and
+    // releases the lock before running them (H-9).
     let status =
-        tauri::async_runtime::spawn_blocking(move || -> Result<ToolchainStatus, String> {
-            // `--version` probes run subprocesses; snapshot the extractor handle, not the lock.
-            let guard = core.lock().map_err(|e| e.to_string())?;
-            Ok(guard.toolchain_status())
-        })
-        .await
-        .map_err(|e| format!("toolchain status task failed: {e}"))??;
+        tauri::async_runtime::spawn_blocking(move || Core::toolchain_status_outside_lock(&core))
+            .await
+            .map_err(|e| format!("toolchain status task failed: {e}"))??;
     store_toolchain_status(&app, Some(status.clone()));
     Ok(status)
 }
@@ -415,16 +473,16 @@ async fn install_toolchain_latest(
 }
 
 #[tauri::command]
-fn get_default_quality_policy(
-    state: State<AppState>,
+async fn get_default_quality_policy(
+    state: State<'_, AppState>,
 ) -> Result<download_core::DefaultQualityPolicy, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.default_quality_policy())
 }
 
 #[tauri::command]
-fn set_default_quality_policy(
-    state: State<AppState>,
+async fn set_default_quality_policy(
+    state: State<'_, AppState>,
     policy: download_core::DefaultQualityPolicy,
 ) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
@@ -432,14 +490,17 @@ fn set_default_quality_policy(
 }
 
 #[tauri::command]
-fn get_global_bandwidth_cap(state: State<AppState>) -> Result<Option<u64>, String> {
+async fn get_global_bandwidth_cap(state: State<'_, AppState>) -> Result<Option<u64>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.global_bandwidth_cap())
 }
 
 /// `cap` in bytes per second; `None` or 0 removes the cap.
 #[tauri::command]
-fn set_global_bandwidth_cap(state: State<AppState>, cap: Option<u64>) -> Result<(), String> {
+async fn set_global_bandwidth_cap(
+    state: State<'_, AppState>,
+    cap: Option<u64>,
+) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     match cap.filter(|c| *c > 0) {
         Some(cap) => core.set_global_bandwidth_cap(cap),
@@ -448,8 +509,8 @@ fn set_global_bandwidth_cap(state: State<AppState>, cap: Option<u64>) -> Result<
 }
 
 #[tauri::command]
-fn set_job_bandwidth_cap(
-    state: State<AppState>,
+async fn set_job_bandwidth_cap(
+    state: State<'_, AppState>,
     job_id: String,
     cap: Option<u64>,
 ) -> Result<(), String> {
@@ -461,26 +522,33 @@ fn set_job_bandwidth_cap(
 }
 
 #[tauri::command]
-fn get_job_bandwidth_cap(state: State<AppState>, job_id: String) -> Result<Option<u64>, String> {
+async fn get_job_bandwidth_cap(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<Option<u64>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     core.job_bandwidth_cap(&job_id)
 }
 
 #[tauri::command]
-fn add_job_mirror(state: State<AppState>, job_id: String, url: String) -> Result<(), String> {
+async fn add_job_mirror(
+    state: State<'_, AppState>,
+    job_id: String,
+    url: String,
+) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.add_job_mirror(&job_id, url)
 }
 
 #[tauri::command]
-fn job_mirrors(state: State<AppState>, job_id: String) -> Result<Vec<String>, String> {
+async fn job_mirrors(state: State<'_, AppState>, job_id: String) -> Result<Vec<String>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     core.job_mirrors(&job_id)
 }
 
 #[tauri::command]
-fn set_job_expected_hash(
-    state: State<AppState>,
+async fn set_job_expected_hash(
+    state: State<'_, AppState>,
     job_id: String,
     algorithm: String,
     digest: String,
@@ -491,7 +559,7 @@ fn set_job_expected_hash(
 
 /// Render the Filename Template with sample values for the settings preview.
 #[tauri::command]
-fn preview_filename_template(template: String) -> Result<String, String> {
+async fn preview_filename_template(template: String) -> Result<String, String> {
     let trimmed = template.trim();
     if trimmed.is_empty() {
         return Err("Filename Template cannot be empty".to_string());
@@ -509,9 +577,9 @@ fn preview_filename_template(template: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn confirm_probe_selection(
+async fn confirm_probe_selection(
     app: tauri::AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     selection: ProbeSelection,
     destination: Option<String>,
 ) -> Result<Vec<String>, String> {
@@ -527,8 +595,8 @@ fn confirm_probe_selection(
 }
 
 #[tauri::command]
-fn preview_probe_destination(
-    state: State<AppState>,
+async fn preview_probe_destination(
+    state: State<'_, AppState>,
     selection: ProbeSelection,
     destination: Option<String>,
 ) -> Result<ProbeDestinationPreview, String> {
@@ -539,13 +607,13 @@ fn preview_probe_destination(
 }
 
 #[tauri::command]
-fn get_library_root(state: State<AppState>) -> Result<Option<String>, String> {
+async fn get_library_root(state: State<'_, AppState>) -> Result<Option<String>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.library_root().map(|p| p.display().to_string()))
 }
 
 #[tauri::command]
-fn set_library_root(state: State<AppState>, path: String) -> Result<String, String> {
+async fn set_library_root(state: State<'_, AppState>, path: String) -> Result<String, String> {
     let root = PathBuf::from(path.trim());
     if !root.is_absolute() {
         return Err(format!(
@@ -554,12 +622,13 @@ fn set_library_root(state: State<AppState>, path: String) -> Result<String, Stri
         ));
     }
     {
-        let mut core = state.core.lock().map_err(|e| e.to_string())?;
-        core.set_library_root(root.clone())?;
-    }
-    {
         let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
-        *stored = Some(root.clone());
+        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        if core.library_root() == Some(root.as_path()) {
+            return Ok(root.display().to_string());
+        }
+        check_root_change_allowed(state.job_signals.active_transfer_count())?;
+        adopt_library_root(&mut core, &mut stored, root.clone())?;
     }
     persist_library_root_preference(&root)?;
     Ok(root.display().to_string())
@@ -601,40 +670,74 @@ fn detect_picker_method(dirs: &[PathBuf], portal: bool) -> PickerMethod {
     }
 }
 
+/// Run the portal folder dialog. `Failed` means the portal gave up without the user
+/// choosing anything, so the caller continues with zenity, kdialog or a typed path (H-20).
+async fn pick_with_portal(
+    app: &tauri::AppHandle,
+    label: String,
+) -> Result<phlegethon_shell_support::portal::PortalPick, String> {
+    use phlegethon_shell_support::portal;
+    // Non-blocking picker + channel: avoids blocking_pick_* wedging the
+    // WebKitGTK event loop when rfd used gtk3.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let started = Instant::now();
+    app.dialog()
+        .file()
+        .set_title(label)
+        .pick_folder(move |folder| {
+            let _ = tx.send(folder);
+        });
+    let folder = tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(portal::classify_portal_pick(
+        folder
+            .and_then(|path| path.into_path().ok())
+            .map(|p| p.to_path_buf()),
+        started.elapsed(),
+        portal::HUMAN_DISMISS_FLOOR,
+    ))
+}
+
 #[tauri::command]
 async fn pick_folder(
     app: tauri::AppHandle,
     title: Option<String>,
 ) -> Result<PickFolderResult, String> {
-    use phlegethon_shell_support::{picker, portal};
+    use phlegethon_shell_support::picker;
+    use phlegethon_shell_support::portal::PortalPick;
     let label = title.unwrap_or_else(|| "Choose folder".to_string());
     let dirs = path_dirs();
-    let portal_up = tauri::async_runtime::spawn_blocking(portal::portal_available)
-        .await
-        .map_err(|e| e.to_string())?;
+    let portal_up = tauri::async_runtime::spawn_blocking(
+        phlegethon_shell_support::portal::file_chooser_available,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
-    match detect_picker_method(&dirs, portal_up) {
-        PickerMethod::Portal => {
-            // Non-blocking picker + channel: avoids blocking_pick_* wedging the
-            // WebKitGTK event loop when rfd used gtk3.
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            app.dialog()
-                .file()
-                .set_title(label)
-                .pick_folder(move |folder| {
-                    let _ = tx.send(folder);
-                });
-            let folder = tauri::async_runtime::spawn_blocking(move || rx.recv())
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
-            Ok(PickFolderResult {
-                path: folder
-                    .and_then(|path| path.into_path().ok())
-                    .map(|p| p.display().to_string()),
-                method: PickerMethod::Portal,
-            })
+    if portal_up {
+        match pick_with_portal(&app, label.clone()).await? {
+            PortalPick::Picked(path) => {
+                return Ok(PickFolderResult {
+                    path: Some(path.display().to_string()),
+                    method: PickerMethod::Portal,
+                })
+            }
+            PortalPick::Cancelled => {
+                return Ok(PickFolderResult {
+                    path: None,
+                    method: PickerMethod::Portal,
+                })
+            }
+            PortalPick::Failed => {
+                log::warn!(
+                    "the FileChooser portal failed without a user choice; trying zenity or kdialog"
+                )
+            }
         }
+    }
+
+    match detect_picker_method(&dirs, false) {
         method @ (PickerMethod::Zenity | PickerMethod::Kdialog) => {
             let (backend, program) =
                 picker::detect(&dirs).ok_or_else(|| "folder picker disappeared".to_string())?;
@@ -652,7 +755,8 @@ async fn pick_folder(
                 method,
             })
         }
-        PickerMethod::Manual => Ok(PickFolderResult {
+        // No native chooser works: the UI asks for a typed path.
+        _ => Ok(PickFolderResult {
             path: None,
             method: PickerMethod::Manual,
         }),
@@ -671,7 +775,7 @@ struct PlatformCapabilities {
 async fn get_platform_capabilities() -> Result<PlatformCapabilities, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let dirs = path_dirs();
-        let portal = phlegethon_shell_support::portal::portal_available();
+        let portal = phlegethon_shell_support::portal::file_chooser_available();
         PlatformCapabilities {
             folder_picker: detect_picker_method(&dirs, portal),
             portal,
@@ -688,13 +792,17 @@ async fn get_platform_capabilities() -> Result<PlatformCapabilities, String> {
 /// `notify-send` fallback for desktops where the notification plugin finds no daemon.
 /// Returns false when `notify-send` is not installed.
 #[tauri::command]
-fn notify_fallback(summary: String, body: String) -> Result<bool, String> {
-    match phlegethon_shell_support::notify::detect(&path_dirs()) {
-        Some(program) => {
-            phlegethon_shell_support::notify::send(&program, &summary, &body).map(|_| true)
+async fn notify_fallback(summary: String, body: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        match phlegethon_shell_support::notify::detect(&path_dirs()) {
+            Some(program) => {
+                phlegethon_shell_support::notify::send(&program, &summary, &body).map(|_| true)
+            }
+            None => Ok(false),
         }
-        None => Ok(false),
-    }
+    })
+    .await
+    .map_err(|e| format!("notify task failed: {e}"))?
 }
 
 /// Holds the `process_pending` busy flag. Dropping it clears the flag, also when
@@ -716,7 +824,7 @@ impl Drop for BusyGuard {
 }
 
 #[tauri::command]
-fn process_pending(state: State<AppState>) -> Result<(), String> {
+async fn process_pending(state: State<'_, AppState>) -> Result<(), String> {
     // yt-dlp downloads can take minutes — don't block the UI invoke thread.
     let Some(guard) = BusyGuard::acquire(&state.process_pending_busy) else {
         return Ok(());
@@ -733,24 +841,24 @@ fn process_pending(state: State<AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_jobs(state: State<AppState>) -> Result<Vec<download_core::JobSnapshot>, String> {
+async fn list_jobs(state: State<'_, AppState>) -> Result<Vec<download_core::JobSnapshot>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.list_job_snapshots())
 }
 
 #[tauri::command]
-fn normalize_url_cmd(url: String) -> Option<String> {
+async fn normalize_url_cmd(url: String) -> Option<String> {
     download_core::normalize_url(&url)
 }
 
 #[tauri::command]
-fn split_urls_cmd(text: String) -> Vec<String> {
+async fn split_urls_cmd(text: String) -> Vec<String> {
     download_core::split_urls(&text)
 }
 
 #[tauri::command]
-fn find_active_job_for_url(
-    state: State<AppState>,
+async fn find_active_job_for_url(
+    state: State<'_, AppState>,
     url: String,
 ) -> Result<Option<download_core::ActiveJobMatch>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
@@ -758,7 +866,7 @@ fn find_active_job_for_url(
 }
 
 #[tauri::command]
-fn pause_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+async fn pause_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
     // Validate + signal stop without blocking on process_pending's Core mutex.
     {
         let core = state.core.lock().map_err(|e| e.to_string())?;
@@ -778,54 +886,61 @@ fn pause_job(state: State<AppState>, job_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn resume_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+async fn resume_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.resume_job(&job_id)
 }
 
 #[tauri::command]
-fn retry_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+async fn retry_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.retry_job(&job_id)
 }
 
 #[tauri::command]
-fn discard_job(state: State<AppState>, job_id: String) -> Result<(), String> {
+async fn discard_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
     // Signal stop without blocking on process_pending's Core mutex.
     if state.job_signals.signal_discard_stop(&job_id) {
         return Ok(());
     }
 
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.discard_job(&job_id)
+    // Row first, files after the lock is released (M-53).
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || Core::discard_job_outside_lock(core, &job_id))
+        .await
+        .map_err(|e| format!("discard task failed: {e}"))?
 }
 
 #[tauri::command]
-fn get_active_job_limit(state: State<AppState>) -> Result<u32, String> {
+async fn get_active_job_limit(state: State<'_, AppState>) -> Result<u32, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.active_job_limit())
 }
 
 #[tauri::command]
-fn set_active_job_limit(state: State<AppState>, limit: u32) -> Result<(), String> {
+async fn set_active_job_limit(state: State<'_, AppState>, limit: u32) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.set_active_job_limit(limit)
 }
 
 #[tauri::command]
-fn reorder_job(state: State<AppState>, from_index: usize, to_index: usize) -> Result<(), String> {
+async fn reorder_job(
+    state: State<'_, AppState>,
+    from_index: usize,
+    to_index: usize,
+) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.reorder_job(from_index, to_index)
 }
 
 #[tauri::command]
-fn get_audio_only_mode(state: State<AppState>) -> Result<bool, String> {
+async fn get_audio_only_mode(state: State<'_, AppState>) -> Result<bool, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.audio_only_mode())
 }
 
 #[tauri::command]
-fn set_audio_only_mode(state: State<AppState>, enabled: bool) -> Result<(), String> {
+async fn set_audio_only_mode(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.set_audio_only_mode(enabled)
 }
@@ -841,8 +956,8 @@ struct QualityInput {
 }
 
 #[tauri::command]
-fn select_default_quality(
-    state: State<AppState>,
+async fn select_default_quality(
+    state: State<'_, AppState>,
     qualities: Vec<QualityInput>,
 ) -> Result<Option<String>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
@@ -859,16 +974,16 @@ fn select_default_quality(
 }
 
 #[tauri::command]
-fn get_default_media_extras(
-    state: State<AppState>,
+async fn get_default_media_extras(
+    state: State<'_, AppState>,
 ) -> Result<download_core::MediaExtrasOptions, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.default_media_extras())
 }
 
 #[tauri::command]
-fn set_default_media_extras(
-    state: State<AppState>,
+async fn set_default_media_extras(
+    state: State<'_, AppState>,
     options: download_core::MediaExtrasOptions,
 ) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
@@ -876,22 +991,24 @@ fn set_default_media_extras(
 }
 
 #[tauri::command]
-fn get_media_extras_capabilities(
-    state: State<AppState>,
+async fn get_media_extras_capabilities(
+    state: State<'_, AppState>,
 ) -> Result<download_core::MediaExtrasCapabilities, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.media_extras_capabilities())
 }
 
 #[tauri::command]
-fn get_cookie_channel(state: State<AppState>) -> Result<download_core::CookieChannel, String> {
+async fn get_cookie_channel(
+    state: State<'_, AppState>,
+) -> Result<download_core::CookieChannel, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.cookie_channel())
 }
 
 #[tauri::command]
-fn set_cookie_channel(
-    state: State<AppState>,
+async fn set_cookie_channel(
+    state: State<'_, AppState>,
     channel: download_core::CookieChannel,
 ) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
@@ -899,14 +1016,16 @@ fn set_cookie_channel(
 }
 
 #[tauri::command]
-fn get_proxy_settings(state: State<AppState>) -> Result<download_core::ProxySettings, String> {
+async fn get_proxy_settings(
+    state: State<'_, AppState>,
+) -> Result<download_core::ProxySettings, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.proxy_settings())
 }
 
 #[tauri::command]
-fn set_proxy_settings(
-    state: State<AppState>,
+async fn set_proxy_settings(
+    state: State<'_, AppState>,
     settings: download_core::ProxySettings,
 ) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
@@ -914,16 +1033,16 @@ fn set_proxy_settings(
 }
 
 #[tauri::command]
-fn get_sidecar_update_settings(
-    state: State<AppState>,
+async fn get_sidecar_update_settings(
+    state: State<'_, AppState>,
 ) -> Result<download_core::SidecarUpdateSettings, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.sidecar_update_settings())
 }
 
 #[tauri::command]
-fn set_sidecar_update_settings(
-    state: State<AppState>,
+async fn set_sidecar_update_settings(
+    state: State<'_, AppState>,
     settings: download_core::SidecarUpdateSettings,
 ) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
@@ -942,16 +1061,22 @@ async fn check_sidecar_updates(
 }
 
 #[tauri::command]
-fn apply_sidecar_updates(
-    state: State<AppState>,
+async fn apply_sidecar_updates(
+    state: State<'_, AppState>,
 ) -> Result<download_core::SidecarApplyResult, String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.apply_sidecar_updates()
+    let core = Arc::clone(&state.core);
+    // Copies files and may hit the network: not on an async worker, and not inline.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut core = core.lock().map_err(|e| e.to_string())?;
+        core.apply_sidecar_updates()
+    })
+    .await
+    .map_err(|e| format!("apply task failed: {e}"))?
 }
 
 #[tauri::command]
-fn pin_sidecar_version(
-    state: State<AppState>,
+async fn pin_sidecar_version(
+    state: State<'_, AppState>,
     component: download_core::SidecarComponent,
     version: String,
 ) -> Result<(), String> {
@@ -960,8 +1085,8 @@ fn pin_sidecar_version(
 }
 
 #[tauri::command]
-fn unpin_sidecar_version(
-    state: State<AppState>,
+async fn unpin_sidecar_version(
+    state: State<'_, AppState>,
     component: download_core::SidecarComponent,
 ) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
@@ -969,8 +1094,8 @@ fn unpin_sidecar_version(
 }
 
 #[tauri::command]
-fn rollback_sidecar(
-    state: State<AppState>,
+async fn rollback_sidecar(
+    state: State<'_, AppState>,
     component: download_core::SidecarComponent,
 ) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
@@ -978,40 +1103,134 @@ fn rollback_sidecar(
 }
 
 #[tauri::command]
-fn get_filename_template(state: State<AppState>) -> Result<String, String> {
+async fn get_filename_template(state: State<'_, AppState>) -> Result<String, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.filename_template().to_string())
 }
 
 #[tauri::command]
-fn set_filename_template(state: State<AppState>, template: String) -> Result<(), String> {
+async fn set_filename_template(state: State<'_, AppState>, template: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.set_filename_template(template)
 }
 
+/// Folders the user may reveal or open from: the Library Root and every Job
+/// Destination in the queue or the Download Archive.
+fn output_roots(core: &Core) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = core
+        .library_root()
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
+    roots.extend(
+        core.list_job_snapshots()
+            .into_iter()
+            .map(|job| PathBuf::from(job.destination)),
+    );
+    roots.extend(
+        core.list_history()
+            .into_iter()
+            .map(|entry| entry.destination),
+    );
+    roots
+}
+
+/// True when `path` resolves (symlinks and `..` included) to a place inside one of `roots`.
+fn path_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| path.starts_with(root))
+}
+
+async fn checked_output_path(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> {
+    let core = core_handle(app)?;
+    let path = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        let roots = {
+            let core = core.lock().map_err(|e| e.to_string())?;
+            output_roots(&core)
+        };
+        if !path.exists() {
+            return Err(format!("output path not found: {}", path.display()));
+        }
+        if !path_within_roots(&path, &roots) {
+            return Err(format!(
+                "not a Job Destination or the Library Root: {}",
+                path.display()
+            ));
+        }
+        Ok(path)
+    })
+    .await
+    .map_err(|e| format!("path check failed: {e}"))?
+}
+
+/// How long the file manager D-Bus call may take before falling back to `xdg-open`.
+const REVEAL_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[tauri::command]
-fn reveal_output(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    if !std::path::Path::new(&path).exists() {
-        return Err(format!("output path not found: {path}"));
+async fn reveal_output(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let path = checked_output_path(&app, &path).await?;
+    let folder = if path.is_dir() {
+        path.clone()
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone())
+    };
+    // `reveal_item_in_dir` talks to org.freedesktop.FileManager1 over D-Bus, which can
+    // stall or fail where no file manager implements it. Bound it, then open the folder.
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let app = app.clone();
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                app.opener()
+                    .reveal_item_in_dir(path)
+                    .map_err(|e| e.to_string()),
+            );
+        });
     }
+    let revealed = tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(REVEAL_TIMEOUT))
+        .await
+        .map_err(|e| e.to_string())?;
+    match revealed {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => {
+            log::warn!("reveal failed ({err}), opening the folder instead");
+            open_folder(&app, folder)
+        }
+        Err(_) => {
+            log::warn!("reveal timed out, opening the folder instead");
+            open_folder(&app, folder)
+        }
+    }
+}
+
+fn open_folder(app: &tauri::AppHandle, folder: PathBuf) -> Result<(), String> {
     app.opener()
-        .reveal_item_in_dir(path)
+        .open_path(folder.to_string_lossy(), None::<&str>)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn open_output(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let path_ref = std::path::Path::new(&path);
-    if !path_ref.is_file() {
-        return Err(format!("output file not found: {path}"));
+async fn open_output(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let path = checked_output_path(&app, &path).await?;
+    if !path.is_file() {
+        return Err(format!("output file not found: {}", path.display()));
     }
     app.opener()
-        .open_path(path, None::<&str>)
+        .open_path(path.to_string_lossy(), None::<&str>)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn is_main_window_focused(app: tauri::AppHandle) -> Result<bool, String> {
+async fn is_main_window_focused(app: tauri::AppHandle) -> Result<bool, String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
@@ -1031,7 +1250,7 @@ fn raise_main_window(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
     raise_main_window(&app)
 }
 
@@ -1053,8 +1272,8 @@ pub(crate) fn deliver_companion_intent(
 /// Intents that arrived before the webview mounted. Calling this also tells the shell
 /// the webview now listens for `companion-intent`.
 #[tauri::command]
-fn take_pending_intents(
-    state: State<AppState>,
+async fn take_pending_intents(
+    state: State<'_, AppState>,
 ) -> Result<Vec<companion::CompanionIntentEvent>, String> {
     Ok(state.intents.take_pending())
 }
@@ -1105,27 +1324,19 @@ fn handle_second_launch(app: &tauri::AppHandle, argv: Vec<String>) {
     });
 }
 
-/// Legacy polling path: events are pushed as `core-event`; this drains the
-/// buffered copies for frontends that still poll.
-#[tauri::command]
-fn poll_events(state: State<AppState>) -> Result<Vec<EventSummary>, String> {
-    let mut buf = state.event_buffer.lock().map_err(|e| e.to_string())?;
-    Ok(std::mem::take(&mut *buf))
-}
-
 // ---------------------------------------------------------------------------
 // History (Download Archive query)
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn list_history(state: State<AppState>) -> Result<Vec<ArchiveEntry>, String> {
+async fn list_history(state: State<'_, AppState>) -> Result<Vec<ArchiveEntry>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.list_history())
 }
 
 #[tauri::command]
-fn list_history_by_outcome(
-    state: State<AppState>,
+async fn list_history_by_outcome(
+    state: State<'_, AppState>,
     outcome: String,
 ) -> Result<Vec<ArchiveEntry>, String> {
     match outcome.as_str() {
@@ -1144,7 +1355,7 @@ fn list_history_by_outcome(
 }
 
 #[tauri::command]
-fn remove_history_entry(state: State<AppState>, media_id: String) -> Result<(), String> {
+async fn remove_history_entry(state: State<'_, AppState>, media_id: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     match core.remove_history_entry(&media_id) {
         Ok(_) => Ok(()),
@@ -1153,14 +1364,17 @@ fn remove_history_entry(state: State<AppState>, media_id: String) -> Result<(), 
 }
 
 #[tauri::command]
-fn history_len(state: State<AppState>) -> Result<usize, String> {
+async fn history_len(state: State<'_, AppState>) -> Result<usize, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
     Ok(core.history_len())
 }
 
 /// Remove all history entries, or only `"Completed"` / `"Failed"` ones.
 #[tauri::command]
-fn clear_history(state: State<AppState>, outcome: Option<String>) -> Result<usize, String> {
+async fn clear_history(
+    state: State<'_, AppState>,
+    outcome: Option<String>,
+) -> Result<usize, String> {
     let filter = match outcome.as_deref() {
         None | Some("") | Some("All") => None,
         Some("Completed") => Some(ArchiveOutcome::Completed),
@@ -1274,23 +1488,23 @@ pub fn run() {
             // Managed here, after the log plugin is installed: `AppState::new` logs, and
             // those lines were dropped when it ran before the logger existed.
             app.manage(AppState::new());
-            let state: State<AppState> = app.state();
+            let state: State<'_, AppState> = app.state();
             let root = load_library_root_preference().unwrap_or_else(default_library_root);
             let sidecar_root = dirs_data_dir();
             {
+                let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
                 let mut core = state.core.lock().map_err(|e| e.to_string())?;
                 if let Err(err) = core.set_sidecar_root(sidecar_root) {
                     log::warn!("sidecar root: {err}");
                 }
-                if let Err(err) = core.set_library_root(root.clone()) {
-                    log::warn!("library root: {err}");
+                match adopt_library_root(&mut core, &mut stored, root.clone()) {
+                    Ok(()) => {
+                        let _ = persist_library_root_preference(&root);
+                    }
+                    // Not recorded as set: commands retry and report this error (H-8).
+                    Err(err) => log::error!("library root {}: {err}", root.display()),
                 }
             }
-            {
-                let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
-                *stored = Some(root.clone());
-            }
-            let _ = persist_library_root_preference(&root);
 
             // Push Core events to the webview instead of making it poll.
             if let Some(rx) = state.event_rx.lock().map_err(|e| e.to_string())?.take() {
@@ -1387,7 +1601,6 @@ pub fn run() {
             open_output,
             is_main_window_focused,
             focus_main_window,
-            poll_events,
             take_pending_intents,
             list_history,
             list_history_by_outcome,
@@ -1461,6 +1674,80 @@ mod tests {
         // argv[0] is the program path, never a URL.
         assert!(urls_from_argv(&argv(&["https://example.com/"])).is_empty());
         assert!(urls_from_argv(&[]).is_empty());
+    }
+
+    #[test]
+    fn root_change_is_refused_while_transfers_run() {
+        assert!(check_root_change_allowed(0).is_ok());
+        let err = check_root_change_allowed(2).unwrap_err();
+        assert!(err.contains("Library Root"), "got: {err}");
+    }
+
+    struct NoHttp;
+    impl download_core::HttpBackend for NoHttp {
+        fn fetch(
+            &self,
+            _url: &str,
+            _range: Option<std::ops::Range<u64>>,
+            _sink: &mut dyn std::io::Write,
+        ) -> Result<download_core::FetchResult, String> {
+            Err("offline".into())
+        }
+        fn supports_range(&self, _url: &str) -> Result<bool, String> {
+            Err("offline".into())
+        }
+        fn file_size(&self, _url: &str) -> Result<u64, String> {
+            Err("offline".into())
+        }
+    }
+
+    fn test_core() -> Core {
+        Core::new(
+            Box::new(NoHttp),
+            Box::new(download_core::FakeExtractorToolchain::new()),
+        )
+        .0
+    }
+
+    #[test]
+    fn library_root_core_refuses_is_not_recorded_as_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A regular file cannot become the Library Root directory.
+        let not_a_dir = tmp.path().join("library");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+
+        let mut core = test_core();
+        let mut stored = None;
+        assert!(adopt_library_root(&mut core, &mut stored, not_a_dir).is_err());
+        assert_eq!(stored, None, "shell recorded a root Core refused");
+    }
+
+    #[test]
+    fn library_root_core_accepts_is_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut core = test_core();
+        let mut stored = None;
+        adopt_library_root(&mut core, &mut stored, tmp.path().to_path_buf()).unwrap();
+        assert_eq!(stored.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn output_paths_must_stay_inside_a_known_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let inside = root.join("job").join("file.mp4");
+        std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
+        std::fs::write(&inside, b"x").unwrap();
+        let outside = tmp.path().join("secret.txt");
+        std::fs::write(&outside, b"x").unwrap();
+        let roots = vec![root.clone()];
+
+        assert!(path_within_roots(&inside, &roots));
+        assert!(path_within_roots(&root, &roots));
+        assert!(!path_within_roots(&outside, &roots));
+        // `..` and a missing file never pass.
+        assert!(!path_within_roots(&root.join("../secret.txt"), &roots));
+        assert!(!path_within_roots(&root.join("missing"), &roots));
     }
 
     #[test]

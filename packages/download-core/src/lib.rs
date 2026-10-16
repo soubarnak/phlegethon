@@ -94,6 +94,10 @@ pub use sidecar_updates::{
 };
 pub use url_input::{normalize_url, split_urls, split_urls_report, SplitUrlsReport};
 
+/// Capacity of the Core event channel. Lifecycle events block when it is full; progress
+/// events are dropped instead (see `TransferWriter`). A shell must keep reading events.
+pub const EVENT_CHANNEL_CAPACITY: usize = 8192;
+
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -1100,7 +1104,7 @@ impl Core {
         job_signals: Arc<job_signals::JobSignals>,
         free_space: Arc<dyn disk_space::FreeSpaceLookup>,
     ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = crossbeam_channel::bounded(EVENT_CHANNEL_CAPACITY);
         let http: Arc<dyn HttpBackend> = Arc::from(http);
         let sniffer: Arc<dyn PageSniffer> =
             Arc::new(page_sniffer::HtmlPageSniffer::new(Arc::clone(&http)));
@@ -1705,6 +1709,50 @@ impl Core {
         self.finalize_discard(job_id, completed, &destination)
     }
 
+    /// [`Self::discard_job`] without deleting files: the queue row goes first (event and
+    /// persist included) and the caller removes the returned Job Destination off the
+    /// lock. A failed Discard of an HLS job with thousands of fragments then no longer
+    /// freezes every command for the length of the delete.
+    ///
+    /// Returns `None` when an in-flight transfer will finalize the Discard itself, or
+    /// when there is nothing to delete (Completed job, missing directory).
+    pub fn discard_job_detached(&mut self, job_id: &str) -> Result<Option<PathBuf>, String> {
+        let pos = self
+            .jobs
+            .iter()
+            .position(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        let completed = self.jobs[pos].is_completed();
+        let destination = self.jobs[pos].destination().to_path_buf();
+
+        if self.job_signals.signal_discard_stop(job_id) {
+            return Ok(None);
+        }
+
+        self.jobs.remove(pos);
+        self.job_signals.unregister(job_id);
+        self.event_tx
+            .send(CoreEvent::JobDiscarded {
+                job_id: job_id.to_string(),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+        self.persist_queue_now()?;
+        Ok((!completed && destination.exists()).then_some(destination))
+    }
+
+    /// [`Self::discard_job`] with the Job Destination deleted after the lock is released.
+    pub fn discard_job_outside_lock(core: Arc<Mutex<Self>>, job_id: &str) -> Result<(), String> {
+        let cleanup = {
+            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            guard.discard_job_detached(job_id)?
+        };
+        if let Some(destination) = cleanup {
+            std::fs::remove_dir_all(&destination)
+                .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))?;
+        }
+        Ok(())
+    }
+
     fn finalize_discard(
         &mut self,
         job_id: &str,
@@ -2272,6 +2320,20 @@ impl Core {
                 Err(err)
             }
         }
+    }
+
+    /// [`Self::toolchain_status`] without holding the Core mutex while the
+    /// `--version` probes run subprocesses.
+    pub fn toolchain_status_outside_lock(
+        core: &Arc<Mutex<Self>>,
+    ) -> Result<ToolchainStatus, String> {
+        let (extractor, sidecar_root) = {
+            let guard = core.lock().map_err(|e| e.to_string())?;
+            (Arc::clone(&guard.extractor), guard.sidecar_root.clone())
+        };
+        let mut status = extractor.toolchain_status();
+        status.sidecar_root = sidecar_root.map(|p| p.display().to_string());
+        Ok(status)
     }
 
     /// Whether anything is using the sidecar yt-dlp: a body-writing job, a
