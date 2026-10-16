@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,7 @@ impl Default for ProxyOptions {
 /// State shared by every client thread of one proxy run.
 struct Shared {
     overrides: HashMap<String, IpAddr>,
+    resolver: HostResolver,
     options: ProxyOptions,
     /// Expected `Proxy-Authorization` header value.
     expected_auth: String,
@@ -92,6 +93,68 @@ pub struct DohProxyGuard {
     pub proxy_url: String,
 }
 
+/// Resolves a CONNECT host name that has no fixed override.
+pub(crate) type HostResolver = Arc<dyn Fn(&str) -> Option<IpAddr> + Send + Sync>;
+type DohLookup = Box<dyn Fn(&str) -> Result<Vec<IpAddr>, String> + Send + Sync>;
+type SystemLookup = Box<dyn Fn(&str) -> Option<IpAddr> + Send + Sync>;
+type Report = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Resolves host names through DoH, remembers answers, and falls back to the system
+/// resolver when DoH fails. Every fallback is passed to `report`.
+pub(crate) struct DohResolver {
+    lookup: DohLookup,
+    fallback: SystemLookup,
+    cache: Mutex<HashMap<String, (IpAddr, Instant)>>,
+    report: Report,
+}
+
+const DOH_CACHE_TTL: Duration = Duration::from_secs(300);
+
+impl DohResolver {
+    pub(crate) fn new(
+        lookup: impl Fn(&str) -> Result<Vec<IpAddr>, String> + Send + Sync + 'static,
+        fallback: impl Fn(&str) -> Option<IpAddr> + Send + Sync + 'static,
+        report: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            lookup: Box::new(lookup),
+            fallback: Box::new(fallback),
+            cache: Mutex::new(HashMap::new()),
+            report: Box::new(report),
+        }
+    }
+
+    pub(crate) fn resolve(&self, host: &str) -> Option<IpAddr> {
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Some(ip);
+        }
+        {
+            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((ip, at)) = cache.get(host) {
+                if at.elapsed() < DOH_CACHE_TTL {
+                    return Some(*ip);
+                }
+            }
+        }
+        match (self.lookup)(host) {
+            Ok(ips) if !ips.is_empty() => {
+                self.cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(host.to_string(), (ips[0], Instant::now()));
+                Some(ips[0])
+            }
+            outcome => {
+                let why = outcome.err().unwrap_or_else(|| "no A records".into());
+                (self.report)(&format!(
+                    "DoH lookup for {host} failed ({why}); using system DNS"
+                ));
+                (self.fallback)(host)
+            }
+        }
+    }
+}
+
 impl Drop for DohProxyGuard {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
@@ -101,16 +164,38 @@ impl Drop for DohProxyGuard {
     }
 }
 
-/// Start a CONNECT proxy on 127.0.0.1 that maps hostnames to fixed IPs.
+/// Start a CONNECT proxy on 127.0.0.1.
+///
+/// Hosts in `host_overrides` use their fixed IP. Every other CONNECT host is resolved
+/// through DoH, so CDN hosts that the ISP sinkholes work too (M-22). A failed lookup falls
+/// back to system DNS and is reported on stderr.
 pub fn start_doh_connect_proxy(
     host_overrides: HashMap<String, IpAddr>,
 ) -> Result<DohProxyGuard, String> {
-    start_with_options(host_overrides, ProxyOptions::default())
+    let resolver = Arc::new(DohResolver::new(
+        crate::doh_dns::resolve_a_records,
+        system_resolve,
+        |note| eprintln!("{note}"),
+    ));
+    start_with_resolver(
+        host_overrides,
+        ProxyOptions::default(),
+        Arc::new(move |host| resolver.resolve(host)),
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn start_with_options(
     host_overrides: HashMap<String, IpAddr>,
     options: ProxyOptions,
+) -> Result<DohProxyGuard, String> {
+    start_with_resolver(host_overrides, options, Arc::new(system_resolve))
+}
+
+pub(crate) fn start_with_resolver(
+    host_overrides: HashMap<String, IpAddr>,
+    options: ProxyOptions,
+    resolver: HostResolver,
 ) -> Result<DohProxyGuard, String> {
     let listener =
         TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind DoH CONNECT proxy: {e}"))?;
@@ -126,6 +211,7 @@ pub(crate) fn start_with_options(
     let shutdown = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Shared {
         overrides: host_overrides,
+        resolver,
         options,
         expected_auth: format!(
             "Basic {}",
@@ -207,7 +293,7 @@ fn handle_client(mut client: TcpStream, shared: &Shared) -> io::Result<()> {
         return Ok(());
     }
 
-    let Some(ip) = resolve_connect_ip(&host_key, &shared.overrides) else {
+    let Some(ip) = resolve_connect_ip(&host_key, &shared.overrides, &shared.resolver) else {
         reject(&client, "502 Bad Gateway");
         return Ok(());
     };
@@ -353,7 +439,11 @@ fn is_blocked_target(ip: IpAddr) -> bool {
     }
 }
 
-fn resolve_connect_ip(host: &str, overrides: &HashMap<String, IpAddr>) -> Option<IpAddr> {
+fn resolve_connect_ip(
+    host: &str,
+    overrides: &HashMap<String, IpAddr>,
+    resolver: &HostResolver,
+) -> Option<IpAddr> {
     if let Some(ip) = overrides.get(host) {
         return Some(*ip);
     }
@@ -364,8 +454,10 @@ fn resolve_connect_ip(host: &str, overrides: &HashMap<String, IpAddr>) -> Option
     } else if let Some(ip) = overrides.get(&format!("www.{host}")) {
         return Some(*ip);
     }
+    resolver(host)
+}
 
-    // CDN / redirect hosts: use system DNS (usually fine for those).
+fn system_resolve(host: &str) -> Option<IpAddr> {
     use std::net::ToSocketAddrs;
     format!("{host}:443")
         .to_socket_addrs()
@@ -452,14 +544,23 @@ fn base64(data: &[u8]) -> String {
 }
 
 /// Build host→IP map for a URL's host via DoH. Returns None when override not needed.
+#[cfg(test)]
 pub fn doh_override_map_for_url(url: &str) -> Result<Option<HashMap<String, IpAddr>>, String> {
+    doh_override_map_for_url_with(url, &crate::proxy_settings::ProxySettings::default())
+}
+
+/// Like [`doh_override_map_for_url`], with the DoH request sent through `proxy`.
+pub fn doh_override_map_for_url_with(
+    url: &str,
+    proxy: &crate::proxy_settings::ProxySettings,
+) -> Result<Option<HashMap<String, IpAddr>>, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL for DoH map: {e}"))?;
     let host = match parsed.host_str() {
         Some(h) => h.to_ascii_lowercase(),
         None => return Ok(None),
     };
 
-    let doh_ips = crate::doh_dns::resolve_a_records(&host)?;
+    let doh_ips = crate::doh_dns::resolve_a_records_with(proxy, &host)?;
     if !crate::doh_dns::system_dns_diverges_from_doh(&host, &doh_ips) {
         return Ok(None);
     }
@@ -860,5 +961,78 @@ mod tests {
         }
         client.shutdown(Shutdown::Write).unwrap();
         assert_eq!(server.join().unwrap(), BODY_BYTES);
+    }
+
+    #[test]
+    fn hosts_without_an_override_go_through_the_resolver() {
+        // M-22: only the page host used to be mapped; CDN hosts used system DNS.
+        let (origin, port) = listener();
+        let server = thread::spawn(move || origin.accept().map(|(_, _)| ()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_by_resolver = Arc::clone(&seen);
+        let resolver: HostResolver = Arc::new(move |host| {
+            seen_by_resolver.lock().unwrap().push(host.to_string());
+            Some(LOOPBACK)
+        });
+        let guard = start_with_resolver(HashMap::new(), local_options(), resolver).unwrap();
+        let auth = basic_auth(&guard);
+        let (_, status) = connect_via(&guard, &format!("cdn.example:{port}"), Some(&auth));
+        assert!(status.contains("200"), "{status}");
+        assert_eq!(*seen.lock().unwrap(), vec!["cdn.example".to_string()]);
+        server.join().unwrap().unwrap();
+    }
+
+    fn doh_resolver(
+        lookup: impl Fn(&str) -> Result<Vec<IpAddr>, String> + Send + Sync + 'static,
+        fallback: Option<IpAddr>,
+    ) -> (DohResolver, Arc<Mutex<Vec<String>>>) {
+        let notes = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&notes);
+        (
+            DohResolver::new(
+                lookup,
+                move |_| fallback,
+                move |n| sink.lock().unwrap().push(n.to_string()),
+            ),
+            notes,
+        )
+    }
+
+    #[test]
+    fn doh_resolver_caches_answers() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let ip = IpAddr::V4(Ipv4Addr::new(104, 16, 3, 81));
+        let (resolver, notes) = doh_resolver(
+            move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![ip])
+            },
+            None,
+        );
+        assert_eq!(resolver.resolve("cdn.example"), Some(ip));
+        assert_eq!(resolver.resolve("cdn.example"), Some(ip));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(notes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn doh_failure_falls_back_to_system_dns_and_leaves_a_diagnostic() {
+        // M-22: a DoH error used to fall back with no trace.
+        let sys = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let (resolver, notes) = doh_resolver(|_| Err("timed out".into()), Some(sys));
+        assert_eq!(resolver.resolve("cdn.example"), Some(sys));
+        let notes = notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("cdn.example") && notes[0].contains("timed out"));
+    }
+
+    #[test]
+    fn doh_resolver_does_not_look_up_ip_literals() {
+        let (resolver, _) = doh_resolver(|_| panic!("lookup for an IP literal"), None);
+        assert_eq!(
+            resolver.resolve("93.184.216.34"),
+            Some("93.184.216.34".parse().unwrap())
+        );
     }
 }

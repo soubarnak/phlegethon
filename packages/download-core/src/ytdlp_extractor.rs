@@ -23,7 +23,7 @@ use crate::extractor::{
     ExtractorToolchain, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult, Quality,
 };
 use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtrasOptions};
-use crate::proxy_settings::{ytdlp_proxy_args, ProxySettings};
+use crate::proxy_settings::ProxySettings;
 use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
 use crate::toolchain_discovery::{
     classify_ytdlp_failure, detect_js_runtime, discover_ytdlp, error_code, find_in_path,
@@ -633,7 +633,6 @@ impl YtDlpExtractorToolchain {
             args.push("--no-playlist".to_string());
         }
         args.extend(ytdlp_cookie_args(cookies));
-        args.extend(ytdlp_proxy_args(proxy));
         for dir in self.effective_plugin_dirs() {
             args.push("--plugin-dirs".to_string());
             args.push(dir.display().to_string());
@@ -689,7 +688,6 @@ impl YtDlpExtractorToolchain {
             args.push(arg);
         }
         args.extend(ytdlp_cookie_args(cookies));
-        args.extend(ytdlp_proxy_args(proxy));
         for dir in self.effective_plugin_dirs() {
             args.push("--plugin-dirs".to_string());
             args.push(dir.display().to_string());
@@ -3130,7 +3128,8 @@ mod tests {
     }
 
     #[test]
-    fn probe_args_include_proxy() {
+    fn probe_args_leave_the_proxy_to_the_environment() {
+        // M-24: the proxy URL can hold a password; argv is readable by every local user.
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let proxy = ProxySettings {
             url: Some("http://127.0.0.1:8080".to_string()),
@@ -3140,9 +3139,9 @@ mod tests {
             &CookieChannel::default(),
             &proxy,
         );
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["--proxy", "http://127.0.0.1:8080"]));
+        assert!(!args
+            .iter()
+            .any(|a| a == "--proxy" || a.contains("127.0.0.1:8080")));
     }
 
     // ---- FakeYtDlpExtractor ----
