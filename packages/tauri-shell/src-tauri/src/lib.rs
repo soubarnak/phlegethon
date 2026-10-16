@@ -412,7 +412,6 @@ fn set_global_bandwidth_cap(state: State<AppState>, cap: Option<u64>) -> Result<
         Some(cap) => core.set_global_bandwidth_cap(cap),
         None => core.remove_global_bandwidth_cap(),
     }
-    Ok(())
 }
 
 #[tauri::command]
