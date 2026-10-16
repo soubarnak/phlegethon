@@ -63,7 +63,7 @@ pub use filename_template::{
 pub use github_release_source::{
     select_asset as select_ytdlp_release_asset, GitHubReleaseUpdateSource,
 };
-pub use http::{FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
+pub use http::{ContentRange, FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
@@ -97,7 +97,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use transfer::{
-    execute_segment_fetch, execute_single_fetch, make_job_bucket, SegmentFetchParams,
+    execute_segment_fetch, execute_single_fetch, make_job_bucket, SegmentError, SegmentFetchParams,
     SingleFetchParams,
 };
 
@@ -491,6 +491,7 @@ enum UnlockedTransferPlan {
         part_path: PathBuf,
         file_path: PathBuf,
         range: Option<Range<u64>>,
+        if_range: Option<String>,
         append: bool,
         truncate: bool,
         http: Arc<dyn HttpBackend>,
@@ -548,7 +549,7 @@ enum UnlockedTransferOutcome {
         part_path: PathBuf,
         file_path: PathBuf,
         failed_url: String,
-        result: Result<(u64, u64, bool), String>,
+        result: Result<(u64, u64, bool), SegmentError>,
     },
     Extracted {
         job_id: String,
@@ -579,6 +580,7 @@ impl UnlockedTransferPlan {
                 part_path,
                 file_path,
                 range,
+                if_range,
                 append,
                 truncate,
                 http,
@@ -595,6 +597,7 @@ impl UnlockedTransferPlan {
                     url,
                     part_path: part_path.clone(),
                     range,
+                    if_range,
                     append,
                     truncate,
                     global_bucket,
@@ -778,10 +781,12 @@ fn run_segmented_fetch(
     job_bucket: Option<SharedTokenBucket>,
     pause_requested: Arc<AtomicBool>,
     progress: Option<TransferProgress>,
-) -> Result<(u64, u64, bool), String> {
+) -> Result<(u64, u64, bool), SegmentError> {
     let total_size = http.file_size(url)?;
     if total_size == 0 {
-        return Err("empty file, nothing to download".to_string());
+        return Err(SegmentError::Failed(
+            "empty file, nothing to download".to_string(),
+        ));
     }
 
     std::fs::OpenOptions::new()
@@ -809,7 +814,7 @@ fn run_segmented_fetch(
     let url_owned = url.to_string();
     let part_path_owned = part_path.to_path_buf();
 
-    let segment_results: Vec<Result<u64, String>> = std::thread::scope(|scope| {
+    let segment_results: Vec<Result<u64, SegmentError>> = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for range in segments {
             let http_ref = http.clone();
@@ -835,6 +840,12 @@ fn run_segmented_fetch(
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
+    if segment_results
+        .iter()
+        .any(|r| matches!(r, Err(SegmentError::RangeIgnored)))
+    {
+        return Err(SegmentError::RangeIgnored);
+    }
     let mut bytes_written = 0u64;
     for result in segment_results {
         bytes_written = bytes_written.saturating_add(result?);
@@ -2634,7 +2645,7 @@ impl Core {
         if bytes_received == 0 {
             let supports_range = matches!(self.http.supports_range(&url), Ok(true));
             let rate_limited = global_bucket.is_some() || job_bucket.is_some();
-            if supports_range && !rate_limited {
+            if supports_range && !rate_limited && !self.jobs[i].range_ignored() {
                 std::fs::create_dir_all(&dest)
                     .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
                 let file_path = dest.join(&filename);
@@ -2700,6 +2711,28 @@ impl Core {
                 .map_err(|e| format!("migrate partial {file_path:?} -> {part_path:?}: {e}"))?;
         }
 
+        // The `.part` length is the truth for where to resume; the counter can
+        // lag a failed attempt or lead a file that was removed.
+        let mut bytes_received = bytes_received;
+        if bytes_received > 0 {
+            let part_len = std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
+            let total = self.jobs[i].total_bytes();
+            if part_len > 0 && Some(part_len) == total {
+                // A crash between the last byte and the rename leaves a
+                // complete `.part`; asking for `bytes=total-` would get a 416.
+                self.complete_job_file(job_id, i, &part_path, &file_path, part_len)?;
+                return Ok(None);
+            }
+            if part_len == 0 || total.is_some_and(|t| part_len > t) {
+                std::fs::File::create(&part_path)
+                    .map_err(|e| format!("truncate partial {part_path:?}: {e}"))?;
+                bytes_received = 0;
+            } else {
+                bytes_received = part_len;
+            }
+            self.jobs[i].set_bytes_received(bytes_received);
+        }
+
         let live_bytes = self.jobs[i].live_downloaded();
         live_bytes.store(bytes_received, Ordering::Release);
         let progress = TransferProgress {
@@ -2714,6 +2747,11 @@ impl Core {
         } else {
             None
         };
+        let if_range = if range.is_some() {
+            self.jobs[i].validator().map(str::to_string)
+        } else {
+            None
+        };
 
         transfer_active.store(true, Ordering::Release);
         Ok(Some(UnlockedTransferPlan::SingleFetch {
@@ -2723,6 +2761,7 @@ impl Core {
             part_path,
             file_path,
             range,
+            if_range,
             append: bytes_received > 0,
             truncate: bytes_received == 0,
             http: self.http.clone(),
@@ -2765,18 +2804,33 @@ impl Core {
 
                 match outcome.fetch {
                     Ok(result) => {
+                        if bytes_received > 0
+                            && (result.range_ignored(bytes_received)
+                                || self.validators_changed(job_index, &result))
+                        {
+                            // The server did not continue the object we hold:
+                            // it ignored the Range (status 200), or the object
+                            // changed. Appending would corrupt the file.
+                            let ignored = result.range_ignored(bytes_received);
+                            self.restart_from_zero(job_index, &part_path, ignored)?;
+                            return Ok(true);
+                        }
+                        if self.jobs[job_index].etag().is_none()
+                            && self.jobs[job_index].last_modified().is_none()
+                        {
+                            self.jobs[job_index]
+                                .set_validators(result.etag.clone(), result.last_modified.clone());
+                        }
                         let reported = result.total_length;
                         let on_disk = self.sync_job_progress(job_id, bytes_received)?;
-                        let total_opt = self.jobs[job_index].total_bytes().or_else(|| {
-                            if reported > 0 {
-                                Some(reported)
-                            } else {
-                                None
-                            }
-                        });
-                        if self.jobs[job_index].total_bytes().is_none() {
-                            self.jobs[job_index].set_total_bytes(total_opt);
-                        }
+                        // `total_length` is the object size (Content-Range
+                        // total on a 206), so it beats a HEAD from earlier.
+                        let total_opt = if reported > 0 {
+                            Some(reported)
+                        } else {
+                            self.jobs[job_index].total_bytes()
+                        };
+                        self.jobs[job_index].set_total_bytes(total_opt);
 
                         self.event_tx
                             .send(CoreEvent::JobProgress {
@@ -2787,9 +2841,18 @@ impl Core {
                             .map_err(|_| "event channel closed".to_string())?;
 
                         match total_opt {
-                            Some(total) if on_disk >= total => {
+                            Some(total) if on_disk == total => {
                                 self.complete_job_file(
                                     job_id, job_index, &part_path, &file_path, total,
+                                )?;
+                            }
+                            Some(total) if on_disk > total => {
+                                self.finalize_failed_job(
+                                    job_id,
+                                    job_index,
+                                    format!(
+                                        "received {on_disk} bytes but the server reported {total}; use Retry"
+                                    ),
                                 )?;
                             }
                             Some(_) => {
@@ -2804,7 +2867,12 @@ impl Core {
                         }
                         Ok(false)
                     }
-                    Err(err) => self.fail_or_failover(job_id, failed_url, err),
+                    Err(err) => {
+                        // Keep what the failed attempt wrote: the next mirror
+                        // resumes from the `.part` length, not a stale offset.
+                        let _ = self.sync_job_progress(job_id, bytes_received);
+                        self.fail_or_failover(job_id, failed_url, err)
+                    }
                 }
             }
             UnlockedTransferOutcome::Segmented {
@@ -2814,7 +2882,15 @@ impl Core {
                 result,
                 ..
             } => match result {
-                Err(err) => {
+                Err(SegmentError::RangeIgnored) => {
+                    // HEAD advertised ranges but the GETs ignore them; fall
+                    // back to one plain connection.
+                    let _ = std::fs::remove_file(&part_path);
+                    self.jobs[job_index].set_range_ignored(true);
+                    self.jobs[job_index].set_bytes_received(0);
+                    Ok(true)
+                }
+                Err(SegmentError::Failed(err)) => {
                     let _ = std::fs::remove_file(&part_path);
                     self.fail_or_failover(job_id, failed_url, err)
                 }
@@ -2839,9 +2915,17 @@ impl Core {
                         })
                         .map_err(|_| "event channel closed".to_string())?;
 
-                    if on_disk >= total_size {
+                    if on_disk == total_size {
                         self.complete_job_file(
                             job_id, job_index, &part_path, &file_path, total_size,
+                        )?;
+                    } else if on_disk > total_size {
+                        self.finalize_failed_job(
+                            job_id,
+                            job_index,
+                            format!(
+                                "received {on_disk} bytes but the server reported {total_size}; use Retry"
+                            ),
                         )?;
                     } else {
                         self.flush_pending_progress()?;
@@ -2908,6 +2992,37 @@ impl Core {
                 Ok(false)
             }
         }
+    }
+
+    /// True when the object's validators differ from those stored on the job,
+    /// so the `.part` holds a different version than the server now serves.
+    fn validators_changed(&self, job_index: usize, result: &FetchResult) -> bool {
+        let job = &self.jobs[job_index];
+        let differs = |stored: Option<&str>, seen: Option<&str>| match (stored, seen) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        };
+        differs(job.etag(), result.etag.as_deref())
+            || differs(job.last_modified(), result.last_modified.as_deref())
+    }
+
+    /// Truncate the `.part` and forget its progress and validators so the next
+    /// plan starts a plain fetch from byte zero.
+    fn restart_from_zero(
+        &mut self,
+        job_index: usize,
+        part_path: &Path,
+        range_ignored: bool,
+    ) -> Result<(), String> {
+        std::fs::File::create(part_path)
+            .map_err(|e| format!("truncate partial {part_path:?}: {e}"))?;
+        let job = &mut self.jobs[job_index];
+        job.set_bytes_received(0);
+        job.set_validators(None, None);
+        if range_ignored {
+            job.set_range_ignored(true);
+        }
+        Ok(())
     }
 
     /// On transfer error: advance to the next mirror (returns `true` to retry)

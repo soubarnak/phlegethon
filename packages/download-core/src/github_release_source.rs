@@ -303,6 +303,7 @@ mod tests {
             Ok(FetchResult {
                 total_length: body.len() as u64,
                 bytes_written: body.len() as u64,
+                ..Default::default()
             })
         }
         fn supports_range(&self, _url: &str) -> Result<bool, String> {

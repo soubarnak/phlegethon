@@ -125,6 +125,13 @@ pub struct Job {
     last_error: Option<String>,
     /// Page URL sent as `Referer` when fetching this job's media.
     referer: Option<String>,
+    /// `ETag` of the object seen on the first reply; sent as `If-Range` on resume.
+    etag: Option<String>,
+    /// `Last-Modified` of the object seen on the first reply (`If-Range` fallback).
+    last_modified: Option<String>,
+    /// The server answered a Range request with the whole body, so this job
+    /// must use a single plain connection.
+    range_ignored: bool,
 }
 
 impl Job {
@@ -198,6 +205,9 @@ impl Job {
             extraction_tier: None,
             last_error: None,
             referer: None,
+            etag: None,
+            last_modified: None,
+            range_ignored: false,
         }
     }
 
@@ -229,6 +239,9 @@ impl Job {
             extraction_tier: persisted.extraction_tier,
             last_error: persisted.last_error,
             referer: persisted.referer,
+            etag: persisted.etag,
+            last_modified: persisted.last_modified,
+            range_ignored: persisted.range_ignored,
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -270,7 +283,36 @@ impl Job {
             extraction_tier: self.extraction_tier,
             last_error: self.last_error.clone(),
             referer: self.referer.clone(),
+            etag: self.etag.clone(),
+            last_modified: self.last_modified.clone(),
+            range_ignored: self.range_ignored,
         }
+    }
+
+    /// Validator for `If-Range` on resume: the `ETag`, else `Last-Modified`.
+    pub fn validator(&self) -> Option<&str> {
+        self.etag.as_deref().or(self.last_modified.as_deref())
+    }
+
+    pub fn etag(&self) -> Option<&str> {
+        self.etag.as_deref()
+    }
+
+    pub fn last_modified(&self) -> Option<&str> {
+        self.last_modified.as_deref()
+    }
+
+    pub fn set_validators(&mut self, etag: Option<String>, last_modified: Option<String>) {
+        self.etag = etag;
+        self.last_modified = last_modified;
+    }
+
+    pub fn range_ignored(&self) -> bool {
+        self.range_ignored
+    }
+
+    pub fn set_range_ignored(&mut self, ignored: bool) {
+        self.range_ignored = ignored;
     }
 
     pub fn extraction_tier(&self) -> Option<ExtractionTier> {

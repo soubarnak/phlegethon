@@ -28,6 +28,7 @@ fn write_fetch_to_sink(
     Ok(FetchResult {
         total_length: total,
         bytes_written: written as u64,
+        ..Default::default()
     })
 }
 
@@ -647,6 +648,7 @@ fn discard_during_in_flight_transfer_stops_and_deletes_partials() {
             Ok(FetchResult {
                 total_length: total,
                 bytes_written: written,
+                ..Default::default()
             })
         }
 
@@ -2199,6 +2201,7 @@ fn pause_during_in_flight_transfer_stops_without_full_body() {
             Ok(FetchResult {
                 total_length: total,
                 bytes_written: written,
+                ..Default::default()
             })
         }
 
@@ -4030,6 +4033,7 @@ impl HttpBackend for SlowKnownSizeHttp {
         Ok(FetchResult {
             total_length: total,
             bytes_written: written,
+            ..Default::default()
         })
     }
 
@@ -4070,6 +4074,7 @@ impl HttpBackend for SlowUnknownSizeHttp {
         Ok(FetchResult {
             total_length: 0,
             bytes_written: written,
+            ..Default::default()
         })
     }
 
@@ -7275,6 +7280,7 @@ impl HttpBackend for SlowRangeFakeHttp {
         Ok(FetchResult {
             total_length: total,
             bytes_written: written,
+            ..Default::default()
         })
     }
 
@@ -7971,4 +7977,376 @@ fn clear_history_removes_archive_entries() {
     assert_eq!(core.clear_history(Some(ArchiveOutcome::Failed)).unwrap(), 0);
     assert_eq!(core.clear_history(None).unwrap(), 1);
     assert_eq!(core.history_len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Regression: Range replies, validators and mirror failover (B-2, H-5, M-14)
+// ---------------------------------------------------------------------------
+
+/// How a [`ScriptedHttp`] origin answers one fetch.
+#[derive(Clone, Copy, Debug)]
+enum Reply {
+    /// Serve the requested slice: 206 with `Content-Range` for a Range
+    /// request, 200 otherwise. Answers 200 without a body when `If-Range`
+    /// does not match the current `ETag`.
+    Honor,
+    /// Like `Honor`, but the body stops after this many bytes and the fetch
+    /// returns `Ok` (an interrupted transfer).
+    Truncated(u64),
+    /// Like `Honor`, but the connection drops after this many body bytes.
+    ErrorAfter(u64),
+    /// Answer 200 with the whole body even when a Range was requested.
+    IgnoreRange,
+}
+
+struct OriginState {
+    body: Vec<u8>,
+    etag: Option<String>,
+}
+
+type RecordedFetch = (String, Option<std::ops::Range<u64>>, Option<String>);
+
+/// Fake origin that records every fetch and answers from a per-URL script.
+#[derive(Clone)]
+struct ScriptedHttp {
+    origins: Arc<Mutex<std::collections::HashMap<String, OriginState>>>,
+    script: Arc<Mutex<std::collections::HashMap<String, std::collections::VecDeque<Reply>>>>,
+    requests: Arc<Mutex<Vec<RecordedFetch>>>,
+    default_reply: Reply,
+    advertise_range: bool,
+}
+
+impl ScriptedHttp {
+    fn new(urls: &[(&str, &[u8])]) -> Self {
+        let origins = urls
+            .iter()
+            .map(|(url, body)| {
+                (
+                    (*url).to_string(),
+                    OriginState {
+                        body: body.to_vec(),
+                        etag: Some("\"v1\"".to_string()),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            origins: Arc::new(Mutex::new(origins)),
+            script: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            default_reply: Reply::Honor,
+            advertise_range: false,
+        }
+    }
+
+    fn then(self, url: &str, replies: &[Reply]) -> Self {
+        self.script
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), replies.iter().copied().collect());
+        self
+    }
+
+    fn replace_object(&self, url: &str, body: &[u8], etag: &str) {
+        let mut origins = self.origins.lock().unwrap();
+        let origin = origins.get_mut(url).unwrap();
+        origin.body = body.to_vec();
+        origin.etag = Some(etag.to_string());
+    }
+
+    fn requests(&self) -> Vec<RecordedFetch> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl HttpBackend for ScriptedHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        self.fetch_conditional(url, range, None, sink)
+    }
+
+    fn fetch_conditional(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+        if_range: Option<&str>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        self.requests.lock().unwrap().push((
+            url.to_string(),
+            range.clone(),
+            if_range.map(str::to_string),
+        ));
+        let reply = self
+            .script
+            .lock()
+            .unwrap()
+            .get_mut(url)
+            .and_then(|q| q.pop_front())
+            .unwrap_or(self.default_reply);
+        let origins = self.origins.lock().unwrap();
+        let origin = origins
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        let total = origin.body.len() as u64;
+        let etag = origin.etag.clone();
+
+        let validator_mismatch = match (if_range, &etag) {
+            (Some(sent), Some(current)) => sent != current,
+            _ => false,
+        };
+        let ranged = range.is_some() && !matches!(reply, Reply::IgnoreRange);
+        if range.is_some() && validator_mismatch {
+            // The object changed: 200 head only, no body.
+            return Ok(FetchResult {
+                total_length: total,
+                status: Some(200),
+                etag,
+                ..Default::default()
+            });
+        }
+
+        let (start, data): (u64, &[u8]) = match (&range, ranged) {
+            (Some(r), true) => {
+                if r.start >= total {
+                    return Err(format!("416 range not satisfiable for {url}"));
+                }
+                let end = r.end.min(total);
+                (r.start, &origin.body[r.start as usize..end as usize])
+            }
+            _ => (0, origin.body.as_slice()),
+        };
+        let (data, fail_after) = match reply {
+            Reply::Truncated(n) => (&data[..(n as usize).min(data.len())], false),
+            Reply::ErrorAfter(n) => (&data[..(n as usize).min(data.len())], true),
+            _ => (data, false),
+        };
+        let mut result = write_fetch_to_sink(sink, data, total)?;
+        if fail_after {
+            return Err(format!("connection reset by {url}"));
+        }
+        result.etag = etag;
+        if ranged {
+            result.status = Some(206);
+            result.content_range = Some(ContentRange {
+                start,
+                end: start + data.len().saturating_sub(1) as u64,
+                total: Some(total),
+            });
+        } else {
+            result.status = Some(200);
+        }
+        Ok(result)
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(self.advertise_range)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        self.origins
+            .lock()
+            .unwrap()
+            .get(url)
+            .map(|o| o.body.len() as u64)
+            .ok_or_else(|| format!("no fake response for {url}"))
+    }
+}
+
+const SCRIPTED_URL: &str = "https://example.com/object.bin";
+
+fn object_body(fill: u8) -> Vec<u8> {
+    (0..64u8)
+        .map(|i| i.wrapping_mul(7).wrapping_add(fill))
+        .collect()
+}
+
+fn run_until_idle(core: &mut Core, rx: &crossbeam_channel::Receiver<CoreEvent>) -> Vec<CoreEvent> {
+    core.process_pending().unwrap();
+    collect_events(rx)
+}
+
+fn completed_file(root: &std::path::Path, job_id: &str) -> Vec<u8> {
+    std::fs::read(root.join("jobs").join(job_id).join("object.bin")).unwrap()
+}
+
+#[test]
+fn resume_restarts_from_zero_when_server_answers_range_with_200() {
+    let body = object_body(1);
+    let http = ScriptedHttp::new(&[(SCRIPTED_URL, &body)])
+        .then(SCRIPTED_URL, &[Reply::Truncated(24), Reply::IgnoreRange]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+
+    run_until_idle(&mut core, &rx);
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    let requests = http.requests();
+    assert_eq!(
+        requests[1].1,
+        Some(24..u64::MAX),
+        "resume sends an open range"
+    );
+    assert_eq!(
+        requests[2].1, None,
+        "after a 200 the fetch restarts without Range"
+    );
+}
+
+#[test]
+fn segmented_transfer_falls_back_to_one_connection_when_ranges_are_ignored() {
+    let body = object_body(2);
+    let mut http = ScriptedHttp::new(&[(SCRIPTED_URL, &body)]);
+    http.advertise_range = true;
+    http.default_reply = Reply::IgnoreRange;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    assert_eq!(
+        http.requests().last().unwrap().1,
+        None,
+        "the fallback is a plain single fetch"
+    );
+}
+
+#[test]
+fn resume_sends_stored_validator_and_restarts_when_object_changed() {
+    let old_body = object_body(3);
+    let new_body = object_body(4);
+    let http =
+        ScriptedHttp::new(&[(SCRIPTED_URL, &old_body)]).then(SCRIPTED_URL, &[Reply::Truncated(24)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+    {
+        let (mut core, rx) = make_core(Box::new(http.clone()));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+        run_until_idle(&mut core, &rx);
+    }
+    http.replace_object(SCRIPTED_URL, &new_body, "\"v2\"");
+
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(
+        completed_file(&root, &job_id),
+        new_body,
+        "the stale prefix must not survive a changed object"
+    );
+    let requests = http.requests();
+    assert_eq!(
+        requests[1].2.as_deref(),
+        Some("\"v1\""),
+        "If-Range carries the stored ETag"
+    );
+}
+
+#[test]
+fn failover_resumes_from_part_length_after_partial_body_error() {
+    let body = object_body(5);
+    let mirror_a = "https://a.example.com/object.bin";
+    let mirror_b = "https://b.example.com/object.bin";
+    let http = ScriptedHttp::new(&[(mirror_a, &body), (mirror_b, &body)])
+        .then(mirror_a, &[Reply::Truncated(24), Reply::ErrorAfter(16)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, mirror_a);
+    core.add_job_mirror(&job_id, mirror_b.to_string()).unwrap();
+
+    run_until_idle(&mut core, &rx);
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete on the second mirror, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    let last = http.requests().pop().unwrap();
+    assert_eq!(last.0, mirror_b);
+    assert_eq!(
+        last.1,
+        Some(40..u64::MAX),
+        "failover resumes after the 24 + 16 bytes already on disk"
+    );
+}
+
+#[test]
+fn complete_part_left_by_a_crash_is_finished_without_a_request() {
+    let body = object_body(6);
+    let http =
+        ScriptedHttp::new(&[(SCRIPTED_URL, &body)]).then(SCRIPTED_URL, &[Reply::Truncated(24)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+    {
+        let (mut core, rx) = make_core(Box::new(http.clone()));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+        run_until_idle(&mut core, &rx);
+    }
+    // Crash window: every byte is on disk but the rename never happened.
+    let part = root.join("jobs").join(&job_id).join("object.bin.part");
+    std::fs::write(&part, &body).unwrap();
+    let requests_before = http.requests().len();
+
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "a complete .part must not fail with 416"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    assert_eq!(
+        http.requests().len(),
+        requests_before,
+        "no request is needed"
+    );
 }
