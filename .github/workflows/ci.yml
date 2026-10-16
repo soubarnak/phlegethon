@@ -1,0 +1,96 @@
+name: CI
+
+# Gates every pull request and every push to main. Release builds live in release.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (report only)
+        # Report-only for now: the tree still has warnings. WS11 turns this on with -D warnings.
+        continue-on-error: true
+        run: cargo clippy --workspace --exclude phlegethon-tauri --all-targets --locked
+      - name: Tests (everything except the WebKit shell)
+        run: cargo test --workspace --exclude phlegethon-tauri --locked
+
+  plugins:
+    name: Extractor plugins
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yt-dlp
+        run: python3 -m pip install yt-dlp
+      - name: Parse fixtures
+        run: python3 packages/extractor-plugins/tests/test_parse_fixtures.py
+      - name: Offline extractors (no skipped tests allowed)
+        # test_extractors_offline.py skips every test and exits 0 when yt_dlp cannot be
+        # imported, so fail on any "skipped" in the unittest output.
+        run: |
+          python3 packages/extractor-plugins/tests/test_extractors_offline.py -v 2>&1 | tee offline.log
+          if grep -qi 'skipped' offline.log; then
+            echo "::error::offline extractor tests were skipped"
+            exit 1
+          fi
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: packages/tauri-shell/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/tauri-shell/frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  shell:
+    name: Tauri shell
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev pkg-config
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/tauri-shell/frontend/package-lock.json
+      - name: Build the frontend (tauri.conf.json frontendDist is ../frontend/dist)
+        working-directory: packages/tauri-shell/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - run: cargo test -p phlegethon-tauri --locked
