@@ -132,6 +132,76 @@ pub struct PersistedJob {
     pub last_error: Option<String>,
     #[serde(default)]
     pub referer: Option<String>,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    #[serde(default)]
+    pub range_ignored: bool,
+    /// Per-segment progress of a Segmented Transfer; empty for single-connection jobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<Segment>,
+    /// Cookie session applied to this job only (see `EnqueueOptions::cookie_session`).
+    #[serde(default)]
+    pub cookie_session: Option<CookieChannel>,
+}
+
+/// One byte range of a Segmented Transfer and how much of it is on disk.
+///
+/// `written` counts the contiguous bytes from `start` that have been written
+/// and synced, so the unfinished part of the range is `start + written..end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Segment {
+    pub start: u64,
+    pub end: u64,
+    pub written: u64,
+}
+
+impl Segment {
+    /// Split `total` bytes into at most `count` contiguous segments.
+    pub fn split(total: u64, count: u64) -> Vec<Segment> {
+        let count = count.min(total);
+        if count == 0 {
+            return Vec::new();
+        }
+        let size = total / count;
+        (0..count)
+            .map(|s| Segment {
+                start: s * size,
+                end: if s == count - 1 {
+                    total
+                } else {
+                    (s + 1) * size
+                },
+                written: 0,
+            })
+            .collect()
+    }
+
+    pub fn len(&self) -> u64 {
+        self.end - self.start
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.written >= self.len()
+    }
+
+    /// Bytes still to fetch, as an absolute range; `None` when complete.
+    pub fn remaining(&self) -> Option<std::ops::Range<u64>> {
+        (!self.is_complete()).then(|| self.start + self.written..self.end)
+    }
+
+    /// True when the table is a gap-free cover of `0..total` with sane counts.
+    pub fn table_is_valid(segments: &[Segment], total: u64) -> bool {
+        let mut next = 0;
+        for seg in segments {
+            if seg.start != next || seg.end <= seg.start || seg.written > seg.len() {
+                return false;
+            }
+            next = seg.end;
+        }
+        !segments.is_empty() && next == total
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,7 +269,7 @@ pub fn load_global_bandwidth_cap(library_root: &Path) -> Result<Option<u64>, Str
         fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
     let queue: PersistedQueue =
         serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.global_bandwidth_cap)
+    Ok(queue.global_bandwidth_cap.filter(|&cap| cap > 0))
 }
 
 /// Load the Active Job Limit from the queue file, if present.
@@ -400,6 +470,10 @@ pub fn reconcile_job(job: &mut Job) -> Result<(), String> {
     let part_path = part_path_for_job(job);
     let stored = job.bytes_received();
 
+    if !job.segments().is_empty() {
+        return reconcile_segmented_job(job, &part_path, stored);
+    }
+
     match fs::metadata(&part_path) {
         Ok(meta) => {
             let part_len = meta.len();
@@ -411,6 +485,27 @@ pub fn reconcile_job(job: &mut Job) -> Result<(), String> {
             job.mark_failed();
         }
         Err(_) => {}
+    }
+    Ok(())
+}
+
+/// A Segmented Transfer's `.part` is preallocated and written at independent
+/// offsets, so its length says nothing about progress: the segment table does.
+/// A table that no longer describes the file is dropped and the job restarts.
+fn reconcile_segmented_job(job: &mut Job, part_path: &Path, stored: u64) -> Result<(), String> {
+    let table_total = job.segments().last().map_or(0, |s| s.end);
+    let valid = Segment::table_is_valid(job.segments(), table_total)
+        && fs::metadata(part_path).is_ok_and(|m| m.len() == table_total);
+    if valid {
+        let written = job.segments().iter().map(|s| s.written).sum();
+        job.set_bytes_received(written);
+        job.set_total_bytes(Some(table_total));
+    } else if stored > 0 && job.state() != JobState::Completed && !part_path.exists() {
+        job.clear_segments();
+        job.mark_failed();
+    } else {
+        job.clear_segments();
+        job.set_bytes_received(0);
     }
     Ok(())
 }
@@ -429,6 +524,46 @@ fn part_path_for_job(job: &Job) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn segment_split_covers_the_object_without_gaps() {
+        let table = Segment::split(10, 4);
+        assert_eq!(table.len(), 4);
+        assert!(Segment::table_is_valid(&table, 10));
+        assert_eq!(
+            table.last().unwrap().end,
+            10,
+            "the last segment takes the remainder"
+        );
+        assert_eq!(Segment::split(3, 4).len(), 3, "no empty segments");
+        assert!(Segment::split(0, 4).is_empty());
+    }
+
+    #[test]
+    fn segment_table_with_a_gap_or_overcount_is_invalid() {
+        let mut table = Segment::split(100, 4);
+        table[1].written = 26;
+        assert!(
+            !Segment::table_is_valid(&table, 100),
+            "written past the end"
+        );
+        let mut gap = Segment::split(100, 4);
+        gap[2].start += 1;
+        assert!(!Segment::table_is_valid(&gap, 100));
+        assert!(!Segment::table_is_valid(&Segment::split(100, 4), 99));
+    }
+
+    #[test]
+    fn segment_remaining_starts_after_the_written_bytes() {
+        let seg = Segment {
+            start: 16,
+            end: 32,
+            written: 5,
+        };
+        assert_eq!(seg.remaining(), Some(21..32));
+        let done = Segment { written: 16, ..seg };
+        assert_eq!(done.remaining(), None);
+    }
+
     use super::*;
     use std::io::Write;
 

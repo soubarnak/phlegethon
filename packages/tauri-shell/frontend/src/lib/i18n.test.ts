@@ -43,4 +43,56 @@ describe("i18n", () => {
     for (const k of ["bundled", "python_package", "missing", "unknown"]) expect(table[`toolchain.ejs.${k}`]).toBeTruthy();
     for (const k of ["sidecar_manifest", "env_var", "path", "python_module"]) expect(table[`toolchain.source.${k}`]).toBeTruthy();
   });
+
+  const table = en as Record<string, string>;
+  const allSources = () =>
+    sources(path.resolve(__dirname, "..")).map((file) => ({ file, text: readFileSync(file, "utf8") }));
+  const placeholders = (value: string) => new Set([...value.matchAll(/\{([a-zA-Z0-9_]+)\}/g)].map((m) => m[1]));
+
+  it("has no unused keys in en.json", () => {
+    const files = allSources();
+    const used = (key: string) => {
+      const dynamicPrefix = key.slice(0, key.lastIndexOf(".") + 1);
+      return files.some(
+        ({ text }) =>
+          text.includes(`"${key}"`) || text.includes(`'${key}'`) || (dynamicPrefix && text.includes(`${dynamicPrefix}\${`)),
+      );
+    };
+    expect(Object.keys(table).filter((key) => !used(key))).toEqual([]);
+  });
+
+  it("passes the placeholders each string expects", () => {
+    const mismatched: string[] = [];
+    for (const { file, text } of allSources()) {
+      for (const m of text.matchAll(/\bt\(\s*["']([a-zA-Z0-9_.]+)["']\s*,\s*\{([^}]*)\}/g)) {
+        const value = table[m[1]];
+        if (value === undefined) continue;
+        const given = new Set(
+          m[2]
+            .split(",")
+            .map((part) => part.split(":")[0].trim())
+            .filter(Boolean),
+        );
+        const wanted = placeholders(value);
+        if (given.size !== wanted.size || [...wanted].some((name) => !given.has(name))) {
+          mismatched.push(`${path.basename(file)}: ${m[1]} wants {${[...wanted]}} got {${[...given]}}`);
+        }
+      }
+    }
+    expect(mismatched).toEqual([]);
+  });
+
+  it("keeps user-facing sentences out of errors.ts and history.ts", () => {
+    const offenders: string[] = [];
+    for (const name of ["errors.ts", "history.ts"]) {
+      const code = readFileSync(path.resolve(__dirname, name), "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      for (const m of code.matchAll(/"([^"\n\\]*)"|'([^'\n\\]*)'|`([^`\n\\]*)`/g)) {
+        const literal = m[1] ?? m[2] ?? m[3] ?? "";
+        if (/[A-Za-z]{3,} [A-Za-z]{2,}/.test(literal) || /\}[A-Za-z]{2,}/.test(literal)) offenders.push(`${name}: ${literal}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });

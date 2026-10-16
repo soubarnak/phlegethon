@@ -266,6 +266,7 @@ fn enqueue_url(
         dest,
         EnqueueOptions {
             force_direct: force_direct.unwrap_or(false),
+            ..Default::default()
         },
     )?;
     Ok(outcome.into())
@@ -412,7 +413,6 @@ fn set_global_bandwidth_cap(state: State<AppState>, cap: Option<u64>) -> Result<
         Some(cap) => core.set_global_bandwidth_cap(cap),
         None => core.remove_global_bandwidth_cap(),
     }
-    Ok(())
 }
 
 #[tauri::command]

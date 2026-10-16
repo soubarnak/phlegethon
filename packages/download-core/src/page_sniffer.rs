@@ -706,13 +706,13 @@ impl HtmlPageSniffer {
 
 impl PageSniffer for HtmlPageSniffer {
     fn sniff_head(&self, url: &str, proxy: &ProxySettings) -> Result<SniffOutcome, String> {
-        self.http.apply_proxy_settings(proxy);
+        self.http.apply_proxy_settings(proxy)?;
         let head = self.http.head_info(url)?;
         Ok(binary_outcome_from_head(&head).unwrap_or(SniffOutcome::Nothing))
     }
 
     fn sniff(&self, url: &str, proxy: &ProxySettings) -> Result<SniffOutcome, String> {
-        self.http.apply_proxy_settings(proxy);
+        self.http.apply_proxy_settings(proxy)?;
         if let Ok(head) = self.http.head_info(url) {
             if let Some(binary) = binary_outcome_from_head(&head) {
                 return Ok(binary);

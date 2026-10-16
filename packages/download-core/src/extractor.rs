@@ -368,6 +368,8 @@ pub struct FakeExtractorToolchain {
     generic_urls: HashSet<String>,
     /// Record of `(url, allow_generic)` for every probe call (tests).
     probe_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+    /// Record of `(url, cookies)` for every probe and download call (tests).
+    cookie_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, CookieChannel)>>>,
 }
 
 #[derive(Clone)]
@@ -440,6 +442,14 @@ impl FakeExtractorToolchain {
     /// `(url, allow_generic)` for every probe call so far.
     pub fn probe_calls(&self) -> Vec<(String, bool)> {
         self.probe_calls
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// `(url, cookies)` for every probe and download call so far.
+    pub fn cookie_calls(&self) -> Vec<(String, CookieChannel)> {
+        self.cookie_calls
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default()
@@ -583,12 +593,15 @@ impl ExtractorToolchain for FakeExtractorToolchain {
     fn probe_with_policy(
         &self,
         url: &str,
-        _cookies: &CookieChannel,
+        cookies: &CookieChannel,
         _proxy: &ProxySettings,
         policy: &ProbePolicy,
     ) -> Result<ProbeResult, String> {
         if let Ok(mut calls) = self.probe_calls.lock() {
             calls.push((url.to_string(), policy.allow_generic));
+        }
+        if let Ok(mut calls) = self.cookie_calls.lock() {
+            calls.push((url.to_string(), cookies.clone()));
         }
         let response = self
             .responses
@@ -622,10 +635,13 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         dest_dir: &std::path::Path,
         stop: &AtomicBool,
         _media_extras: &MediaExtrasOptions,
-        _cookies: &CookieChannel,
+        cookies: &CookieChannel,
         _proxy: &ProxySettings,
         output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
+        if let Ok(mut calls) = self.cookie_calls.lock() {
+            calls.push((url.to_string(), cookies.clone()));
+        }
         if stop.load(Ordering::Acquire) {
             return Ok(ExtractorDownloadOutcome::Stopped);
         }

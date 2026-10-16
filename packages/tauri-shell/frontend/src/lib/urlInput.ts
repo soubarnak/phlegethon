@@ -30,10 +30,17 @@ export interface ProcessUrlHandlers {
   enqueueOne: (url: string) => Promise<void>;
 }
 
+export interface UrlFailure {
+  url: string;
+  error: unknown;
+}
+
 export interface ProcessUrlResult {
   enqueued: number;
   total: number;
   skipped: string[];
+  /** URLs whose duplicate check or enqueue threw; the rest of the batch still ran. */
+  failed: UrlFailure[];
 }
 
 /** Split pasted text into URLs, resolve duplicates one by one, enqueue the rest. */
@@ -43,22 +50,27 @@ export async function processUrlInput(
 ): Promise<ProcessUrlResult> {
   const urls = await splitUrls(text);
   if (urls.length === 0) {
-    return { enqueued: 0, total: 0, skipped: [] };
+    return { enqueued: 0, total: 0, skipped: [], failed: [] };
   }
 
   let enqueued = 0;
   const skipped: string[] = [];
+  const failed: UrlFailure[] = [];
   for (const url of urls) {
-    const resolution = await resolveDuplicate(url);
-    if (resolution === "enqueue") {
-      await enqueueOne(url);
-      enqueued++;
-    } else {
-      skipped.push(url);
+    try {
+      const resolution = await resolveDuplicate(url);
+      if (resolution === "enqueue") {
+        await enqueueOne(url);
+        enqueued++;
+      } else {
+        skipped.push(url);
+      }
+    } catch (error) {
+      failed.push({ url, error });
     }
   }
 
-  return { enqueued, total: urls.length, skipped };
+  return { enqueued, total: urls.length, skipped, failed };
 }
 
 /** Pull plain text / URI lists out of a drop or paste `DataTransfer`. */

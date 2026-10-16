@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button, Modal, TextInput } from "@carbon/react";
 import { FolderAdd } from "@carbon/icons-react";
 import { pickFolder } from "@/tauri/platform";
@@ -13,7 +13,11 @@ interface FolderPickerProps {
   disabled?: boolean;
   onPicked: (path: string) => void;
   onError?: (err: unknown) => void;
+  /** How long to wait for the native chooser before offering a typed path. */
+  timeoutMs?: number;
 }
+
+const DEFAULT_PICK_TIMEOUT_MS = 120_000;
 
 /**
  * Folder chooser: the native portal/zenity/kdialog picker via Rust, with a
@@ -27,16 +31,34 @@ export function FolderPicker({
   disabled,
   onPicked,
   onError,
+  timeoutMs = DEFAULT_PICK_TIMEOUT_MS,
 }: FolderPickerProps) {
   const [busy, setBusy] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualPath, setManualPath] = useState("");
   const [noChooser, setNoChooser] = useState(false);
 
+  // Each chooser run gets a token; cancel and timeout bump it so a late reply is ignored (L-61).
+  const pickToken = useRef(0);
+
+  const abandon = () => {
+    pickToken.current += 1;
+    setBusy(false);
+  };
+
   const choose = async () => {
+    const token = ++pickToken.current;
     setBusy(true);
+    const timer = window.setTimeout(() => {
+      if (pickToken.current !== token) return;
+      abandon();
+      onError?.(new Error(t("folder.timeout")));
+      setNoChooser(false);
+      setManualOpen(true);
+    }, timeoutMs);
     try {
       const result = await pickFolder(title);
+      if (pickToken.current !== token) return;
       if (result.method === "manual") {
         // Neither a portal nor zenity/kdialog: ask for a typed path.
         setNoChooser(true);
@@ -45,12 +67,14 @@ export function FolderPicker({
         onPicked(result.path);
       }
     } catch (err) {
+      if (pickToken.current !== token) return;
       // The chooser itself failed: fall back to typing a path.
       onError?.(err);
       setNoChooser(false);
       setManualOpen(true);
     } finally {
-      setBusy(false);
+      window.clearTimeout(timer);
+      if (pickToken.current === token) setBusy(false);
     }
   };
 
@@ -67,6 +91,11 @@ export function FolderPicker({
       >
         {label}
       </Button>
+      {busy && (
+        <Button kind="ghost" size={size} onClick={abandon} data-testid="folder-picker-cancel">
+          {t("folder.cancel")}
+        </Button>
+      )}
       <Button
         kind="ghost"
         size={size}

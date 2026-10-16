@@ -32,7 +32,15 @@ export async function readClipboardText(): Promise<string> {
   return (await readText()) ?? "";
 }
 
+let lastOwnClipboardWrite: string | null = null;
+
+/** True when `text` is what this app last wrote to the clipboard (Copy URL, for example). */
+export function isOwnClipboardWrite(text: string): boolean {
+  return lastOwnClipboardWrite !== null && text === lastOwnClipboardWrite;
+}
+
 export async function writeClipboardText(text: string): Promise<void> {
+  lastOwnClipboardWrite = text;
   if (!isTauri()) {
     await navigator.clipboard.writeText(text);
     return;

@@ -178,9 +178,6 @@ pub struct YtDlpExtractorToolchain {
     sidecar_binary: Mutex<Option<PathBuf>>,
     /// Extra `--plugin-dirs` from the app-managed sidecar root.
     sidecar_plugin_dirs: Mutex<Vec<PathBuf>>,
-    /// Maps known site domains to their expected extractor_key prefixes.
-    /// e.g. "youtube.com" → "Youtube"
-    expected_extractors: HashMap<&'static str, &'static [&'static str]>,
     /// Lazily probed `--help` flag support (`--js-runtimes`, `--impersonate`, ...).
     supported_flags: Mutex<Option<HashSet<String>>>,
     /// Lazily probed `--list-impersonate-targets` result.
@@ -190,36 +187,10 @@ pub struct YtDlpExtractorToolchain {
 impl YtDlpExtractorToolchain {
     /// Create a new toolchain with the given config.
     pub fn new(config: YtDlpConfig) -> Self {
-        let mut expected_extractors: HashMap<&'static str, &'static [&'static str]> =
-            HashMap::new();
-
-        // YouTube: primary + playlist + channel + tab extractors
-        expected_extractors.insert("youtube.com", &["Youtube"]);
-        expected_extractors.insert("www.youtube.com", &["Youtube"]);
-        expected_extractors.insert("m.youtube.com", &["Youtube"]);
-        expected_extractors.insert("youtu.be", &["Youtube"]);
-
-        // xHamster
-        expected_extractors.insert("xhamster.com", &["XHamster"]);
-        expected_extractors.insert("www.xhamster.com", &["XHamster"]);
-        expected_extractors.insert("xhamster.desi", &["XHamster"]);
-        expected_extractors.insert("xhamster2.com", &["XHamster"]);
-        expected_extractors.insert("xhamster3.com", &["XHamster"]);
-
-        // luxuretv — Phlegethon Extractor Plugin (LuxureTVIE)
-        expected_extractors.insert("luxuretv.com", &["LuxureTV"]);
-        expected_extractors.insert("www.luxuretv.com", &["LuxureTV"]);
-        expected_extractors.insert("en.luxuretv.com", &["LuxureTV"]);
-
-        // xxxbp.tv — Phlegethon Extractor Plugin (XxxbpTVIE)
-        expected_extractors.insert("xxxbp.tv", &["XxxbpTV"]);
-        expected_extractors.insert("www.xxxbp.tv", &["XxxbpTV"]);
-
         Self {
             config,
             sidecar_binary: Mutex::new(None),
             sidecar_plugin_dirs: Mutex::new(Vec::new()),
-            expected_extractors,
             supported_flags: Mutex::new(None),
             impersonation_available: Mutex::new(None),
         }
@@ -475,20 +446,7 @@ impl YtDlpExtractorToolchain {
     fn expected_extractor_for_url(&self, url: &str) -> Option<&'static [&'static str]> {
         let parsed = url::Url::parse(url).ok()?;
         let host = parsed.host_str()?;
-        // Try exact host match first, then suffix match for subdomains
-        if let Some(keys) = self.expected_extractors.get(host) {
-            return Some(keys);
-        }
-        // Check parent domains (e.g. "music.youtube.com" → youtube.com)
-        for (domain, keys) in &self.expected_extractors {
-            if host.ends_with(domain) && host != *domain {
-                // Must be a subdomain, e.g. "music.youtube.com" ends with ".youtube.com"
-                if host.ends_with(&format!(".{domain}")) {
-                    return Some(keys);
-                }
-            }
-        }
-        None
+        crate::launch_sites::find(host).map(|site| site.extractor_keys)
     }
 
     /// Check whether the resolved extractor key is expected for this URL.
@@ -567,6 +525,58 @@ impl YtDlpExtractorToolchain {
             args.push(ffmpeg_dir.display().to_string());
         }
         args.extend(self.runtime_args());
+        // `--` ends option parsing so a URL that starts with `-` cannot become an option.
+        args.push("--".to_string());
+        args.push(url.to_string());
+        args
+    }
+
+    /// Build the argv for a yt-dlp download invocation (test seam).
+    fn download_args(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+        media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        output_template: &str,
+        referer: Option<&str>,
+    ) -> Vec<String> {
+        let out_tmpl = dest_dir.join(output_template);
+        let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
+        let format_selector = quality_id_to_ytdlp_format(format, ffmpeg_present);
+
+        let mut args = vec![
+            "--no-warnings".to_string(),
+            "--no-overwrites".to_string(),
+            "-f".to_string(),
+            format_selector,
+            "-o".to_string(),
+            out_tmpl.display().to_string(),
+            "--print".to_string(),
+            "after_move:filepath".to_string(),
+            "--no-playlist".to_string(),
+        ];
+        for arg in ytdlp_media_extras_args(media_extras, ffmpeg_present) {
+            args.push(arg);
+        }
+        args.extend(ytdlp_cookie_args(cookies));
+        args.extend(ytdlp_proxy_args(proxy));
+        for dir in self.effective_plugin_dirs() {
+            args.push("--plugin-dirs".to_string());
+            args.push(dir.display().to_string());
+        }
+        if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
+            args.push("--ffmpeg-location".to_string());
+            args.push(ffmpeg_dir.display().to_string());
+        }
+        if let Some(referer) = referer.filter(|r| !r.trim().is_empty()) {
+            args.push("--referer".to_string());
+            args.push(referer.to_string());
+        }
+        args.extend(self.runtime_args());
+        args.push("--".to_string());
         args.push(url.to_string());
         args
     }
@@ -735,12 +745,11 @@ impl YtDlpExtractorToolchain {
         let mut seen_ids = HashSet::new();
 
         for entry in info.entries.iter().flatten().flatten() {
-            let Some(item_url) = entry
-                .url
-                .clone()
-                .or_else(|| entry.webpage_url.clone())
-                .or_else(|| entry.original_url.clone())
-                .filter(|s| !s.is_empty())
+            let Some(item_url) = [&entry.url, &entry.webpage_url, &entry.original_url]
+                .into_iter()
+                .flatten()
+                .find(|s| is_http_url(s))
+                .cloned()
             else {
                 continue;
             };
@@ -975,6 +984,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         cookies: &CookieChannel,
         proxy: &ProxySettings,
     ) -> Result<Vec<Quality>, String> {
+        ensure_http_url(item_url)?;
         let policy = ProbePolicy {
             allow_generic: true,
             ..ProbePolicy::default()
@@ -1025,43 +1035,20 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         output_template: &str,
         referer: Option<&str>,
     ) -> Result<ExtractorDownloadOutcome, String> {
+        ensure_http_url(url)?;
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
-        let out_tmpl = dest_dir.join(output_template);
-        let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
-        let format_selector = quality_id_to_ytdlp_format(format, ffmpeg_present);
-
-        let mut args = vec![
-            "--no-warnings".to_string(),
-            "--no-overwrites".to_string(),
-            "-f".to_string(),
-            format_selector,
-            "-o".to_string(),
-            out_tmpl.display().to_string(),
-            "--print".to_string(),
-            "after_move:filepath".to_string(),
-            "--no-playlist".to_string(),
-        ];
-        for arg in ytdlp_media_extras_args(media_extras, ffmpeg_present) {
-            args.push(arg);
-        }
-        args.extend(ytdlp_cookie_args(cookies));
-        args.extend(ytdlp_proxy_args(proxy));
-        for dir in self.effective_plugin_dirs() {
-            args.push("--plugin-dirs".to_string());
-            args.push(dir.display().to_string());
-        }
-        if let Some(ffmpeg_dir) = &self.config.ffmpeg_dir {
-            args.push("--ffmpeg-location".to_string());
-            args.push(ffmpeg_dir.display().to_string());
-        }
-        if let Some(referer) = referer.filter(|r| !r.trim().is_empty()) {
-            args.push("--referer".to_string());
-            args.push(referer.to_string());
-        }
-        args.extend(self.runtime_args());
-        args.push(url.to_string());
+        let args = self.download_args(
+            url,
+            format,
+            dest_dir,
+            media_extras,
+            cookies,
+            proxy,
+            output_template,
+            referer,
+        );
 
         let launcher = self.effective_launcher();
         let (cmd, _doh_guard) = ytdlp_command_with_optional_doh_dns(&launcher, &args, url, proxy)?;
@@ -1318,6 +1305,20 @@ fn usable_format_size(format: &YtDlpFormat) -> Option<u64> {
 }
 
 /// Derive a stable entry id when yt-dlp flat-playlist output omits `id`.
+/// Is `s` an absolute http or https URL? Extractor output is untrusted, so listing entries
+/// that fail this check are dropped before they can reach a yt-dlp argument vector.
+fn is_http_url(s: &str) -> bool {
+    url::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+}
+
+fn ensure_http_url(s: &str) -> Result<(), String> {
+    if is_http_url(s) {
+        Ok(())
+    } else {
+        Err(format!("refusing to pass non-http(s) URL '{s}' to yt-dlp"))
+    }
+}
+
 fn playlist_entry_id(entry: &YtDlpEntry, item_url: &str) -> Option<String> {
     if let Some(id) = entry.id.as_deref().filter(|s| !s.is_empty()) {
         return Some(id.to_string());
@@ -3333,5 +3334,107 @@ esac
         assert_eq!(result.items.len(), 2, "{ids:?}");
         let unique: HashSet<&str> = ids.iter().copied().collect();
         assert_eq!(unique.len(), ids.len());
+    }
+
+    #[test]
+    fn probe_args_put_double_dash_before_the_url() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        for url in ["https://example.com/v", "--exec=touch /tmp/pwned"] {
+            let args =
+                extractor.probe_args(url, &CookieChannel::default(), &ProxySettings::default());
+            let n = args.len();
+            assert_eq!(args[n - 2], "--", "{args:?}");
+            assert_eq!(args[n - 1], url, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn download_args_put_double_dash_before_the_url() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let args = extractor.download_args(
+            "https://example.com/v",
+            "best",
+            Path::new("/tmp/dest"),
+            &MediaExtrasOptions::default(),
+            &CookieChannel::default(),
+            &ProxySettings::default(),
+            "%(title)s.%(ext)s",
+            Some("https://example.com/"),
+        );
+        let n = args.len();
+        assert_eq!(args[n - 2], "--", "{args:?}");
+        assert_eq!(args[n - 1], "https://example.com/v", "{args:?}");
+        assert_eq!(args.iter().filter(|a| a.as_str() == "--").count(), 1);
+    }
+
+    #[test]
+    fn download_refuses_a_url_that_is_not_http() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let stop = AtomicBool::new(false);
+        let tmp = tempfile::tempdir().unwrap();
+        let err = extractor
+            .download(
+                "--exec=touch /tmp/pwned",
+                "best",
+                tmp.path(),
+                &stop,
+                &MediaExtrasOptions::default(),
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+                "%(title)s.%(ext)s",
+            )
+            .unwrap_err();
+        assert!(err.contains("non-http"), "{err}");
+        let err = extractor
+            .probe_item_qualities(
+                "--plugin-dirs=/evil",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
+            .unwrap_err();
+        assert!(err.contains("non-http"), "{err}");
+    }
+
+    #[test]
+    fn playlist_entries_with_non_http_urls_are_dropped() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let json = r#"{"_type":"playlist","id":"p","title":"p",
+            "extractor_key":"XHamsterUser","webpage_url":"https://xhamster.com/creators/p",
+            "entries":[
+              {"_type":"url","id":"evil1","url":"--exec=sh -c 'touch /tmp/pwned'"},
+              {"_type":"url","id":"evil2","url":"file:///etc/passwd"},
+              {"_type":"url","id":"mixed","url":"--plugin-dirs=/evil",
+               "webpage_url":"https://xhamster.com/videos/mixed-xh1"},
+              {"_type":"url","id":"ok","url":"https://xhamster.com/videos/ok-xh2"}
+            ]}"#;
+        let result = extractor
+            .parse_probe_result(json, "https://xhamster.com/creators/p")
+            .unwrap();
+        let urls: Vec<&str> = result.items.iter().map(|i| i.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://xhamster.com/videos/mixed-xh1",
+                "https://xhamster.com/videos/ok-xh2"
+            ]
+        );
+    }
+
+    #[test]
+    fn expected_extractor_covers_launch_site_subdomains() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        for (url, key) in [
+            ("https://m.xhamster.com/videos/x-1", "XHamster"),
+            ("https://de.xhamster.com/videos/x-1", "XHamster"),
+            ("https://music.youtube.com/watch?v=a", "Youtube"),
+            ("https://en.xxxbp.tv/v/1", "XxxbpTV"),
+            ("https://de.luxuretv.com/videos/x-1.html", "LuxureTV"),
+        ] {
+            assert_eq!(
+                extractor.expected_extractor_for_url(url),
+                Some(&[key][..]),
+                "{url}"
+            );
+        }
     }
 }
