@@ -4,6 +4,7 @@
 //! only when idle or are deferred to the next launch. Pin and rollback supported.
 //! Sidecars are never swapped while a transfer is active.
 
+use crate::fsutil;
 use crate::plugin_sidecar::{
     install_plugin_package, load_manifest, PluginManifest,
     MANIFEST_FILENAME as PLUGIN_MANIFEST_FILENAME,
@@ -113,6 +114,18 @@ fn default_toolchain_binary_name() -> String {
 }
 
 impl ToolchainManifest {
+    /// Reject a `binary_name` that could leave the sidecar root (M-37).
+    pub fn validate(&self) -> Result<(), String> {
+        if fsutil::is_single_component(&self.binary_name) {
+            Ok(())
+        } else {
+            Err(format!(
+                "toolchain manifest binary_name {:?} is not a plain file name",
+                self.binary_name
+            ))
+        }
+    }
+
     pub fn stub(version: impl Into<String>) -> Self {
         Self {
             version: version.into(),
@@ -280,8 +293,10 @@ pub fn load_toolchain_manifest(sidecar_root: &Path) -> Result<Option<ToolchainMa
     }
     let raw = fs::read_to_string(&path)
         .map_err(|e| format!("read toolchain manifest {}: {e}", path.display()))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| format!("parse toolchain manifest {}: {e}", path.display()))
+    let manifest: ToolchainManifest = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse toolchain manifest {}: {e}", path.display()))?;
+    manifest.validate()?;
+    Ok(Some(manifest))
 }
 
 pub fn write_toolchain_manifest(
@@ -293,9 +308,16 @@ pub fn write_toolchain_manifest(
     let path = toolchain_manifest_path(sidecar_root);
     let raw = serde_json::to_string_pretty(manifest)
         .map_err(|e| format!("serialize toolchain manifest: {e}"))?;
-    fs::write(&path, raw).map_err(|e| format!("write toolchain manifest {}: {e}", path.display()))
+    fsutil::write_atomic(&path, raw.as_bytes())
+        .map_err(|e| format!("write toolchain manifest {}: {e}", path.display()))
 }
 
+/// Load the persisted runtime state.
+///
+/// A state file that does not parse is moved aside to `sidecar-state.json.corrupt`
+/// and replaced by defaults: the file only holds a deferred flag and rollback
+/// snapshots, and failing here would leave every sidecar command reporting
+/// "sidecar root not configured" for the whole session (M-38).
 pub fn load_sidecar_runtime_state(sidecar_root: &Path) -> Result<SidecarRuntimeState, String> {
     let path = sidecar_state_path(sidecar_root);
     if !path.is_file() {
@@ -303,7 +325,13 @@ pub fn load_sidecar_runtime_state(sidecar_root: &Path) -> Result<SidecarRuntimeS
     }
     let raw = fs::read_to_string(&path)
         .map_err(|e| format!("read sidecar state {}: {e}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse sidecar state {}: {e}", path.display()))
+    match serde_json::from_str(&raw) {
+        Ok(state) => Ok(state),
+        Err(_) => {
+            let _ = fs::rename(&path, path.with_extension("json.corrupt"));
+            Ok(SidecarRuntimeState::default())
+        }
+    }
 }
 
 pub fn save_sidecar_runtime_state(
@@ -315,7 +343,8 @@ pub fn save_sidecar_runtime_state(
     let path = sidecar_state_path(sidecar_root);
     let raw =
         serde_json::to_string_pretty(state).map_err(|e| format!("serialize sidecar state: {e}"))?;
-    fs::write(&path, raw).map_err(|e| format!("write sidecar state {}: {e}", path.display()))
+    fsutil::write_atomic(&path, raw.as_bytes())
+        .map_err(|e| format!("write sidecar state {}: {e}", path.display()))
 }
 
 fn pinned_version<'a>(
@@ -473,8 +502,11 @@ fn snapshot_toolchain_for_rollback(
     copy_file(&binary, &backup_root.join(&manifest.binary_name))?;
     let manifest_raw = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("serialize toolchain manifest: {e}"))?;
-    fs::write(backup_root.join(TOOLCHAIN_MANIFEST_FILENAME), manifest_raw)
-        .map_err(|e| format!("write rollback toolchain manifest: {e}"))?;
+    fsutil::write_atomic(
+        &backup_root.join(TOOLCHAIN_MANIFEST_FILENAME),
+        manifest_raw.as_bytes(),
+    )
+    .map_err(|e| format!("write rollback toolchain manifest: {e}"))?;
     state.rollback.toolchain = Some(RollbackSnapshot {
         version: manifest.version.clone(),
         backup_root,
@@ -529,6 +561,30 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Copy `src` to `dst` through a temp file in the same directory, mark it
+/// executable, and rename it into place. A running yt-dlp keeps the old inode;
+/// nothing ever sees a half-written binary (H-23).
+fn install_executable_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let tmp = fsutil::temp_sibling(dst);
+    let staged = (|| {
+        fs::copy(src, &tmp)
+            .map_err(|e| format!("copy {} -> {}: {e}", src.display(), tmp.display()))?;
+        mark_executable(&tmp)?;
+        fs::File::open(&tmp)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+        fsutil::rename_durable(&tmp, dst)
+            .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), dst.display()))
+    })();
+    if staged.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    staged
+}
+
 fn install_toolchain_version(
     sidecar_root: &Path,
     version: &str,
@@ -540,13 +596,16 @@ fn install_toolchain_version(
     if let Some(name) = entry.asset_name.as_deref().filter(|n| !n.is_empty()) {
         manifest.binary_name = name.to_string();
     }
+    manifest.validate()?;
+    let previous = load_toolchain_manifest(sidecar_root).ok().flatten();
     let dest = toolchain_binary_path(sidecar_root, &manifest);
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    install_executable_atomic(&src, &dest)?;
+    write_toolchain_manifest(sidecar_root, &manifest)?;
+    // A different asset name (glibc build to zipimport script) leaves the old file behind.
+    if let Some(previous) = previous.filter(|p| p.binary_name != manifest.binary_name) {
+        let _ = fs::remove_file(toolchain_binary_path(sidecar_root, &previous));
     }
-    copy_file(&src, &dest)?;
-    mark_executable(&dest)?;
-    write_toolchain_manifest(sidecar_root, &manifest)
+    Ok(())
 }
 
 /// Ensure an installed toolchain binary can be executed (no-op off Unix).
@@ -755,6 +814,7 @@ fn restore_toolchain_from_snapshot(
         .map_err(|e| format!("read rollback toolchain manifest: {e}"))?;
     let manifest: ToolchainManifest = serde_json::from_str(&raw)
         .map_err(|e| format!("parse rollback toolchain manifest: {e}"))?;
+    manifest.validate()?;
     let src = snapshot.backup_root.join(&manifest.binary_name);
     let entry = CatalogVersionEntry {
         asset_name: Some(manifest.binary_name.clone()),
@@ -814,12 +874,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn write_minimal_plugin_package(root: &Path) {
-        let extractor = root.join("yt_dlp_plugins").join("extractor");
-        fs::create_dir_all(&extractor).unwrap();
-        fs::write(extractor.join("luxuretv.py"), b"# fixture\n").unwrap();
-    }
-
     #[test]
     fn check_reports_update_when_catalog_is_newer() {
         let tmp = tempfile::tempdir().unwrap();
@@ -877,5 +931,139 @@ mod tests {
         let result = check_sidecar_updates(&sidecar, &settings, source.as_ref()).unwrap();
         assert!(!result.toolchain.update_available);
         assert_eq!(result.toolchain.pinned_version.as_deref(), Some("1.0.0"));
+    }
+
+    fn catalog_with_binary(tmp: &Path, version: &str, bytes: &[u8]) -> (UpdateCatalog, PathBuf) {
+        let binary = tmp.join(format!("yt-dlp-{version}"));
+        fs::write(&binary, bytes).unwrap();
+        (
+            UpdateCatalog {
+                toolchain_latest: Some(version.to_string()),
+                toolchain_versions: HashMap::from([(
+                    version.to_string(),
+                    CatalogVersionEntry::local(binary.clone()),
+                )]),
+                ..Default::default()
+            },
+            binary,
+        )
+    }
+
+    #[test]
+    fn install_replaces_the_binary_without_rewriting_the_running_inode() {
+        // H-23: `fs::copy` over the live file truncated it under a running yt-dlp.
+        use std::io::Read;
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        write_toolchain_manifest(&sidecar, &ToolchainManifest::stub("1.0.0")).unwrap();
+        let live = toolchain_binary_path(&sidecar, &ToolchainManifest::stub("1.0.0"));
+        fs::write(&live, b"old binary contents").unwrap();
+        let mut running = fs::File::open(&live).unwrap();
+
+        let (catalog, _) = catalog_with_binary(tmp.path(), "2.0.0", b"new");
+        let source = FakeSidecarUpdateSource::new(catalog);
+        let mut state = SidecarRuntimeState::default();
+        apply_sidecar_updates(
+            &sidecar,
+            &SidecarUpdateSettings::default(),
+            source.as_ref(),
+            false,
+            &mut state,
+        )
+        .unwrap();
+
+        let mut seen = String::new();
+        running.read_to_string(&mut seen).unwrap();
+        assert_eq!(
+            seen, "old binary contents",
+            "the running file was rewritten in place"
+        );
+        assert_eq!(fs::read(&live).unwrap(), b"new");
+    }
+
+    #[test]
+    fn install_leaves_no_temp_files_and_sets_the_executable_bit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let (catalog, _) = catalog_with_binary(tmp.path(), "2.0.0", b"new");
+        let source = FakeSidecarUpdateSource::new(catalog);
+        let mut state = SidecarRuntimeState::default();
+        apply_sidecar_updates(
+            &sidecar,
+            &SidecarUpdateSettings::default(),
+            source.as_ref(),
+            false,
+            &mut state,
+        )
+        .unwrap();
+        let mut names: Vec<_> = fs::read_dir(&sidecar)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![".phlegethon", "toolchain-manifest.json", "yt-dlp"]
+        );
+        assert!(crate::toolchain_discovery::is_executable_file(
+            &sidecar.join("yt-dlp")
+        ));
+    }
+
+    #[test]
+    fn switching_asset_name_removes_the_previous_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        write_toolchain_manifest(&sidecar, &ToolchainManifest::stub("1.0.0")).unwrap();
+        fs::write(sidecar.join("yt-dlp"), b"zipimport").unwrap();
+        let (mut catalog, _) = catalog_with_binary(tmp.path(), "2.0.0", b"elf");
+        catalog
+            .toolchain_versions
+            .get_mut("2.0.0")
+            .unwrap()
+            .asset_name = Some("yt-dlp_linux".to_string());
+        let source = FakeSidecarUpdateSource::new(catalog);
+        apply_sidecar_updates(
+            &sidecar,
+            &SidecarUpdateSettings::default(),
+            source.as_ref(),
+            false,
+            &mut SidecarRuntimeState::default(),
+        )
+        .unwrap();
+        assert!(sidecar.join("yt-dlp_linux").is_file());
+        assert!(!sidecar.join("yt-dlp").exists());
+    }
+
+    #[test]
+    fn toolchain_manifest_with_a_path_in_binary_name_is_rejected() {
+        // M-37
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["..", "../outside", "/etc/passwd", "a/b"] {
+            fs::write(
+                toolchain_manifest_path(tmp.path()),
+                format!(r#"{{"version":"1","binary_name":{bad:?}}}"#),
+            )
+            .unwrap();
+            let err = load_toolchain_manifest(tmp.path()).unwrap_err();
+            assert!(err.contains("binary_name"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn corrupt_runtime_state_resets_to_defaults_and_keeps_the_evidence() {
+        // M-38
+        let tmp = tempfile::tempdir().unwrap();
+        let path = sidecar_state_path(tmp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{ truncated").unwrap();
+        assert_eq!(
+            load_sidecar_runtime_state(tmp.path()).unwrap(),
+            SidecarRuntimeState::default()
+        );
+        assert!(path.with_extension("json.corrupt").is_file());
+        // The next save writes a fresh, valid file.
+        save_sidecar_runtime_state(tmp.path(), &SidecarRuntimeState::default()).unwrap();
+        assert!(load_sidecar_runtime_state(tmp.path()).is_ok());
     }
 }

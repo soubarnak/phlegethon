@@ -71,7 +71,7 @@ pub use github_release_source::{
 pub use http::{ContentRange, FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
-pub use job_signals::JobSignals;
+pub use job_signals::{JobSignals, ProbeGuard};
 pub use media_extras::{
     apply_remux_postprocess, effective_options, ffmpeg_available, ytdlp_media_extras_args,
     MediaExtrasCapabilities, MediaExtrasOptions, PostprocessOutcome,
@@ -263,6 +263,8 @@ pub struct ProbePlan {
     cancel: Arc<AtomicBool>,
     /// Unique per planned probe, so concurrent probes of one URL stay distinct.
     id: u64,
+    /// Keeps the sidecar installer from swapping yt-dlp while this probe runs.
+    _probe_guard: Option<job_signals::ProbeGuard>,
 }
 
 impl ProbePlan {
@@ -287,6 +289,7 @@ impl ProbePlan {
             settings,
             cancel: Arc::new(AtomicBool::new(false)),
             id: 0,
+            _probe_guard: None,
         })
     }
 
@@ -514,6 +517,8 @@ pub struct EnrichPlan {
     extractor: Arc<dyn ExtractorToolchain>,
     cookies: CookieChannel,
     proxy: ProxySettings,
+    /// Keeps the sidecar installer from swapping yt-dlp while this lookup runs.
+    _probe_guard: job_signals::ProbeGuard,
 }
 
 impl EnrichPlan {
@@ -2153,8 +2158,10 @@ impl Core {
         guard.apply_sidecar_updates()
     }
 
+    /// Whether anything is using the sidecar yt-dlp: a body-writing job, a
+    /// running probe, or a quality lookup.
     fn transfers_active(&self) -> bool {
-        self.job_signals.active_transfer_count() > 0
+        self.job_signals.active_transfer_count() > 0 || self.job_signals.probes_in_flight() > 0
     }
 
     fn require_sidecar_root(&self) -> Result<&Path, String> {
@@ -2459,6 +2466,7 @@ impl Core {
         )?;
         self.next_probe_id += 1;
         plan.id = self.next_probe_id;
+        plan._probe_guard = Some(self.job_signals.begin_probe());
         self.probe_cancels
             .insert(plan.id, (plan.url().to_string(), plan.cancel_flag()));
         Ok(plan)
@@ -2595,6 +2603,7 @@ impl Core {
             extractor: Arc::clone(&self.extractor),
             cookies,
             proxy: self.proxy_settings.clone(),
+            _probe_guard: self.job_signals.begin_probe(),
         })
     }
 
