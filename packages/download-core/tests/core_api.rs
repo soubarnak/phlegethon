@@ -7907,7 +7907,14 @@ fn enqueue_force_direct_skips_probe_classification() {
     let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
     let outcome = core
-        .enqueue_with_options(url, None, EnqueueOptions { force_direct: true })
+        .enqueue_with_options(
+            url,
+            None,
+            EnqueueOptions {
+                force_direct: true,
+                ..Default::default()
+            },
+        )
         .unwrap();
     let EnqueueOutcome::EnqueueDirect { job_id, .. } = outcome else {
         panic!("force_direct must enqueue a plain job");
@@ -9151,4 +9158,164 @@ fn segmented_part_is_preallocated_on_disk() {
         "the .part must reserve its blocks, not stay sparse ({} blocks)",
         meta.blocks()
     );
+}
+// M-51: per-job cookie session (Chrome Companion hand-off)
+// ---------------------------------------------------------------------------
+
+fn companion_session(root: &std::path::Path) -> CookieChannel {
+    CookieChannel {
+        cookies_from_browser: None,
+        cookie_file: Some(root.join("companion-cookies.txt")),
+    }
+}
+
+#[test]
+fn cookie_session_applies_to_one_enqueue_and_leaves_global_channel_alone() {
+    let url = "https://www.youtube.com/watch?v=session-1";
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        url,
+        "Session Video",
+        "https://cdn.youtube.com/session-1.mp4",
+        vec![("720p", "720p")],
+    );
+    let spy = toolchain.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(root.clone()).unwrap();
+
+    let global = CookieChannel {
+        cookies_from_browser: Some("firefox".to_string()),
+        cookie_file: None,
+    };
+    core.set_cookie_channel(global.clone()).unwrap();
+    let session = companion_session(tmp.path());
+
+    let outcome = core
+        .enqueue_with_options(
+            url,
+            None,
+            EnqueueOptions {
+                cookie_session: Some(session.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(outcome, EnqueueOutcome::ProbeThenConfirm { .. }));
+    assert_eq!(core.cookie_channel(), global, "global channel is untouched");
+
+    core.probe(url).unwrap();
+    let selection = ProbeSelection {
+        url: url.to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(
+        core.job_cookie_session(&job_ids[0]).unwrap(),
+        Some(session.clone())
+    );
+    core.process_pending().unwrap();
+
+    let calls = spy.cookie_calls();
+    assert!(calls.len() >= 2, "probe and download both ran: {calls:?}");
+    for (called_url, cookies) in &calls {
+        assert_eq!(cookies, &session, "{called_url} must use the job session");
+    }
+    assert_eq!(core.cookie_channel(), global, "global channel is untouched");
+
+    // The session survives a restart with the job.
+    let (mut core2, _rx2) = make_core(Box::new(fake_http()));
+    core2.set_library_root(root).unwrap();
+    assert_eq!(
+        core2.job_cookie_session(&job_ids[0]).unwrap(),
+        Some(session)
+    );
+    assert_eq!(core2.cookie_channel(), global);
+}
+
+#[test]
+fn cookie_session_is_dropped_when_the_pending_probe_is_cleared() {
+    let url = "https://www.youtube.com/watch?v=session-2";
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        url,
+        "Session Video",
+        "https://cdn.youtube.com/session-2.mp4",
+        vec![("720p", "720p")],
+    );
+    let spy = toolchain.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.enqueue_with_options(
+        url,
+        None,
+        EnqueueOptions {
+            cookie_session: Some(companion_session(tmp.path())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    core.clear_pending_probe(url).unwrap();
+    core.probe(url).unwrap();
+
+    let calls = spy.cookie_calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].1.is_configured(),
+        "a cleared session must not leak into a later probe"
+    );
+}
+
+#[test]
+fn cookie_session_on_direct_enqueue_is_stored_on_the_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let session = companion_session(tmp.path());
+
+    let outcome = core
+        .enqueue_with_options(
+            "https://example.com/file.zip",
+            None,
+            EnqueueOptions {
+                cookie_session: Some(session.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let EnqueueOutcome::EnqueueDirect { job_id, .. } = outcome else {
+        panic!("expected a direct job");
+    };
+    assert_eq!(core.job_cookie_session(&job_id).unwrap(), Some(session));
+    assert!(!core.cookie_channel().is_configured());
+}
+
+#[test]
+fn cookie_session_with_relative_cookie_file_is_rejected_without_queueing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let err = core
+        .enqueue_with_options(
+            "https://example.com/file.zip",
+            None,
+            EnqueueOptions {
+                cookie_session: Some(CookieChannel {
+                    cookies_from_browser: None,
+                    cookie_file: Some(PathBuf::from("cookies.txt")),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(err.contains("absolute path"), "got: {err}");
+    assert!(core.list_job_snapshots().is_empty());
 }

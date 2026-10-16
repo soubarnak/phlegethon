@@ -141,6 +141,9 @@ pub struct PersistedJob {
     /// Per-segment progress of a Segmented Transfer; empty for single-connection jobs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<Segment>,
+    /// Cookie session applied to this job only (see `EnqueueOptions::cookie_session`).
+    #[serde(default)]
+    pub cookie_session: Option<CookieChannel>,
 }
 
 /// One byte range of a Segmented Transfer and how much of it is on disk.

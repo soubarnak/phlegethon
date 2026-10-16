@@ -266,6 +266,7 @@ fn enqueue_url(
         dest,
         EnqueueOptions {
             force_direct: force_direct.unwrap_or(false),
+            ..Default::default()
         },
     )?;
     Ok(outcome.into())
