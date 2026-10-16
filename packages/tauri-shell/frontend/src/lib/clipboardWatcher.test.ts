@@ -48,4 +48,44 @@ describe("clipboard watcher", () => {
     watcher.stop();
     expect(watcher.isRunning()).toBe(false);
   });
+
+  it("does not send text without a scheme to the splitter (M-61)", async () => {
+    const splitUrls = vi.fn(async (t: string) => [t]);
+    const detected = vi.fn();
+    const watcher = createClipboardWatcher({
+      readClipboardText: async () => "just some words, no links",
+      splitUrls,
+      onUrlsDetected: detected,
+    });
+    await watcher.tick();
+    expect(splitUrls).not.toHaveBeenCalled();
+    expect(detected).not.toHaveBeenCalled();
+  });
+  it("does not read the clipboard while the window is hidden or unfocused (M-61)", async () => {
+    let active = false;
+    const read = vi.fn(async () => "https://a");
+    const detected = vi.fn();
+    const watcher = createClipboardWatcher({
+      readClipboardText: read,
+      splitUrls: async (t) => [t],
+      onUrlsDetected: detected,
+      isActive: () => active,
+    });
+    await watcher.tick();
+    expect(read).not.toHaveBeenCalled();
+    active = true;
+    await watcher.tick();
+    expect(detected).toHaveBeenCalledWith(["https://a"]);
+  });
+  it("does not offer text the app copied itself (M-61)", async () => {
+    const detected = vi.fn();
+    const watcher = createClipboardWatcher({
+      readClipboardText: async () => "https://own.example/file",
+      splitUrls: async (t) => [t],
+      onUrlsDetected: detected,
+      isOwnWrite: (text) => text === "https://own.example/file",
+    });
+    await watcher.tick();
+    expect(detected).not.toHaveBeenCalled();
+  });
 });

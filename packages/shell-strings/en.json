@@ -93,6 +93,7 @@
   "url.noneFound": "No links found in that text.",
   "url.addedMany": "{count} links added to the queue.",
   "url.addFailed": "Could not add the link",
+  "url.addFailedSome": "{failed} of {total} links could not be added",
   "folder.cancel": "Cancel",
   "folder.timeout": "The folder chooser did not respond.",
   "folder.manual.open": "Type a path…",

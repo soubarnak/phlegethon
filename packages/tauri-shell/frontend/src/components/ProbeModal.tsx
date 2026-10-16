@@ -190,12 +190,14 @@ export function ProbeModal({
   }, [url, result, items, selected, qualityByItem, destination, selectionCount]);
 
   const close = useCallback(() => {
+    // Closing mid-confirm would drop the sheet while its jobs are still being created (M-63).
+    if (confirming) return;
     if (url) {
       if (phase.kind === "probing") void api.cancelProbe(url).catch(() => undefined);
       void api.clearPendingProbe(url).catch(() => undefined);
     }
     onClose();
-  }, [url, phase.kind, onClose]);
+  }, [url, phase.kind, confirming, onClose]);
 
   const toggleItem = (id: string, on: boolean) => {
     setSelected((prev) => {
@@ -479,7 +481,7 @@ export function ProbeModal({
         )}
       </ModalBody>
       <ModalFooter>
-        <Button kind="secondary" onClick={close}>
+        <Button kind="secondary" disabled={confirming} onClick={close}>
           {t("probe.cancel")}
         </Button>
         {result && (
