@@ -58,6 +58,10 @@ pub(crate) mod test_util {
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).unwrap();
+        // Tests run in parallel and fork. A child forked while the script was open for
+        // writing keeps that descriptor until it execs, and exec-ing the script before then
+        // fails with ETXTBSY ("Text file busy"). Give such children time to exec.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         path
     }
 }
