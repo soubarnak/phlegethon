@@ -1,13 +1,8 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import App from "./App";
 import { installFakeIpc, job, mediaItem, probeResult, quality, toolchainStatus } from "@/test/mockApi";
-
-vi.mock("@/tauri/events", () => ({
-  onCoreEvent: async () => () => undefined,
-  onCompanionIntent: async () => () => undefined,
-}));
 
 const extras = { write_subs: false, embed_subs: false, write_chapters: false, embed_chapters: false, write_thumbnail: false, embed_thumbnail: false, write_metadata: false, embed_metadata: false, remux: false };
 
@@ -152,4 +147,52 @@ describe("App", () => {
     await user.click(within(dialog).getByRole("button", { name: "Clear history" }));
     await waitFor(() => expect(ipc.callsTo("clear_history")).toEqual([{ outcome: null }]));
   });
+
+  describe("Chrome Companion hand-off", () => {
+    it("a direct hand-off shows and starts the job the shell already enqueued, without enqueueing it again", async () => {
+      const { handlers, setJobs } = baseHandlers();
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      await screen.findByTestId("queue-empty");
+      await settle();
+
+      // The shell enqueued the URL before it emitted the intent, and enqueue emits no core-event.
+      setJobs([job({ job_id: "c1", title: "linked.zip", url: "https://example.com/linked.zip" })]);
+      await ipc.emit("companion-intent", {
+        url: "https://example.com/linked.zip",
+        result: { type: "enqueue_direct", job_id: "c1", destination: "/lib/jobs/c1" },
+      });
+
+      expect(await screen.findByTestId("queue-row-c1")).toBeInTheDocument();
+      await waitFor(() => expect(ipc.callsTo("process_pending").length).toBeGreaterThan(0));
+      expect(ipc.callsTo("enqueue_url")).toHaveLength(0);
+      expect(ipc.callsTo("find_active_job_for_url")).toHaveLength(0);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("a page hand-off opens the probe sheet instead of enqueueing", async () => {
+      const url = "https://www.youtube.com/watch?v=abc";
+      const { handlers } = baseHandlers({
+        probe_url: () => probeResult([mediaItem({ id: "yt-a", title: "From the browser", qualities: [quality("720p")] })], { url }),
+      });
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      await screen.findByTestId("queue-empty");
+      await settle();
+
+      await ipc.emit("companion-intent", { url, result: { type: "probe_then_confirm", url } });
+
+      expect(await screen.findByTestId("probe-confirm")).toBeInTheDocument();
+      expect(ipc.callsTo("probe_url")).toEqual([expect.objectContaining({ url })]);
+      expect(ipc.callsTo("enqueue_url")).toHaveLength(0);
+      expect(ipc.callsTo("find_active_job_for_url")).toHaveLength(0);
+    });
+  });
 });
+
+/** Let the app's async `listen` subscriptions attach before a test emits an event. */
+async function settle() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}

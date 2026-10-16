@@ -1,7 +1,8 @@
 /**
  * Helpers to stand up a fake Tauri IPC for component tests.
- * `mockIPC` intercepts `invoke`; `mockWindows` lets event listeners attach.
+ * `mockIPC` intercepts `invoke` and, with `shouldMockEvents`, routes `listen`/`emit` in-process.
  */
+import { emit } from "@tauri-apps/api/event";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { vi } from "vitest";
 import type { JobSnapshot, MediaItem, ProbeResult, Quality, ToolchainStatus } from "@/tauri/types";
@@ -15,6 +16,8 @@ export interface FakeIpc {
   on(cmd: string, handler: CommandHandler): void;
   /** Calls to one command. */
   callsTo(cmd: string): Array<Record<string, unknown>>;
+  /** Deliver a Tauri event (for example `core-event`, `companion-intent`) to the app's listeners. */
+  emit(event: string, payload: unknown): Promise<void>;
 }
 
 export function installFakeIpc(initial: Record<string, CommandHandler> = {}): FakeIpc {
@@ -24,16 +27,12 @@ export function installFakeIpc(initial: Record<string, CommandHandler> = {}): Fa
   mockIPC(async (cmd, payload) => {
     const args = (payload ?? {}) as Record<string, unknown>;
     calls.push({ cmd, args });
-    // Tauri event plumbing used by `listen` goes through plugin:event|listen.
-    if (cmd.startsWith("plugin:event|")) {
-      return 1;
-    }
     const handler = handlers.get(cmd);
     if (!handler) {
       throw new Error(`fake ipc: no handler for command '${cmd}'`);
     }
     return handler(args);
-  });
+  }, { shouldMockEvents: true });
   return {
     calls,
     on(cmd, handler) {
@@ -41,6 +40,9 @@ export function installFakeIpc(initial: Record<string, CommandHandler> = {}): Fa
     },
     callsTo(cmd) {
       return calls.filter((c) => c.cmd === cmd).map((c) => c.args);
+    },
+    emit(event, payload) {
+      return emit(event, payload);
     },
   };
 }

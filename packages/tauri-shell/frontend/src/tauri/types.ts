@@ -230,9 +230,15 @@ export type CoreEvent =
   | { type: "JobDiscarded"; job_id: string }
   | { type: "JobMirrorFailover"; job_id: string; previous_url: string; next_url: string; error: string };
 
+/** What the shell did with a Chrome Companion hand-off (`CompanionResult` in companion-protocol). */
+export type CompanionResult =
+  | { type: "enqueue_direct"; job_id: string; destination: string }
+  | { type: "probe_then_confirm"; url: string };
+
+/** Payload of the `companion-intent` event. The shell has already enqueued a direct URL. */
 export interface CompanionIntent {
   url: string;
-  source?: string;
+  result: CompanionResult;
 }
 
 /** Which mechanism the Rust side used for a folder choice. `manual` = ask for a typed path. */
