@@ -636,6 +636,10 @@ impl Job {
         &self.discard_requested
     }
 
+    pub fn clear_discard_requested(&self) {
+        self.discard_requested.store(false, Ordering::Release);
+    }
+
     pub fn is_discard_requested(&self) -> bool {
         self.discard_requested.load(Ordering::Acquire)
     }

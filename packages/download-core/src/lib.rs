@@ -1367,14 +1367,15 @@ impl Core {
             return Ok(());
         }
         self.jobs[job_index].set_last_error(Some(error.clone()));
+        self.record_media_identity(job_id, job_index);
+        let persisted = self.persist_queue_now();
         self.event_tx
             .send(CoreEvent::JobFailed {
                 job_id: job_id.to_string(),
                 error,
             })
             .map_err(|_| "event channel closed".to_string())?;
-        self.record_media_identity(job_id, job_index)?;
-        self.persist_queue_now()
+        persisted
     }
 
     fn guard_disk_space_for_transfer(
@@ -1472,9 +1473,7 @@ impl Core {
                 job.set_cookie_session(cookie_session);
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
-                self.register_job_signals(&job);
-                self.jobs.push(job);
-                self.persist_queue_now()?;
+                self.push_jobs_persisted(vec![job])?;
                 Ok(EnqueueOutcome::EnqueueDirect {
                     job_id,
                     destination: dest,
@@ -1492,6 +1491,24 @@ impl Core {
                 Ok(EnqueueOutcome::ProbeThenConfirm { url: url_str })
             }
         }
+    }
+
+    /// Append new jobs to the queue and persist, all or nothing: when the save
+    /// fails the jobs are taken out again, so memory never holds jobs that
+    /// `jobs.json` lacks (a retry would otherwise queue duplicates).
+    fn push_jobs_persisted(&mut self, jobs: Vec<job::Job>) -> Result<(), String> {
+        let first_new = self.jobs.len();
+        for job in jobs {
+            self.register_job_signals(&job);
+            self.jobs.push(job);
+        }
+        if let Err(err) = self.persist_queue_now() {
+            for job in self.jobs.drain(first_new..) {
+                self.job_signals.unregister(job.id());
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Find an active or queued job matching a normalized URL.
@@ -1643,22 +1660,45 @@ impl Core {
             .position(|j| j.id() == job_id)
             .ok_or_else(|| format!("job {job_id} not found"))?;
 
-        self.jobs.remove(pos);
-        self.job_signals.unregister(job_id);
-
+        // Delete first. When the delete fails the job stays in the queue (and
+        // on disk), so the user can retry the Discard; removing the row first
+        // would bring the job back from `jobs.json` after a restart.
         if !completed && destination.exists() {
-            std::fs::remove_dir_all(destination)
-                .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))?;
+            if let Err(err) = self.delete_job_destination(destination) {
+                self.jobs[pos].clear_discard_requested();
+                self.jobs[pos].clear_pause_requested();
+                return Err(err);
+            }
         }
 
+        self.jobs.remove(pos);
+        self.job_signals.unregister(job_id);
+        let persisted = self.persist_queue_now();
         self.event_tx
             .send(CoreEvent::JobDiscarded {
                 job_id: job_id.to_string(),
             })
             .map_err(|_| "event channel closed".to_string())?;
+        persisted
+    }
 
-        self.persist_queue_now()?;
-        Ok(())
+    /// Delete a job's whole Job Destination (Discard of an unfinished job).
+    ///
+    /// Refuses a folder that is, or contains, the Library Root: a Job
+    /// Destination is job-owned and never a shared folder.
+    fn delete_job_destination(&self, destination: &Path) -> Result<(), String> {
+        if !destination.is_absolute()
+            || self
+                .library_root
+                .as_deref()
+                .is_some_and(|root| root.starts_with(destination))
+        {
+            return Err(format!(
+                "refusing to delete {destination:?}: not a job-owned Job Destination"
+            ));
+        }
+        std::fs::remove_dir_all(destination)
+            .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))
     }
 
     /// After an in-flight body read stops, either Discard or Pause.
@@ -2622,7 +2662,7 @@ impl Core {
         let items_map: HashMap<&str, &MediaItem> =
             probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
 
-        let mut job_ids = Vec::new();
+        let mut new_jobs: Vec<job::Job> = Vec::new();
         let media_extras = self.resolve_media_extras(selection.media_extras);
 
         for sel in &selection.items {
@@ -2684,14 +2724,16 @@ impl Core {
                 job.set_total_bytes(Some(size));
             }
 
-            job_ids.push(job.id().to_string());
-            self.register_job_signals(&job);
-            self.jobs.push(job);
+            new_jobs.push(job);
         }
 
+        // The whole selection is valid; queue it in one step. A failed save
+        // keeps the pending probe so the user can confirm again without
+        // duplicating anything.
+        let job_ids: Vec<String> = new_jobs.iter().map(|j| j.id().to_string()).collect();
+        self.push_jobs_persisted(new_jobs)?;
         self.pending_probes.remove(&url_key);
         self.probe_cookie_sessions.remove(&url_key);
-        self.persist_queue_now()?;
         Ok(job_ids)
     }
 
@@ -3233,7 +3275,30 @@ impl Core {
 
     /// Apply the result of an unlocked transfer.  Returns `true` when the
     /// mirror failover loop should retry.
+    ///
+    /// A Discard that arrived while the transfer was finishing is honoured
+    /// here: a transfer that ends Completed (or Failed) before it sees the
+    /// stop signal would otherwise leave the row behind after `discard_job`
+    /// returned `Ok`.
     fn finish_unlocked_transfer(
+        &mut self,
+        outcome: UnlockedTransferOutcome,
+    ) -> Result<bool, String> {
+        let job_id = outcome.job_id().to_string();
+        let retry = self.apply_unlocked_transfer(outcome)?;
+        let Some(index) = self.job_index(&job_id) else {
+            return Ok(retry);
+        };
+        if !self.jobs[index].is_discard_requested() {
+            return Ok(retry);
+        }
+        let completed = self.jobs[index].is_completed();
+        let destination = self.jobs[index].destination().to_path_buf();
+        self.finalize_discard(&job_id, completed, &destination)?;
+        Ok(false)
+    }
+
+    fn apply_unlocked_transfer(
         &mut self,
         outcome: UnlockedTransferOutcome,
     ) -> Result<bool, String> {
@@ -3546,6 +3611,7 @@ impl Core {
             .ok_or_else(|| format!("job {job_id} not found"))?;
         if self.jobs[job_index].advance_mirror() {
             let next_url = self.jobs[job_index].url().to_string();
+            let persisted = self.persist_queue_now();
             self.event_tx
                 .send(CoreEvent::JobMirrorFailover {
                     job_id: job_id.to_string(),
@@ -3554,7 +3620,7 @@ impl Core {
                     error: err,
                 })
                 .map_err(|_| "event channel closed".to_string())?;
-            self.persist_queue_now()?;
+            persisted?;
             Ok(true)
         } else {
             self.finalize_failed_job(job_id, job_index, err)?;
@@ -3676,6 +3742,13 @@ impl Core {
             }
         }
 
+        self.jobs[job_index].mark_completed();
+        if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
+            self.jobs[job_index].set_filename(name);
+        }
+        self.record_media_identity(job_id, job_index);
+        // Persist before announcing, so a restart never contradicts the event.
+        let persisted = self.persist_queue_now();
         self.event_tx
             .send(CoreEvent::JobCompleted {
                 job_id: job_id.to_string(),
@@ -3683,13 +3756,7 @@ impl Core {
                 path: file_path.to_path_buf(),
             })
             .map_err(|_| "event channel closed".to_string())?;
-
-        self.jobs[job_index].mark_completed();
-        if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-            self.jobs[job_index].set_filename(name);
-        }
-        self.record_media_identity(job_id, job_index)?;
-        self.persist_queue_now()
+        persisted
     }
 
     fn mark_archived_probe_items(&self, items: &mut [MediaItem]) {
@@ -3698,9 +3765,13 @@ impl Core {
         }
     }
 
-    fn record_media_identity(&mut self, job_id: &str, job_index: usize) -> Result<(), String> {
+    /// Record a finished media job in the Download Archive.
+    ///
+    /// Best effort: the archive is History, not queue state, so a failed save
+    /// is logged and never blocks the job's own terminal state.
+    fn record_media_identity(&mut self, job_id: &str, job_index: usize) {
         let Some(media_id) = self.jobs[job_index].media_id().map(str::to_string) else {
-            return Ok(());
+            return;
         };
         let is_completed = self.jobs[job_index].is_completed();
         let title = self.jobs[job_index]
@@ -3727,9 +3798,10 @@ impl Core {
         };
         self.download_archive.record(entry);
         if let Some(root) = &self.library_root {
-            self.download_archive.save(root)?;
+            if let Err(err) = self.download_archive.save(root) {
+                eprintln!("phlegethon: could not save the Download Archive: {err}");
+            }
         }
-        Ok(())
     }
 
     // -----------------------------------------------------------------------
