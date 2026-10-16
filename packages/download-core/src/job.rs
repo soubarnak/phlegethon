@@ -1,10 +1,11 @@
 //! Job struct — state machine per download job.
 
+use crate::bandwidth::SharedTokenBucket;
 use crate::extractor::ExtractionTier;
 use crate::integrity::ExpectedHash;
 use crate::media_extras::MediaExtrasOptions;
 use crate::mirror_set::MirrorSet;
-use crate::storage::{PersistedJob, PersistedJobState};
+use crate::storage::{PersistedJob, PersistedJobState, Segment};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -125,6 +126,8 @@ pub struct Job {
     last_error: Option<String>,
     /// Page URL sent as `Referer` when fetching this job's media.
     referer: Option<String>,
+    /// Runtime token bucket for `bandwidth_cap` (not persisted).
+    bandwidth_bucket: Option<SharedTokenBucket>,
     /// `ETag` of the object seen on the first reply; sent as `If-Range` on resume.
     etag: Option<String>,
     /// `Last-Modified` of the object seen on the first reply (`If-Range` fallback).
@@ -132,6 +135,10 @@ pub struct Job {
     /// The server answered a Range request with the whole body, so this job
     /// must use a single plain connection.
     range_ignored: bool,
+    /// Segment table of a Segmented Transfer (empty for single-connection jobs).
+    /// While a transfer runs, `segment_counters` hold the live `written` values.
+    segments: Vec<Segment>,
+    segment_counters: Vec<Arc<AtomicU64>>,
 }
 
 impl Job {
@@ -205,9 +212,12 @@ impl Job {
             extraction_tier: None,
             last_error: None,
             referer: None,
+            bandwidth_bucket: None,
             etag: None,
             last_modified: None,
             range_ignored: false,
+            segments: Vec::new(),
+            segment_counters: Vec::new(),
         }
     }
 
@@ -222,7 +232,7 @@ impl Job {
             bytes_received: persisted.bytes_received,
             live_downloaded: Arc::new(AtomicU64::new(persisted.bytes_received)),
             total_bytes: None,
-            bandwidth_cap: persisted.bandwidth_cap,
+            bandwidth_cap: persisted.bandwidth_cap.filter(|&cap| cap > 0),
             pause_requested: Arc::new(AtomicBool::new(false)),
             discard_requested: Arc::new(AtomicBool::new(false)),
             transfer_active: Arc::new(AtomicBool::new(false)),
@@ -239,9 +249,12 @@ impl Job {
             extraction_tier: persisted.extraction_tier,
             last_error: persisted.last_error,
             referer: persisted.referer,
+            bandwidth_bucket: None,
             etag: persisted.etag,
             last_modified: persisted.last_modified,
             range_ignored: persisted.range_ignored,
+            segments: persisted.segments,
+            segment_counters: Vec::new(),
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -268,7 +281,11 @@ impl Job {
             mirror_index: self.mirrors.current_index(),
             state: self.persisted_state(),
             destination: self.destination.clone(),
-            bytes_received: self.bytes_received,
+            bytes_received: if self.segments.is_empty() {
+                self.bytes_received
+            } else {
+                self.segments_written()
+            },
             bandwidth_cap: self.bandwidth_cap,
             source: self.source.clone(),
             extractor_format: self.extractor_format.clone(),
@@ -286,7 +303,52 @@ impl Job {
             etag: self.etag.clone(),
             last_modified: self.last_modified.clone(),
             range_ignored: self.range_ignored,
+            segments: self.segment_snapshot(),
         }
+    }
+
+    /// The segment table, with live counters applied while a transfer runs.
+    pub fn segment_snapshot(&self) -> Vec<Segment> {
+        let mut table = self.segments.clone();
+        for (seg, counter) in table.iter_mut().zip(&self.segment_counters) {
+            seg.written = counter.load(Ordering::Acquire).min(seg.len());
+        }
+        table
+    }
+
+    /// True while a transfer is advancing this job's segment counters.
+    pub fn has_live_segments(&self) -> bool {
+        !self.segment_counters.is_empty()
+    }
+
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+
+    /// Sum of the bytes written across all segments (live counters included).
+    pub fn segments_written(&self) -> u64 {
+        self.segment_snapshot().iter().map(|s| s.written).sum()
+    }
+
+    /// Install a segment table and the live counters a transfer will advance.
+    pub fn begin_segments(&mut self, table: Vec<Segment>) -> Vec<Arc<AtomicU64>> {
+        self.segment_counters = table
+            .iter()
+            .map(|s| Arc::new(AtomicU64::new(s.written)))
+            .collect();
+        self.segments = table;
+        self.segment_counters.clone()
+    }
+
+    /// Fold the live counters into the table and stop tracking them.
+    pub fn freeze_segments(&mut self) {
+        self.segments = self.segment_snapshot();
+        self.segment_counters.clear();
+    }
+
+    pub fn clear_segments(&mut self) {
+        self.segments.clear();
+        self.segment_counters.clear();
     }
 
     /// Validator for `If-Range` on resume: the `ETag`, else `Last-Modified`.
@@ -521,10 +583,26 @@ impl Job {
 
     pub fn set_bandwidth_cap(&mut self, cap: u64) {
         self.bandwidth_cap = Some(cap);
+        self.bandwidth_bucket = None;
     }
 
     pub fn remove_bandwidth_cap(&mut self) {
         self.bandwidth_cap = None;
+        self.bandwidth_bucket = None;
+    }
+
+    /// The job's token bucket, created on first use and kept until the cap
+    /// changes, so re-planning the job does not refill a one-second burst.
+    pub fn bandwidth_bucket(
+        &mut self,
+        clock: &Arc<dyn crate::bandwidth::Clock>,
+    ) -> Option<SharedTokenBucket> {
+        let rate = self.bandwidth_cap?;
+        Some(
+            self.bandwidth_bucket
+                .get_or_insert_with(|| crate::bandwidth::shared_token_bucket(rate, clock.clone()))
+                .clone(),
+        )
     }
 
     pub fn pause_requested(&self) -> &Arc<AtomicBool> {
@@ -597,6 +675,7 @@ impl Job {
                 self.clear_pause_requested();
                 self.state = JobState::Pending;
                 self.bytes_received = 0;
+                self.clear_segments();
                 self.live_downloaded.store(0, Ordering::Release);
                 self.total_bytes = None;
                 self.mirrors.reset();
@@ -607,5 +686,34 @@ impl Job {
                 self.id, self.state
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bandwidth::{Clock, ManualClock};
+
+    #[test]
+    fn bandwidth_bucket_is_kept_until_the_cap_changes() {
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::new());
+        let mut job = Job::new(
+            "https://example.com/a.bin".into(),
+            PathBuf::from("/tmp/phlegethon-test"),
+        );
+        assert!(job.bandwidth_bucket(&clock).is_none());
+
+        job.set_bandwidth_cap(100);
+        let first = job.bandwidth_bucket(&clock).unwrap();
+        let again = job.bandwidth_bucket(&clock).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "re-planning must reuse the bucket"
+        );
+
+        job.set_bandwidth_cap(200);
+        let rebuilt = job.bandwidth_bucket(&clock).unwrap();
+        assert!(!Arc::ptr_eq(&first, &rebuilt));
+        assert_eq!(rebuilt.lock().unwrap().rate(), 200);
     }
 }

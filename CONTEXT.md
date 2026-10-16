@@ -69,8 +69,8 @@ User action that removes a job from the queue; for in-flight, Paused, or Failed 
 _Avoid_: Cancel (as the product name for this action), Pause, deleting Completed outputs, leaving orphaned partials after removing an unfinished job
 
 **Resumable Transfer**:
-A download that can continue from the last successful byte after interruption (including app exit or crash), with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded. On relaunch, jobs that were Downloading auto-resume; user-Paused stay Paused; Failed stay Failed until Retry.
-_Avoid_: restart-from-zero on every failure, silent delete of partials, requiring manual Resume after every crash for in-flight jobs
+A download that can continue from the last successful byte after interruption (including app exit or crash), with automatic retry/backoff and explicit Paused / Failed / Retry states until complete or Discarded. On relaunch, jobs that were Downloading auto-resume; user-Paused stay Paused; Failed stay Failed until Retry. A single-connection job resumes at the `.part` length. A Segmented Transfer resumes from its persisted segment table (see ADR 0004): Pause, failure and crash keep every byte already written, and only the unfinished part of each segment is requested again.
+_Avoid_: restart-from-zero on every failure, silent delete of partials, requiring manual Resume after every crash for in-flight jobs, treating a segmented `.part` length as progress
 
 **Segmented Transfer**:
 A general HTTP(S) download that uses multiple concurrent Range connections when the server allows, falling back to a single connection otherwise.
