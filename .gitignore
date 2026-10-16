@@ -7,3 +7,4 @@ packages/tauri-shell/frontend/dist/
 dist/
 .void-packages/
 out/
+graphify-out/

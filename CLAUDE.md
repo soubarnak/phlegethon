@@ -1,0 +1,45 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Phlegethon is a download manager for Void Linux: a Rust workspace with a Tauri 2 shell, a React/Carbon frontend, yt-dlp extractor plugins, and a Chrome companion extension. Read `AGENTS.md` first (issue tracker is GitHub Issues via `gh`; triage labels; domain docs). Read `CONTEXT.md` (domain glossary with `_Avoid_` synonyms) and `docs/adr/` before changing behavior, and use the glossary terms in code and issues.
+
+## Commands
+
+Top-level `Makefile` drives everything:
+
+- `make` / `make build`: runs `scripts/build-linux.sh` (`npm ci`, `npm run build`, then `cargo build --release --locked -p phlegethon-tauri -p phlegethon-nmh --features phlegethon-tauri/custom-protocol`). `SKIP_FRONTEND=1` reuses an existing `dist`.
+- `make test`: Rust (`cargo test --workspace --exclude phlegethon-tauri`), the two Python plugin tests, and the frontend (`npm run typecheck && npm test`).
+- `make test-shell`: `cargo test -p phlegethon-tauri`. Needs webkit2gtk 4.1, gtk3, and libsoup3 dev packages, which is why the shell crate is excluded from `make test` and CI.
+- `make dist`, `make xbps`, `make install PREFIX=/usr`, `make probe-check` (live URLs, needs network), `make e2e-ui` (WebDriver under xvfb), `make nmh-install EXT=<id>`.
+
+Frontend (`packages/tauri-shell/frontend`): `npm run dev` (Vite, strict port 1420, HMR on 1421), `npm run typecheck`, `npm test` (`vitest run`).
+
+Single tests:
+
+- Rust: `cargo test -p download-core --test core_api <name>` or `cargo test -p download-core <name>`.
+- Frontend: `npx vitest run src/lib/errors.test.ts` or `npx vitest run -t "<name>"`.
+- Python plugin tests are plain `unittest` scripts: `python3 packages/extractor-plugins/tests/test_parse_fixtures.py`. They use offline fixtures in `packages/extractor-plugins/fixtures/`; CI has no live network.
+
+## Architecture
+
+Per ADR 0001, the Tauri shell is the only Platform Shell and Void xbps is the only release target. Tauri's bundler is disabled.
+
+- **`packages/download-core`**: plain Rust library (`rlib`, serde types) holding the queue and all download logic. `lib.rs` is the public API and queue. Transfer lives in `http.rs`/`transfer.rs` (resume, segmented). `ytdlp_extractor.rs` wraps yt-dlp. `plugin_sidecar.rs` and `sidecar_updates.rs` install and update extractor plugins. `download_archive.rs`, `filename_template.rs`, `quality_policy.rs`, `mirror_set.rs`, and `integrity.rs` implement the glossary concepts. No database: state is in memory plus files.
+- **`packages/tauri-shell/src-tauri`** (crate `phlegethon-tauri`, lib `app_lib`): IPC commands and state in `lib.rs`; `companion.rs` listens for URLs from the browser companion and enqueues them. Without the `custom-protocol` feature the window loads `http://localhost:1420` instead of the embedded frontend.
+- **`packages/tauri-shell/frontend`**: React 19 + `@carbon/react` (ADR 0002). All IPC goes through `src/tauri/api.ts`; components never call `invoke` directly. Core events arrive as `core-event`. Pure logic and its tests live in `src/lib/`; hooks in `src/state/`. CSP is strict (`default-src 'self'`, `connect-src` only `ipc:`), so fonts and assets must be bundled, not loaded from a CDN.
+- **`packages/shell-strings/en.json`**: single user-facing string table. A test fails when a `t("key")` in source is missing from it.
+- **`packages/shell-support`**: folder picker (portal/zenity/kdialog), notifications, native-messaging install. No Tauri dependency.
+- **Browser companion path**: `packages/chrome-companion` (MV3) talks over stdio to `phlegethon-nmh` (`packages/native-messaging-host`), which forwards over a named local socket (`packages/companion-protocol/src/ipc.rs`) to the shell's `companion.rs`. The native-messaging manifest template has `REPLACE_WITH_...` placeholders filled by `scripts/install-nmh-linux.sh --extension-id <id>`.
+- **`packages/extractor-plugins`**: yt-dlp plugins installed as an app-managed sidecar. `plugins-manifest.json` version and extractor keys must match `packages/download-core/src/plugin_sidecar.rs`.
+- `prototypes/` is static mockup HTML/JS, not part of the build. Do not edit it as product code.
+
+## Gotchas
+
+- **Version lives in six places**: `Cargo.toml` `[workspace.package]`, `packages/tauri-shell/src-tauri/Cargo.toml`, `tauri.conf.json`, `frontend/package.json`, `packages/chrome-companion/manifest.json`, and `version=` in `packaging/void/srcpkgs/phlegethon/template`. The release workflow only checks the tag against the template and `Cargo.toml`; `scripts/make-dist-tarball.sh` fails on a template/Cargo mismatch. The README hard-codes `0.1.0` too.
+- **Frontend lockfile**: `package-lock.json` must carry the same `license` as `package.json` (MIT). Use `npm ci`, not `npm install`.
+- **`Cargo.lock` is committed** and builds use `--locked`.
+- **xbps template**: `checksum=` stays all zeros until `make dist` / `xbps-build.sh --update-template` writes the real sha256. The WebKit build dependency is `libwebkit2gtk41-devel`.
+- **Release**: `.github/workflows/release.yml` publishes on a `v*` tag or a manual run with a `version` input (which tags the built commit). A manual run with an empty `version` builds without publishing.
+- **Discard semantics** (see `CONTEXT.md`): a job must never treat a shared user folder as its own Job Destination. `finalize_discard` in `packages/download-core/src/lib.rs` calls `remove_dir_all` on the destination of non-Completed jobs, so changes to destination handling must preserve that invariant. `CODE_REVIEW.md` is partly stale; verify its findings against current code.
+- `packaging/void/build-in-container.sh` and `release.yml` invoke `docker`; use `podman` locally.
