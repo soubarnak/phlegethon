@@ -54,7 +54,7 @@ fn install_in_tree_launch_site_plugins_into_sidecar() {
         .is_file());
 
     let loaded = load_manifest(&sidecar).unwrap();
-    assert_eq!(loaded.version, "0.2.0");
+    assert_eq!(loaded.version, "0.2.1");
     assert!(loaded.extractors.contains(&"LuxureTV".to_string()));
     assert!(loaded.extractors.contains(&"XxxbpTV".to_string()));
 }

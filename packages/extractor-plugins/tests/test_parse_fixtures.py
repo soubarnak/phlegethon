@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -15,7 +16,7 @@ PARSE_PATH = (
     / "phlegethon-launch-sites"
     / "yt_dlp_plugins"
     / "extractor"
-    / "_parse.py"
+    / "_phlegethon_parse.py"
 )
 FIXTURES = ROOT / "fixtures"
 
@@ -242,6 +243,114 @@ class LuxureListingTests(unittest.TestCase):
         nxt = parse.next_page_link(self.HTML, "https://en.luxuretv.com/videos/")
         self.assertEqual(nxt, "https://en.luxuretv.com/videos/page2.html")
         self.assertIsNone(parse.next_page_link("<html></html>", "https://en.luxuretv.com/"))
+
+
+class LuxureFallbackTests(unittest.TestCase):
+    """M-45: the generic scraper must never offer a related clip as the video."""
+
+    URL = "https://en.luxuretv.com/videos/sample-clip-100200.html"
+
+    def test_fallback_accepts_only_urls_with_the_video_id(self):
+        html = (FIXTURES / "luxuretv_layout_changed.html").read_text(encoding="utf-8")
+        info = parse.luxure_info(video_id="100200", page_url=self.URL, webpage=html)
+        self.assertEqual(
+            [f["url"] for f in info["formats"]],
+            ["https://en.luxuretv.com/cf-stream/100200/a/b/c/d/e/abcde0002.mp4?md5=TOKEN&expires=1790000000"],
+        )
+        self.assertTrue(all(f["impersonate"] for f in info["formats"]))
+
+    def test_fallback_fails_when_only_related_clips_remain(self):
+        html = (FIXTURES / "luxuretv_related_only.html").read_text(encoding="utf-8")
+        with self.assertRaises(ValueError):
+            parse.luxure_info(video_id="100200", page_url=self.URL, webpage=html)
+
+    def test_video_id_must_match_as_a_whole_number(self):
+        self.assertTrue(parse.url_has_video_id("https://x/100200/a.mp4", "100200"))
+        self.assertTrue(parse.url_has_video_id("https://x/a_100200.mp4", "100200"))
+        self.assertFalse(parse.url_has_video_id("https://x/1002001/a.mp4", "100200"))
+        self.assertFalse(parse.url_has_video_id("https://x/2100200/a.mp4", "100200"))
+
+    def test_listing_links_accept_any_subdomain(self):
+        html = '<a href="https://fr.luxuretv.com/videos/premier-300.html">x</a>'
+        links = parse.luxure_listing_links(html, "https://fr.luxuretv.com/videos/")
+        self.assertEqual([l["id"] for l in links], ["300"])
+
+
+class XxxbpSubdomainAndPayloadTests(unittest.TestCase):
+    def test_listing_cards_accept_any_subdomain(self):
+        html = '<a href="https://en.xxxbp.tv/video/42/some-clip" title="Some Clip">x</a>'
+        entries = parse.xxxbp_listing_entries(html)
+        self.assertEqual([e["id"] for e in entries], ["42"])
+        self.assertEqual(entries[0]["url"], "https://xxxbp.tv/video/42/some-clip")
+
+    def test_non_object_payload_is_a_value_error(self):
+        for payload in ([], [{"src": "https://x/a.mp4"}], "text", 3, None):
+            with self.assertRaises(ValueError, msg=repr(payload)):
+                parse.xxxbp_api_formats(payload, "https://xxxbp.tv/embed/1")
+
+    def test_malformed_members_are_skipped(self):
+        formats, master = parse.xxxbp_api_formats(
+            {"mp4": [{"src": 5}, {"src": None}, "x", {"src": "https://x/a_720.mp4", "title": "720p"}],
+             "master": 7},
+            "https://xxxbp.tv/embed/1")
+        self.assertEqual([f["height"] for f in formats], [720])
+        self.assertIsNone(master)
+        formats, master = parse.xxxbp_api_formats({"mp4": "oops"}, "https://xxxbp.tv/embed/1")
+        self.assertEqual(formats, [])
+
+
+class FormatDetailTests(unittest.TestCase):
+    def test_thumb_filter_keeps_media_paths_that_start_with_thumb(self):
+        self.assertFalse(parse.looks_like_preview("https://cdn.example/thumbnailer-cdn/a/video.mp4"))
+        self.assertFalse(parse.looks_like_preview("https://cdn.example/thumbs-and-more/video.mp4"))
+        self.assertTrue(parse.looks_like_preview("https://cdn.example/thumbs/a.mp4"))
+        self.assertTrue(parse.looks_like_preview("https://cdn.example/a/thumb/a.mp4"))
+
+    def test_titles_are_html_unescaped(self):
+        html = '<title>Tom &amp; Jerry &#39;s &quot;Clip&quot;</title>'
+        self.assertEqual(parse.extract_title(html), 'Tom & Jerry \'s "Clip"')
+        og = '<meta property="og:title" content="A &amp; B">'
+        self.assertEqual(parse.extract_title(og), "A & B")
+        card = '<a href="/video/7/a-b" title="A &amp; B">x</a>'
+        self.assertEqual(parse.xxxbp_listing_entries(card)[0]["title"], "A & B")
+
+    def test_formats_do_not_guess_resolution_or_width(self):
+        fmt = parse.extract_formats('<source src="https://cdn.example/clip_1080.mp4">', "https://x/")[0]
+        self.assertEqual(fmt["height"], 1080)
+        self.assertNotIn("resolution", fmt)
+        api, _ = parse.xxxbp_api_formats(
+            {"mp4": [{"src": "https://cdn.example/v_720.mp4", "title": "720p"}]}, "https://xxxbp.tv/")
+        self.assertNotIn("width", api[0])
+
+    def test_ext_follows_the_url(self):
+        webm = parse.extract_formats('<source src="https://cdn.example/clip_480.webm">', "https://x/")[0]
+        mp4 = parse.extract_formats('<source src="https://cdn.example/clip_480.mp4">', "https://x/")[0]
+        hls = parse.extract_formats('<source src="https://cdn.example/clip_480.m3u8">', "https://x/")[0]
+        self.assertEqual((webm["ext"], mp4["ext"], hls["ext"]), ("webm", "mp4", "mp4"))
+
+
+class YtDlpVersionTests(unittest.TestCase):
+    def test_minimum_version_gate(self):
+        floor = parse.MIN_YT_DLP_VERSION
+        self.assertIsNone(parse.yt_dlp_version_problem(floor))
+        self.assertIsNone(parse.yt_dlp_version_problem("2026.08.19"))
+        self.assertIsNone(parse.yt_dlp_version_problem(floor + ".232754"))
+        self.assertIn(floor, parse.yt_dlp_version_problem("2025.06.30"))
+        self.assertIsNotNone(parse.yt_dlp_version_problem("2024.12.23"))
+        self.assertIsNotNone(parse.yt_dlp_version_problem("unknown"))
+        self.assertIsNotNone(parse.yt_dlp_version_problem(None))
+
+    def test_package_metadata_agrees_with_the_code_and_manifest(self):
+        pyproject = (ROOT / "phlegethon-launch-sites" / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn("[project]", pyproject)
+        requirement = re.search(r'dependencies\s*=\s*\[\s*"yt-dlp>=([0-9.]+)"\s*\]', pyproject)
+        self.assertIsNotNone(requirement, "pyproject.toml must require yt-dlp>=<version>")
+        self.assertEqual(requirement.group(1), parse.MIN_YT_DLP_VERSION)
+        version = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+        manifest = json.loads((ROOT / "plugins-manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(version.group(1), manifest["version"])
+        self.assertFalse((ROOT / "phlegethon-launch-sites" / "setup.cfg").exists(),
+                         "setup.cfg would drift from pyproject.toml")
 
 
 if __name__ == "__main__":

@@ -1,17 +1,43 @@
 # ⚠ Don't use relative imports
 from yt_dlp.extractor.common import InfoExtractor
 from yt_dlp.utils import ExtractorError, unified_strdate
+from yt_dlp.version import __version__ as YT_DLP_VERSION
 
-from yt_dlp_plugins.extractor._parse import (
+from yt_dlp_plugins.extractor._phlegethon_parse import (
     CLOUDFLARE_HELP,
     is_cloudflare_challenge,
     luxure_info,
     luxure_listing_links,
     next_page_link,
+    yt_dlp_version_problem,
 )
 
+# 403 and 503 carry the Cloudflare challenge page, which is detected below.
+_EXPECTED_STATUS = (403, 429, 503)
 
-class LuxureTVIE(InfoExtractor):
+
+class _LuxureTVBase(InfoExtractor):
+    """Shared page fetch for the luxuretv extractors."""
+
+    def _fetch_page(self, url, video_id, note=None):
+        problem = yt_dlp_version_problem(YT_DLP_VERSION)
+        if problem:
+            raise ExtractorError(f'luxuretv: {problem}', expected=True)
+        kwargs = {'note': note} if note else {}
+        webpage, urlh = self._download_webpage_handle(
+            url, video_id, expected_status=_EXPECTED_STATUS, impersonate=True, **kwargs)
+        if is_cloudflare_challenge(webpage):
+            raise ExtractorError(f'luxuretv {CLOUDFLARE_HELP}', expected=True)
+        status = getattr(urlh, 'status', 200)
+        if status == 429:
+            raise ExtractorError(
+                'luxuretv is rate limiting requests (HTTP 429); wait a while and retry', expected=True)
+        if status >= 400:
+            raise ExtractorError(f'luxuretv answered HTTP {status} for {url}', expected=True)
+        return webpage
+
+
+class LuxureTVIE(_LuxureTVBase):
     """Phlegethon Extractor Plugin for a single luxuretv video.
 
     luxuretv serves a Cloudflare challenge to plain HTTP clients. The extractor
@@ -22,7 +48,7 @@ class LuxureTVIE(InfoExtractor):
 
     IE_NAME = 'LuxureTV'
     _VALID_URL = r'''(?x)
-        https?://(?:www\.|en\.)?luxuretv\.com/
+        https?://(?:[a-z0-9-]+\.)*luxuretv\.com/
         (?:videos?|video)/(?:(?P<display_id>[^/?\#]+?)-)?(?P<id>\d+)(?:\.html)?/?
     '''
     _TESTS = [{
@@ -39,10 +65,7 @@ class LuxureTVIE(InfoExtractor):
     def _real_extract(self, url):
         video_id = self._match_id(url)
         display_id = self._match_valid_url(url).group('display_id') or video_id
-        webpage = self._download_webpage(
-            url, video_id, expected_status=(403, 429, 503), impersonate=True)
-        if is_cloudflare_challenge(webpage):
-            raise ExtractorError(f'luxuretv {CLOUDFLARE_HELP}', expected=True)
+        webpage = self._fetch_page(url, video_id)
         try:
             info = luxure_info(
                 video_id=video_id,
@@ -56,7 +79,7 @@ class LuxureTVIE(InfoExtractor):
         return info
 
 
-class LuxureTVListIE(InfoExtractor):
+class LuxureTVListIE(_LuxureTVBase):
     """Best-effort luxuretv listing pages (channels, categories, search).
 
     Collects video links on the page and follows ``rel="next"``. Not verified
@@ -66,7 +89,8 @@ class LuxureTVListIE(InfoExtractor):
 
     IE_NAME = 'LuxureTVList'
     _VALID_URL = r'''(?x)
-        https?://(?:www\.|en\.)?luxuretv\.com/
+        https?://(?:[a-z0-9-]+\.)*luxuretv\.com/
+        (?!videos?/(?:[^/?\#]+?-)?\d+(?:\.html)?/?(?:[?\#]|$))
         (?:channels?|categories|category|pornstars?|models?|tags?|search|videos)(?:/[^/?\#.]+)*/?(?:\?[^\#]*)?$
     '''
     _TESTS = [{
@@ -79,11 +103,7 @@ class LuxureTVListIE(InfoExtractor):
         seen = set()
         page_url = url
         for page in range(1, self._MAX_PAGES + 1):
-            webpage = self._download_webpage(
-                page_url, playlist_id, note=f'Downloading page {page}',
-                expected_status=(403, 429, 503), impersonate=True)
-            if is_cloudflare_challenge(webpage):
-                raise ExtractorError(f'luxuretv {CLOUDFLARE_HELP}', expected=True)
+            webpage = self._fetch_page(page_url, playlist_id, note=f'Downloading page {page}')
             fresh = [v for v in luxure_listing_links(webpage, page_url) if v['id'] not in seen]
             if not fresh:
                 return
