@@ -61,13 +61,11 @@ pub fn ytdlp_command_with_optional_doh_dns(
 
     // Prefer CONNECT proxy: works with yt-dlp.exe and preserves SNI (curl respects --proxy).
     if let Ok(proxy_guard) = start_doh_connect_proxy(map.clone()) {
-        let proxy_url = proxy_guard.proxy_url.clone();
-        let mut proxied_args = Vec::with_capacity(args.len() + 2);
-        proxied_args.push("--proxy".to_string());
-        proxied_args.push(proxy_url);
-        proxied_args.extend_from_slice(args);
         let mut cmd = launcher.command();
-        cmd.args(&proxied_args);
+        cmd.args(args);
+        // The proxy URL carries the per-run token. Keep it off the command line, which any
+        // local user can read from /proc/<pid>/cmdline.
+        apply_proxy_env(&mut cmd, &proxy_guard.proxy_url, true);
         return Ok((
             cmd,
             YtdlpDohRunGuard {
@@ -102,6 +100,26 @@ pub fn ytdlp_command_with_optional_doh_dns(
             proxy_guard: None,
         },
     ))
+}
+
+/// Point yt-dlp at `proxy_url` through the environment instead of `--proxy`.
+///
+/// `clear_no_proxy` also empties `NO_PROXY`, so an inherited entry cannot send a poisoned
+/// host around the DoH proxy.
+fn apply_proxy_env(cmd: &mut Command, proxy_url: &str, clear_no_proxy: bool) {
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        cmd.env(key, proxy_url);
+    }
+    if clear_no_proxy {
+        cmd.env("NO_PROXY", "").env("no_proxy", "");
+    }
 }
 
 struct PythonLaunch {
@@ -194,28 +212,27 @@ mod tests {
     }
 
     #[test]
-    fn connect_proxy_prepends_proxy_flag() {
-        let mut map = HashMap::new();
-        map.insert(
-            "example.com".to_string(),
-            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
-        );
-        let guard = start_doh_connect_proxy(map).expect("start proxy");
-        let proxy_url = guard.proxy_url.clone();
-        drop(guard);
+    fn proxy_env_keeps_the_url_off_the_command_line() {
+        let url = "http://phlegethon:secret@127.0.0.1:9";
+        let mut cmd = Command::new("yt-dlp");
+        cmd.args(["-J", "https://example.com/video"]);
+        apply_proxy_env(&mut cmd, url, true);
 
-        let args = vec!["-J".into(), "https://example.com/video".into()];
-        let proxied = prepend_proxy_args(&proxy_url, &args);
-        assert_eq!(proxied[0], "--proxy");
-        assert!(proxied[1].starts_with("http://127.0.0.1:"));
-        assert_eq!(proxied[2], "-J");
-    }
-
-    fn prepend_proxy_args(proxy_url: &str, args: &[String]) -> Vec<String> {
-        let mut proxied_args = Vec::with_capacity(args.len() + 2);
-        proxied_args.push("--proxy".to_string());
-        proxied_args.push(proxy_url.to_string());
-        proxied_args.extend_from_slice(args);
-        proxied_args
+        assert!(cmd
+            .get_args()
+            .all(|a| !a.to_string_lossy().contains("secret")));
+        let envs: HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "https_proxy"] {
+            assert_eq!(envs[key].as_deref(), Some(url), "{key}");
+        }
+        assert_eq!(envs["NO_PROXY"].as_deref(), Some(""));
     }
 }
