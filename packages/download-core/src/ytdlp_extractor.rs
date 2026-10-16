@@ -592,6 +592,9 @@ impl YtDlpExtractorToolchain {
         let mut args = vec![
             "--no-warnings".to_string(),
             "--no-overwrites".to_string(),
+            // Resume continues yt-dlp's own `.part` files; say so even if a user config
+            // file turns `--no-continue` on.
+            "--continue".to_string(),
             "-f".to_string(),
             format_selector,
             "-o".to_string(),
@@ -985,6 +988,13 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
 
     fn apply_sidecar_root(&self, root: &Path) {
         self.bind_sidecar_root(root);
+    }
+
+    /// Resume runs yt-dlp again in the same Job Destination with the same format and
+    /// output template. yt-dlp continues its own `.part` files (`--continue` is its
+    /// default) and `--no-overwrites` leaves finished files alone.
+    fn supports_extractor_resume(&self) -> bool {
+        true
     }
 
     fn probe(
@@ -3407,6 +3417,7 @@ esac
         assert_eq!(args[n - 2], "--", "{args:?}");
         assert_eq!(args[n - 1], "https://example.com/v", "{args:?}");
         assert_eq!(args.iter().filter(|a| a.as_str() == "--").count(), 1);
+        assert!(args.iter().any(|a| a == "--continue"), "{args:?}");
     }
 
     #[test]
@@ -3460,5 +3471,11 @@ esac
                 "https://xhamster.com/videos/ok-xh2"
             ]
         );
+    }
+
+    #[test]
+    fn ytdlp_reports_resume_support() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        assert!(extractor.supports_extractor_resume());
     }
 }

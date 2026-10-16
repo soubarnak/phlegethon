@@ -951,6 +951,103 @@ fn pause_during_in_flight_extractor_download_stops_promptly() {
 }
 
 #[test]
+fn resume_after_pause_reruns_a_resumable_extractor_in_the_same_destination() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=resume-ext",
+        "Resume Extractor Video",
+        "https://cdn.youtube.com/resume-ext.mp4",
+        vec![("720p", "720p")],
+    );
+    toolchain.enable_resume();
+    let total_chunks = 40;
+    let chunks_written =
+        toolchain.enable_slow_download(total_chunks, std::time::Duration::from_millis(10));
+    let calls = toolchain.clone();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.probe("https://www.youtube.com/watch?v=resume-ext")
+        .unwrap();
+    collect_events(&rx);
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=resume-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_id = core.confirm_probe_selection(&selection, None).unwrap()[0].clone();
+    let signals = core.job_signals();
+    let job_dir = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .map(|j| PathBuf::from(j.destination))
+        .expect("job destination");
+
+    let core = Arc::new(Mutex::new(core));
+    let rx = Arc::new(rx);
+    let worker = {
+        let (core, rx) = (core.clone(), rx.clone());
+        std::thread::spawn(move || {
+            core.lock().unwrap().process_pending().unwrap();
+            collect_events(&rx)
+        })
+    };
+    let started = std::time::Instant::now();
+    while *chunks_written.lock().unwrap() < 5 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "extractor download never became active"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    signals
+        .request_pause(&job_id)
+        .expect("pause flag registered")
+        .store(true, std::sync::atomic::Ordering::Release);
+    let events = worker.join().unwrap();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobPaused { job_id: id } if id == &job_id)));
+    let paused_at = *chunks_written.lock().unwrap();
+    assert!(paused_at < total_chunks, "pause came too late");
+
+    let mut guard = core.lock().unwrap();
+    guard.resume_job(&job_id).unwrap();
+    guard.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            CoreEvent::JobFailed { error, .. } if error.contains("cannot resume")
+        )),
+        "Resume must not fail an extractor job: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { job_id: id, .. } if id == &job_id)),
+        "{events:?}"
+    );
+    let dests = calls.download_dests();
+    assert_eq!(dests.len(), 2, "{dests:?}");
+    assert_eq!(dests[0], dests[1], "Resume reuses the Job Destination");
+    assert_eq!(dests[0], job_dir);
+    let partial = std::fs::read_to_string(job_dir.join("extractor-partial.bin")).unwrap();
+    let chunk_lines: Vec<&str> = partial.lines().collect();
+    assert_eq!(
+        chunk_lines.len(),
+        total_chunks as usize,
+        "no restart from zero"
+    );
+    assert!(chunk_lines[0].starts_with("chunk:0:"));
+}
+
+#[test]
 fn pause_on_completed_job_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, _rx) = make_core(Box::new(fake_http()));

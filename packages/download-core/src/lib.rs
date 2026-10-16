@@ -2604,7 +2604,7 @@ impl Core {
                 self.finalize_failed_job(
                     job_id,
                     i,
-                    "extractor cannot resume partial download; use Retry".into(),
+                    "extractor cannot resume a partial download".into(),
                 )?;
                 return Ok(None);
             }

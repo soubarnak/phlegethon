@@ -274,8 +274,12 @@ pub trait ExtractorToolchain: Send + Sync {
     ///
     /// Whether this toolchain can resume a partial download after relaunch.
     ///
-    /// When `false`, Core marks interrupted extractor jobs Failed on relaunch
-    /// instead of silently restarting from zero.
+    /// When `true`, Resume (and a relaunch) runs the toolchain again in the same Job
+    /// Destination with the same format and output spec, and the toolchain continues
+    /// its own partial files (yt-dlp keeps its `.part` files).
+    ///
+    /// When `false`, Core marks an interrupted extractor job Failed instead of
+    /// silently restarting from zero.
     fn supports_extractor_resume(&self) -> bool {
         false
     }
@@ -362,6 +366,10 @@ pub struct FakeExtractorToolchain {
     orphan_temp_names: Vec<String>,
     /// Optional ffmpeg directory reported to Core for embed/remux capability.
     ffmpeg_dir: Option<std::path::PathBuf>,
+    /// Whether the fake continues its own partial file like yt-dlp does.
+    resume_supported: bool,
+    /// Destination directory of every `download` call (tests).
+    download_dests: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     /// Count of [`ExtractorToolchain::apply_sidecar_root`] calls (tests).
     sidecar_root_applies: std::sync::Arc<std::sync::Mutex<u32>>,
     /// URLs whose probe reports yt-dlp's `Generic` extractor key.
@@ -412,6 +420,20 @@ impl FakeExtractorToolchain {
     /// Used to regression-test Core cleanup of Extractor orphans (issue #42).
     pub fn leave_orphan_temps(&mut self, names: &[&str]) {
         self.orphan_temp_names = names.iter().map(|s| (*s).to_string()).collect();
+    }
+
+    /// Make `download` continue a partial file in the destination, like yt-dlp's `.part`
+    /// files, and report resume support to Core.
+    pub fn enable_resume(&mut self) {
+        self.resume_supported = true;
+    }
+
+    /// Destination directory of every `download` call so far.
+    pub fn download_dests(&self) -> Vec<std::path::PathBuf> {
+        self.download_dests
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Report a specific ffmpeg directory to Core (tests: empty dir → unavailable).
@@ -565,6 +587,10 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         self.ffmpeg_dir.as_deref()
     }
 
+    fn supports_extractor_resume(&self) -> bool {
+        self.resume_supported
+    }
+
     fn apply_sidecar_root(&self, _root: &std::path::Path) {
         if let Ok(mut count) = self.sidecar_root_applies.lock() {
             *count = count.saturating_add(1);
@@ -626,6 +652,9 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         _proxy: &ProxySettings,
         output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
+        if let Ok(mut dests) = self.download_dests.lock() {
+            dests.push(dest_dir.to_path_buf());
+        }
         if stop.load(Ordering::Acquire) {
             return Ok(ExtractorDownloadOutcome::Stopped);
         }
@@ -635,9 +664,17 @@ impl ExtractorToolchain for FakeExtractorToolchain {
 
         if let Some(slow) = &self.slow_download {
             let path = dest_dir.join("extractor-partial.bin");
-            std::fs::write(&path, b"").map_err(|e| format!("create partial {path:?}: {e}"))?;
+            // A resuming fake continues after the chunks already on disk.
+            let first_chunk = if self.resume_supported && path.is_file() {
+                std::fs::read_to_string(&path)
+                    .map(|text| text.lines().count() as u32)
+                    .unwrap_or(0)
+            } else {
+                std::fs::write(&path, b"").map_err(|e| format!("create partial {path:?}: {e}"))?;
+                0
+            };
 
-            for chunk in 0..slow.total_chunks {
+            for chunk in first_chunk..slow.total_chunks {
                 if stop.load(Ordering::Acquire) {
                     return Ok(ExtractorDownloadOutcome::Stopped);
                 }
