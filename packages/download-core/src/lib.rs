@@ -204,15 +204,34 @@ pub struct Core {
     probe_tier_settings: ProbeTierSettings,
     /// Cancel flags for in-flight probes, keyed by normalized URL.
     probe_cancels: HashMap<String, Arc<AtomicBool>>,
+    /// Cookie sessions handed in with an enqueue that still needs a probe,
+    /// keyed by normalized URL. Moved onto the jobs at confirm.
+    probe_cookie_sessions: HashMap<String, CookieChannel>,
 }
 
 /// Options for [`Core::enqueue_with_options`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Construct with `EnqueueOptions { force_direct: true, ..Default::default() }`
+/// so new options do not break callers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnqueueOptions {
     /// Skip classification and create a plain HTTP job for the URL itself
     /// ("Try plain download" after a failed probe).
     #[serde(default)]
     pub force_direct: bool,
+    /// Per-job cookie session (for example a Chrome Companion hand-off).
+    ///
+    /// Core uses it, instead of the global cookie channel, for every probe,
+    /// quality lookup and extractor download that belongs to this enqueue: a
+    /// direct URL gets a job that carries the session; a URL that needs
+    /// Probe-then-Confirm keeps the session until [`Core::confirm_probe_selection`]
+    /// copies it onto each confirmed job (or [`Core::clear_pending_probe`]
+    /// drops it). The global channel from [`Core::cookie_channel`] is never
+    /// changed. The session is validated (`CookieChannel::validate`) and
+    /// persisted with the job in `jobs.json`; an unconfigured session is
+    /// ignored. The caller owns the cookie file's lifetime.
+    #[serde(default)]
+    pub cookie_session: Option<CookieChannel>,
 }
 
 /// Everything a probe needs, captured under the Core lock so the network work
@@ -1048,6 +1067,7 @@ impl Core {
             sniffer,
             probe_tier_settings: ProbeTierSettings::default(),
             probe_cancels: HashMap::new(),
+            probe_cookie_sessions: HashMap::new(),
         };
         (core, rx)
     }
@@ -1390,6 +1410,14 @@ impl Core {
         if let Some(ref dest) = destination {
             Self::require_absolute_destination(dest)?;
         }
+        let cookie_session = match options.cookie_session {
+            Some(session) => {
+                let session = session.normalized();
+                session.validate()?;
+                session.is_configured().then_some(session)
+            }
+            None => None,
+        };
 
         let kind = if options.force_direct {
             classification::Kind::EnqueueDirect
@@ -1405,6 +1433,7 @@ impl Core {
                 if options.force_direct {
                     job.set_extraction_tier(ExtractionTier::DirectFile);
                 }
+                job.set_cookie_session(cookie_session);
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
                 self.register_job_signals(&job);
@@ -1416,6 +1445,14 @@ impl Core {
                 })
             }
             classification::Kind::ProbeThenConfirm => {
+                match cookie_session {
+                    Some(session) => {
+                        self.probe_cookie_sessions.insert(url_str.clone(), session);
+                    }
+                    None => {
+                        self.probe_cookie_sessions.remove(&url_str);
+                    }
+                }
                 Ok(EnqueueOutcome::ProbeThenConfirm { url: url_str })
             }
         }
@@ -1863,6 +1900,16 @@ impl Core {
         self.persist_queue_now()
     }
 
+    /// Cookie session attached to one job, if any (see
+    /// [`EnqueueOptions::cookie_session`]). `None` means the job uses the
+    /// global cookie channel.
+    pub fn job_cookie_session(&self, job_id: &str) -> Result<Option<CookieChannel>, String> {
+        let index = self
+            .job_index(job_id)
+            .ok_or_else(|| format!("job not found: {job_id}"))?;
+        Ok(self.jobs[index].cookie_session().cloned())
+    }
+
     /// Current global proxy settings.
     pub fn proxy_settings(&self) -> ProxySettings {
         self.proxy_settings.clone()
@@ -2266,12 +2313,15 @@ impl Core {
 
     /// Capture everything a probe needs (settings, toolchain, cancel flag).
     pub fn plan_probe(&mut self, url: &str) -> Result<ProbePlan, String> {
+        let cookies = normalize_url(url)
+            .and_then(|key| self.probe_cookie_sessions.get(&key).cloned())
+            .unwrap_or_else(|| self.cookie_channel.clone());
         let plan = ProbePlan::standalone(
             url,
             Arc::clone(&self.extractor),
             Arc::clone(&self.sniffer),
             self.probe_tier_settings,
-            self.cookie_channel.clone(),
+            cookies,
             self.proxy_settings.clone(),
         )?;
         self.probe_cancels
@@ -2388,6 +2438,11 @@ impl Core {
             .iter()
             .find(|i| i.id == item_id)
             .ok_or_else(|| format!("item '{item_id}' not found in probe result for {url_key}"))?;
+        let cookies = self
+            .probe_cookie_sessions
+            .get(&url_key)
+            .cloned()
+            .unwrap_or_else(|| self.cookie_channel.clone());
         Ok(EnrichPlan {
             url_key,
             item_id: item_id.to_string(),
@@ -2395,7 +2450,7 @@ impl Core {
             fetch_kind: item.fetch_kind,
             existing: item.qualities.clone(),
             extractor: Arc::clone(&self.extractor),
-            cookies: self.cookie_channel.clone(),
+            cookies,
             proxy: self.proxy_settings.clone(),
         })
     }
@@ -2572,6 +2627,7 @@ impl Core {
             job.set_media_identity(item.id.clone(), item.title.clone());
             job.set_extraction_tier(probe.tier);
             job.set_referer(item.referer.clone());
+            job.set_cookie_session(self.probe_cookie_sessions.get(&url_key).cloned());
             match item.fetch_kind {
                 MediaFetchKind::Extractor => {
                     // Media behind an extractor is fetched by yt-dlp, not plain HTTP of the page URL.
@@ -2598,6 +2654,7 @@ impl Core {
         }
 
         self.pending_probes.remove(&url_key);
+        self.probe_cookie_sessions.remove(&url_key);
         self.persist_queue_now()?;
         Ok(job_ids)
     }
@@ -2606,6 +2663,7 @@ impl Core {
     pub fn clear_pending_probe(&mut self, url_str: &str) -> Result<(), String> {
         let url_key = normalize_url(url_str).ok_or_else(|| format!("invalid URL: {url_str}"))?;
         self.pending_probes.remove(&url_key);
+        self.probe_cookie_sessions.remove(&url_key);
         Ok(())
     }
 
@@ -2884,7 +2942,10 @@ impl Core {
                 dest,
                 output_spec,
                 media_extras: self.jobs[i].media_extras(),
-                cookies: self.cookie_channel.clone(),
+                cookies: self.jobs[i]
+                    .cookie_session()
+                    .cloned()
+                    .unwrap_or_else(|| self.cookie_channel.clone()),
                 proxy: self.proxy_settings.clone(),
                 extractor: Arc::clone(&self.extractor),
                 stop: pause_requested,

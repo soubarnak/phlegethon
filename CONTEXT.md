@@ -17,7 +17,7 @@ The destination of the current wayfinding effort — a product and engineering s
 _Avoid_: MVP build, working prototype (as the map destination)
 
 **Chrome Companion**:
-A browser extension that hands URLs, cookies, or download intents to the desktop Download Manager; optional for the first shippable desktop slice. Cookie hand-off uses the same Core cookie channel as desktop `cookies-from-browser` / cookie-file settings.
+A browser extension that hands URLs, cookies, or download intents to the desktop Download Manager; optional for the first shippable desktop slice. Cookie hand-off reuses the Core cookie channel's shape (`cookies-from-browser` / cookie file) but applies it to the handed-off job only, as a per-job cookie session; it never replaces the user's persisted cookie settings.
 _Avoid_: required for basic downloads, browser-only downloader, a second unrelated cookie store
 
 **Launch Site**:

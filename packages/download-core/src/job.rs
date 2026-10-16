@@ -1,6 +1,7 @@
 //! Job struct — state machine per download job.
 
 use crate::bandwidth::SharedTokenBucket;
+use crate::cookie_channel::CookieChannel;
 use crate::extractor::ExtractionTier;
 use crate::integrity::ExpectedHash;
 use crate::media_extras::MediaExtrasOptions;
@@ -139,6 +140,8 @@ pub struct Job {
     /// While a transfer runs, `segment_counters` hold the live `written` values.
     segments: Vec<Segment>,
     segment_counters: Vec<Arc<AtomicU64>>,
+    /// Cookie session for this job only; overrides the global cookie channel.
+    cookie_session: Option<CookieChannel>,
 }
 
 impl Job {
@@ -218,6 +221,7 @@ impl Job {
             range_ignored: false,
             segments: Vec::new(),
             segment_counters: Vec::new(),
+            cookie_session: None,
         }
     }
 
@@ -255,6 +259,7 @@ impl Job {
             range_ignored: persisted.range_ignored,
             segments: persisted.segments,
             segment_counters: Vec::new(),
+            cookie_session: persisted.cookie_session,
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -312,6 +317,7 @@ impl Job {
             last_modified: self.last_modified.clone(),
             range_ignored: self.range_ignored,
             segments: self.segment_snapshot(),
+            cookie_session: self.cookie_session.clone(),
         }
     }
 
@@ -407,6 +413,15 @@ impl Job {
 
     pub fn set_referer(&mut self, referer: Option<String>) {
         self.referer = referer;
+    }
+
+    /// Cookie session used by this job instead of the global cookie channel.
+    pub fn cookie_session(&self) -> Option<&CookieChannel> {
+        self.cookie_session.as_ref()
+    }
+
+    pub fn set_cookie_session(&mut self, session: Option<CookieChannel>) {
+        self.cookie_session = session;
     }
 
     /// Mark this job to download via the Extractor Toolchain (yt-dlp).
