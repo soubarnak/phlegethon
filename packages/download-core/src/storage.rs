@@ -231,159 +231,257 @@ pub fn queue_path(library_root: &Path) -> PathBuf {
     library_root.join(PHLEGETHON_DIR).join(JOBS_FILENAME)
 }
 
-/// Load jobs from disk, reconciling each with its on-disk `.part` file.
-pub fn load_jobs(library_root: &Path) -> Result<Vec<Job>, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(Vec::new());
+/// Everything read from `jobs.json`, ready for [`Core::set_library_root`] to
+/// commit in one step.
+///
+/// [`Core::set_library_root`]: crate::Core::set_library_root
+#[derive(Debug)]
+pub struct LoadedQueue {
+    pub jobs: Vec<Job>,
+    pub global_bandwidth_cap: Option<u64>,
+    pub active_job_limit: u32,
+    pub quality: QualitySettings,
+    pub media_extras: MediaExtrasSettings,
+    pub cookie_channel: CookieChannel,
+    pub proxy_settings: ProxySettings,
+    pub sidecar_update_settings: SidecarUpdateSettings,
+    pub filename_template: String,
+    pub probe_tier_settings: ProbeTierSettings,
+    /// Human-readable notes about anything skipped, reset or moved aside.
+    pub warnings: Vec<String>,
+}
+
+impl LoadedQueue {
+    fn empty() -> Self {
+        Self {
+            jobs: Vec::new(),
+            global_bandwidth_cap: None,
+            active_job_limit: DEFAULT_ACTIVE_JOB_LIMIT,
+            quality: QualitySettings {
+                policy: DefaultQualityPolicy::default(),
+                audio_only_mode: false,
+            },
+            media_extras: MediaExtrasSettings {
+                defaults: MediaExtrasOptions::default(),
+            },
+            cookie_channel: CookieChannel::default(),
+            proxy_settings: ProxySettings::default(),
+            sidecar_update_settings: SidecarUpdateSettings::default(),
+            filename_template: DEFAULT_FILENAME_TEMPLATE.to_string(),
+            probe_tier_settings: ProbeTierSettings::default(),
+            warnings: Vec::new(),
+        }
     }
+}
 
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+/// Read the queue file under a Library Root once.
+///
+/// A missing file gives an empty queue with default settings. A file that
+/// cannot be parsed at all (truncated, not JSON, wrong shape or version) is
+/// moved to `jobs.json.corrupt-<timestamp>` and the queue starts empty. Rows
+/// that fail to parse or validate are skipped one at a time, and the original
+/// file is kept as `jobs.json.corrupt-<timestamp>` so nothing is lost when the
+/// next save rewrites it. Every such event adds a warning. Only an I/O error
+/// that leaves the file's state unknown is returned as `Err`.
+pub fn load_queue(library_root: &Path) -> Result<LoadedQueue, String> {
+    let path = queue_path(library_root);
+    let raw = match fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(LoadedQueue::empty()),
+        Err(e) => return Err(format!("read queue {}: {e}", path.display())),
+    };
 
-    if queue.version != QUEUE_VERSION {
-        return Err(format!(
-            "unsupported queue version {} (expected {QUEUE_VERSION})",
-            queue.version
+    let (queue, rows) = match parse_queue_file(&raw) {
+        Ok(parsed) => parsed,
+        Err(reason) => {
+            let aside = crate::fsutil::move_aside_corrupt(&path)
+                .map_err(|e| format!("move aside unreadable queue {}: {e}", path.display()))?;
+            let mut loaded = LoadedQueue::empty();
+            loaded.warnings.push(format!(
+                "Queue file {} could not be read ({reason}). It was moved to {} and the queue starts empty.",
+                path.display(),
+                aside.display()
+            ));
+            return Ok(loaded);
+        }
+    };
+
+    let mut loaded = LoadedQueue::empty();
+    loaded.global_bandwidth_cap = queue.global_bandwidth_cap.filter(|&cap| cap > 0);
+    loaded.active_job_limit = if queue.active_job_limit >= 1 {
+        queue.active_job_limit
+    } else {
+        loaded.warnings.push(format!(
+            "Stored Active Job Limit {} is below 1; using {DEFAULT_ACTIVE_JOB_LIMIT}.",
+            queue.active_job_limit
         ));
-    }
-
-    let mut jobs = Vec::with_capacity(queue.jobs.len());
-    for persisted in queue.jobs {
-        let mut job = Job::from_persisted(persisted)?;
-        reconcile_job(&mut job)?;
-        jobs.push(job);
-    }
-    Ok(jobs)
-}
-
-/// Load the global bandwidth cap from the queue file, if present.
-pub fn load_global_bandwidth_cap(library_root: &Path) -> Result<Option<u64>, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.global_bandwidth_cap.filter(|&cap| cap > 0))
-}
-
-/// Load the Active Job Limit from the queue file, if present.
-pub fn load_active_job_limit(library_root: &Path) -> Result<u32, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(DEFAULT_ACTIVE_JOB_LIMIT);
-    }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.active_job_limit)
-}
-
-/// Load Default Quality Policy settings from the queue file, if present.
-pub fn load_quality_settings(library_root: &Path) -> Result<QualitySettings, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(QualitySettings {
-            policy: DefaultQualityPolicy::default(),
-            audio_only_mode: false,
-        });
-    }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(QualitySettings {
+        DEFAULT_ACTIVE_JOB_LIMIT
+    };
+    loaded.quality = QualitySettings {
         policy: queue.default_quality_policy,
         audio_only_mode: queue.audio_only_mode,
-    })
+    };
+    loaded.media_extras = MediaExtrasSettings {
+        defaults: queue.default_media_extras,
+    };
+    let cookie_channel = queue.cookie_channel.normalized();
+    loaded.cookie_channel = match cookie_channel.validate() {
+        Ok(()) => cookie_channel,
+        Err(reason) => {
+            loaded
+                .warnings
+                .push(format!("Stored cookie settings were reset: {reason}."));
+            CookieChannel::default()
+        }
+    };
+    loaded.proxy_settings = queue.proxy_settings.normalized();
+    loaded.sidecar_update_settings = queue.sidecar_update_settings;
+    loaded.filename_template = queue.filename_template;
+    loaded.probe_tier_settings = queue.probe_tier_settings;
+
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut skipped = 0usize;
+    for (index, row) in rows.into_iter().enumerate() {
+        match load_job_row(row, library_root, &mut seen_ids, &mut loaded.warnings) {
+            Ok(job) => loaded.jobs.push(job),
+            Err(reason) => {
+                skipped += 1;
+                loaded
+                    .warnings
+                    .push(format!("Skipped queue entry {}: {reason}.", index + 1));
+            }
+        }
+    }
+    if skipped > 0 {
+        match crate::fsutil::copy_aside_corrupt(&path) {
+            Ok(copy) => loaded.warnings.push(format!(
+                "{skipped} queue entries were skipped; the original file is kept as {}.",
+                copy.display()
+            )),
+            Err(e) => loaded.warnings.push(format!(
+                "{skipped} queue entries were skipped and the original could not be kept: {e}."
+            )),
+        }
+    }
+    Ok(loaded)
 }
 
-/// Load Default Media Extras settings from the queue file, if present.
-pub fn load_media_extras_settings(library_root: &Path) -> Result<MediaExtrasSettings, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(MediaExtrasSettings {
-            defaults: MediaExtrasOptions::default(),
+/// Split a queue file into its settings (with an empty job list) and raw rows.
+fn parse_queue_file(raw: &[u8]) -> Result<(PersistedQueue, Vec<serde_json::Value>), String> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(raw).map_err(|e| format!("invalid JSON: {e}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "not a JSON object".to_string())?;
+    let version = object.get("version").and_then(serde_json::Value::as_u64);
+    if version != Some(u64::from(QUEUE_VERSION)) {
+        return Err(match version {
+            Some(v) => format!("unsupported queue version {v} (expected {QUEUE_VERSION})"),
+            None => "missing queue version".to_string(),
         });
     }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let rows = match object.insert("jobs".to_string(), serde_json::Value::Array(Vec::new())) {
+        Some(serde_json::Value::Array(rows)) => rows,
+        Some(_) => return Err("jobs is not a list".to_string()),
+        None => return Err("missing jobs".to_string()),
+    };
     let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(MediaExtrasSettings {
-        defaults: queue.default_media_extras,
-    })
+        serde_json::from_value(value).map_err(|e| format!("invalid settings: {e}"))?;
+    Ok((queue, rows))
 }
 
-/// Load cookie auth channel settings from the queue file, if present.
-pub fn load_cookie_channel(library_root: &Path) -> Result<CookieChannel, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(CookieChannel::default());
+/// Parse, validate and reconcile one persisted job row.
+fn load_job_row(
+    row: serde_json::Value,
+    library_root: &Path,
+    seen_ids: &mut std::collections::HashSet<String>,
+    warnings: &mut Vec<String>,
+) -> Result<Job, String> {
+    let mut persisted: PersistedJob =
+        serde_json::from_value(row).map_err(|e| format!("unreadable entry ({e})"))?;
+    validate_persisted_job(&persisted, library_root)?;
+    if !seen_ids.insert(persisted.id.clone()) {
+        return Err(format!("duplicate job id {}", persisted.id));
     }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.cookie_channel.normalized())
+    if let Some(session) = persisted.cookie_session.take() {
+        let session = session.normalized();
+        match session.validate() {
+            Ok(()) if session.is_configured() => persisted.cookie_session = Some(session),
+            Ok(()) => {}
+            Err(reason) => warnings.push(format!(
+                "Job {} lost its cookie session: {reason}.",
+                persisted.id
+            )),
+        }
+    }
+    let mut job = Job::from_persisted(persisted)?;
+    reconcile_job(&mut job)?;
+    Ok(job)
 }
 
-/// Load global proxy settings from the queue file, if present.
-pub fn load_proxy_settings(library_root: &Path) -> Result<ProxySettings, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(ProxySettings::default());
-    }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.proxy_settings.normalized())
-}
+/// Reject persisted values that would make Core touch paths outside a
+/// job-owned Job Destination (Discard deletes it recursively).
+fn validate_persisted_job(job: &PersistedJob, library_root: &Path) -> Result<(), String> {
+    use std::path::Component;
 
-/// Load sidecar update manager settings from the queue file, if present.
-pub fn load_sidecar_update_settings(library_root: &Path) -> Result<SidecarUpdateSettings, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(SidecarUpdateSettings::default());
+    if job.id.is_empty() {
+        return Err("empty job id".to_string());
     }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.sidecar_update_settings)
-}
-
-/// Load Filename Template from the queue file, if present.
-pub fn load_filename_template(library_root: &Path) -> Result<String, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(DEFAULT_FILENAME_TEMPLATE.to_string());
+    if !job.filename.is_empty() {
+        let mut parts = Path::new(&job.filename).components();
+        let single = matches!(
+            (parts.next(), parts.next()),
+            (Some(Component::Normal(_)), None)
+        );
+        if !single || job.filename.contains('/') {
+            return Err(format!(
+                "job {}: filename {:?} is not a single path component",
+                job.id, job.filename
+            ));
+        }
     }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.filename_template)
-}
-
-/// Load probe tier (fallback chain) settings from the queue file, if present.
-pub fn load_probe_tier_settings(library_root: &Path) -> Result<ProbeTierSettings, String> {
-    let path = queue_path(library_root);
-    if !path.exists() {
-        return Ok(ProbeTierSettings::default());
+    let dest = &job.destination;
+    if !dest.is_absolute() {
+        return Err(format!(
+            "job {}: destination {} is not absolute",
+            job.id,
+            dest.display()
+        ));
     }
-    let raw =
-        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue =
-        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.probe_tier_settings)
+    if dest
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Err(format!(
+            "job {}: destination {} contains . or .. segments",
+            job.id,
+            dest.display()
+        ));
+    }
+    let name = dest.file_name().ok_or_else(|| {
+        format!(
+            "job {}: destination {} has no folder name",
+            job.id,
+            dest.display()
+        )
+    })?;
+    if library_root.starts_with(dest) {
+        return Err(format!(
+            "job {}: destination {} is the Library Root or contains it",
+            job.id,
+            dest.display()
+        ));
+    }
+    // Every Job Destination Core creates ends in a folder named after the job id.
+    let prefix: String = job.id.chars().take(8).collect();
+    if !name.to_string_lossy().contains(&prefix) {
+        return Err(format!(
+            "job {}: destination {} is not a job-owned folder",
+            job.id,
+            dest.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Build a persisted queue snapshot from live jobs.
@@ -456,8 +554,8 @@ pub fn destination_byte_total(dest: &Path) -> u64 {
 ///
 /// - HTTP jobs: `.part` length is authoritative when present.
 /// - Extractor jobs: sum of files under the Job Destination.
-/// - When partial data is missing but stored progress > 0 (and job not completed),
-///   the job is marked Failed.
+/// - When partial data is missing but stored progress > 0, a Pending job is
+///   marked Failed and a Paused job stays Paused with its progress reset.
 pub fn reconcile_job(job: &mut Job) -> Result<(), String> {
     if job.extractor_format().is_some() {
         let on_disk = destination_byte_total(job.destination());
@@ -481,9 +579,22 @@ pub fn reconcile_job(job: &mut Job) -> Result<(), String> {
                 job.set_bytes_received(part_len);
             }
         }
-        Err(_) if stored > 0 && job.state() != JobState::Completed => {
-            job.mark_failed();
-        }
+        Err(_) if stored > 0 => match job.state() {
+            JobState::Pending => {
+                job.mark_failed();
+                job.set_last_error(Some(
+                    "The partial download is missing on disk; Retry starts over.".to_string(),
+                ));
+            }
+            // A user-Paused job stays Paused; Resume restarts from zero.
+            JobState::Paused => {
+                job.set_bytes_received(0);
+                job.set_last_error(Some(
+                    "The partial download is missing on disk; Resume starts over.".to_string(),
+                ));
+            }
+            JobState::Failed | JobState::Completed => {}
+        },
         Err(_) => {}
     }
     Ok(())
@@ -590,7 +701,7 @@ mod tests {
         );
         save_queue(&root, &queue).unwrap();
 
-        let loaded = load_jobs(&root).unwrap();
+        let loaded = load_queue(&root).unwrap().jobs;
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id(), queue.jobs[0].id);
     }
@@ -683,7 +794,7 @@ mod tests {
         );
         save_queue(&root, &queue).unwrap();
 
-        let loaded = load_jobs(&root).unwrap();
+        let loaded = load_queue(&root).unwrap().jobs;
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].state(), JobState::Pending);
         assert_eq!(loaded[0].bytes_received(), 512);
