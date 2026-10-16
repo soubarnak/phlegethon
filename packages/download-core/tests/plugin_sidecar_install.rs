@@ -16,12 +16,20 @@ fn in_tree_plugin_package() -> PathBuf {
 fn install_in_tree_launch_site_plugins_into_sidecar() {
     let source = in_tree_plugin_package();
     assert!(
-        source.join("yt_dlp_plugins").join("extractor").join("luxuretv.py").is_file(),
+        source
+            .join("yt_dlp_plugins")
+            .join("extractor")
+            .join("luxuretv.py")
+            .is_file(),
         "missing luxuretv plugin at {}",
         source.display()
     );
     assert!(
-        source.join("yt_dlp_plugins").join("extractor").join("xxxbp.py").is_file(),
+        source
+            .join("yt_dlp_plugins")
+            .join("extractor")
+            .join("xxxbp.py")
+            .is_file(),
         "missing xxxbp plugin at {}",
         source.display()
     );

@@ -137,12 +137,16 @@ mod tests {
 
     #[test]
     fn renders_a_valid_manifest() {
-        let json = render_manifest(Path::new("/usr/bin/phlegethon-nmh"), &[ID.to_string()]).unwrap();
+        let json =
+            render_manifest(Path::new("/usr/bin/phlegethon-nmh"), &[ID.to_string()]).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["name"], HOST_NAME);
         assert_eq!(value["type"], "stdio");
         assert_eq!(value["path"], "/usr/bin/phlegethon-nmh");
-        assert_eq!(value["allowed_origins"][0], format!("chrome-extension://{ID}/"));
+        assert_eq!(
+            value["allowed_origins"][0],
+            format!("chrome-extension://{ID}/")
+        );
     }
 
     #[test]
@@ -150,6 +154,10 @@ mod tests {
         assert!(render_manifest(Path::new("phlegethon-nmh"), &[ID.to_string()]).is_err());
         assert!(render_manifest(Path::new("/usr/bin/x"), &[]).is_err());
         assert!(render_manifest(Path::new("/usr/bin/x"), &["short".to_string()]).is_err());
-        assert!(render_manifest(Path::new("/usr/bin/x"), &["ABCDEFGHIJKLMNOPABCDEFGHIJKLMNOP".to_string()]).is_err());
+        assert!(render_manifest(
+            Path::new("/usr/bin/x"),
+            &["ABCDEFGHIJKLMNOPABCDEFGHIJKLMNOP".to_string()]
+        )
+        .is_err());
     }
 }

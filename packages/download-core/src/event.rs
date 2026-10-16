@@ -20,10 +20,7 @@ pub enum CoreEvent {
         source_name: Option<String>,
     },
     /// A probe failed with an error.
-    ProbeFailed {
-        url: String,
-        error: String,
-    },
+    ProbeFailed { url: String, error: String },
     /// A job made progress.
     JobProgress {
         job_id: String,
@@ -37,26 +34,15 @@ pub enum CoreEvent {
         path: PathBuf,
     },
     /// A job was paused by the user.
-    JobPaused {
-        job_id: String,
-    },
+    JobPaused { job_id: String },
     /// A paused job was resumed.
-    JobResumed {
-        job_id: String,
-    },
+    JobResumed { job_id: String },
     /// A job failed due to an HTTP or I/O error.
-    JobFailed {
-        job_id: String,
-        error: String,
-    },
+    JobFailed { job_id: String, error: String },
     /// A failed job was retried by the user.
-    JobRetried {
-        job_id: String,
-    },
+    JobRetried { job_id: String },
     /// A job was discarded (removed from the queue) by the user.
-    JobDiscarded {
-        job_id: String,
-    },
+    JobDiscarded { job_id: String },
     /// A job's current mirror failed and the job is trying the next.
     JobMirrorFailover {
         job_id: String,

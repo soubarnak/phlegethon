@@ -40,19 +40,11 @@ impl JobSignals {
     }
 
     pub fn request_pause(&self, job_id: &str) -> Option<Arc<AtomicBool>> {
-        self.pause_requested
-            .lock()
-            .unwrap()
-            .get(job_id)
-            .cloned()
+        self.pause_requested.lock().unwrap().get(job_id).cloned()
     }
 
     pub fn request_discard(&self, job_id: &str) -> Option<Arc<AtomicBool>> {
-        self.discard_requested
-            .lock()
-            .unwrap()
-            .get(job_id)
-            .cloned()
+        self.discard_requested.lock().unwrap().get(job_id).cloned()
     }
 
     /// Raise discard + pause so an in-flight body read stops promptly.

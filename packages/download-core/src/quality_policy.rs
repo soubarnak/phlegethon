@@ -73,7 +73,12 @@ fn select_best_audio(qualities: &[Quality]) -> Option<String> {
 fn select_best_video(qualities: &[Quality], policy: &DefaultQualityPolicy) -> Option<String> {
     // Video-only qualities count: the downloader merges the best audio into them.
     // Ranking at equal height: combined first (no merge needed), then mp4.
-    let rank = |q: &Quality| (!is_video_only_quality(q), policy.prefer_mp4 && is_mp4_container(q));
+    let rank = |q: &Quality| {
+        (
+            !is_video_only_quality(q),
+            policy.prefer_mp4 && is_mp4_container(q),
+        )
+    };
     let candidates: Vec<(u32, &Quality)> = qualities
         .iter()
         .filter(|q| !is_audio_quality(q))
@@ -178,11 +183,7 @@ mod tests {
 
     #[test]
     fn picks_best_at_or_below_max_height() {
-        let qualities = vec![
-            q("2160p", "2160p"),
-            q("1080p", "1080p"),
-            q("720p", "720p"),
-        ];
+        let qualities = vec![q("2160p", "2160p"), q("1080p", "1080p"), q("720p", "720p")];
         let selected = select_default_quality(&qualities, &DefaultQualityPolicy::default(), false);
         assert_eq!(selected.as_deref(), Some("1080p"));
     }
@@ -232,15 +233,31 @@ mod tests {
             q("360p", "360p"),
             q("130k-audio", "medium (audio only)"),
         ];
-        let policy = DefaultQualityPolicy { max_height: 240, prefer_mp4: true };
-        assert_eq!(select_default_quality(&qualities, &policy, false).as_deref(), Some("240p-videoonly"));
+        let policy = DefaultQualityPolicy {
+            max_height: 240,
+            prefer_mp4: true,
+        };
+        assert_eq!(
+            select_default_quality(&qualities, &policy, false).as_deref(),
+            Some("240p-videoonly")
+        );
     }
 
     #[test]
     fn everything_above_the_cap_picks_the_smallest() {
-        let qualities = vec![q("1080p", "1080p"), q("480p", "480p"), q("720p-videoonly", "720p")];
-        let policy = DefaultQualityPolicy { max_height: 240, prefer_mp4: true };
-        assert_eq!(select_default_quality(&qualities, &policy, false).as_deref(), Some("480p"));
+        let qualities = vec![
+            q("1080p", "1080p"),
+            q("480p", "480p"),
+            q("720p-videoonly", "720p"),
+        ];
+        let policy = DefaultQualityPolicy {
+            max_height: 240,
+            prefer_mp4: true,
+        };
+        assert_eq!(
+            select_default_quality(&qualities, &policy, false).as_deref(),
+            Some("480p")
+        );
     }
 
     #[test]

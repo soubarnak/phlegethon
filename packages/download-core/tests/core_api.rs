@@ -194,9 +194,13 @@ fn enqueue_clear_http_returns_enqueue_direct() {
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let result = core.enqueue("https://example.com/file.zip", None);
-    assert!(
-        matches!(result, Ok(EnqueueOutcome::EnqueueDirect { job_id: _, destination: _ }))
-    );
+    assert!(matches!(
+        result,
+        Ok(EnqueueOutcome::EnqueueDirect {
+            job_id: _,
+            destination: _
+        })
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +216,10 @@ fn enqueue_direct_job_writes_bytes_to_disk() {
 
     let result = core.enqueue("https://example.com/file.zip", None).unwrap();
     let (_job_id, destination) = match result {
-        EnqueueOutcome::EnqueueDirect { job_id, destination } => (job_id, destination),
+        EnqueueOutcome::EnqueueDirect {
+            job_id,
+            destination,
+        } => (job_id, destination),
         _ => panic!("expected enqueue_direct"),
     };
 
@@ -276,7 +283,10 @@ fn single_connection_enqueue_writes_matching_bytes_via_part_file() {
 
     let result = core.enqueue("https://example.com/file.zip", None).unwrap();
     let (job_id, destination) = match result {
-        EnqueueOutcome::EnqueueDirect { job_id, destination } => (job_id, destination),
+        EnqueueOutcome::EnqueueDirect {
+            job_id,
+            destination,
+        } => (job_id, destination),
         _ => panic!("expected enqueue_direct"),
     };
 
@@ -359,7 +369,9 @@ fn pause_pending_job_emits_paused_event() {
 
     let events = collect_events(&rx);
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobPaused { job_id: id } if id == &job_id)),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobPaused { job_id: id } if id == &job_id)),
         "should emit JobPaused event, got {:?}",
         events
     );
@@ -560,7 +572,10 @@ fn discard_completed_job_keeps_files_on_disk() {
 
     let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
     let final_path = job_dir.join("file.zip");
-    assert!(final_path.exists(), "completed job should have written the file");
+    assert!(
+        final_path.exists(),
+        "completed job should have written the file"
+    );
     let bytes_before = std::fs::read(&final_path).unwrap();
 
     collect_events(&rx); // drain completion events
@@ -758,7 +773,7 @@ fn discard_during_in_flight_extractor_download_stops_and_deletes_partials() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -858,7 +873,7 @@ fn pause_during_in_flight_extractor_download_stops_promptly() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -1079,13 +1094,9 @@ impl HttpBackend for StagedFakeHttp {
 #[test]
 fn interrupt_then_resume_continues_from_last_byte() {
     // Given a staged (interruptible) HTTP backend
-    let content =
-        b"hello world this is a resumable test file with enough data to split".to_vec();
+    let content = b"hello world this is a resumable test file with enough data to split".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/resumable.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/resumable.zip".into(), content.clone());
     let http = StagedFakeHttp::new(map);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -1180,13 +1191,9 @@ fn interrupt_then_resume_continues_from_last_byte() {
 
 #[test]
 fn restart_restores_jobs_and_resumes_from_part() {
-    let content =
-        b"restart persistence test file with enough bytes to split cleanly".to_vec();
+    let content = b"restart persistence test file with enough bytes to split cleanly".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/restart.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/restart.zip".into(), content.clone());
     let http = StagedFakeHttp::new(map);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -1219,11 +1226,11 @@ fn restart_restores_jobs_and_resumes_from_part() {
         "persisted queue should contain job id"
     );
 
-    let part_path = root
-        .join("jobs")
-        .join(&job_id)
-        .join("restart.zip.part");
-    assert!(part_path.exists(), "partial file should exist after first pass");
+    let part_path = root.join("jobs").join(&job_id).join("restart.zip.part");
+    assert!(
+        part_path.exists(),
+        "partial file should exist after first pass"
+    );
     let partial_len = std::fs::metadata(&part_path).unwrap().len();
     assert!(partial_len > 0 && partial_len < content.len() as u64);
 
@@ -1240,7 +1247,10 @@ fn restart_restores_jobs_and_resumes_from_part() {
     );
 
     let final_path = root.join("jobs").join(&job_id).join("restart.zip");
-    assert!(final_path.exists(), "final file should exist after restart resume");
+    assert!(
+        final_path.exists(),
+        "final file should exist after restart resume"
+    );
     let on_disk = std::fs::read(&final_path).unwrap();
     assert_eq!(on_disk, content);
 }
@@ -1251,8 +1261,7 @@ fn restart_restores_jobs_and_resumes_from_part() {
 
 #[test]
 fn relaunch_in_progress_http_job_auto_resumes() {
-    let content =
-        b"relaunch downloading test file with enough bytes to split cleanly".to_vec();
+    let content = b"relaunch downloading test file with enough bytes to split cleanly".to_vec();
     let mut map = std::collections::HashMap::new();
     map.insert(
         "https://example.com/relaunch-downloading.zip".into(),
@@ -1300,13 +1309,9 @@ fn relaunch_in_progress_http_job_auto_resumes() {
 
 #[test]
 fn relaunch_paused_job_stays_paused() {
-    let content =
-        b"relaunch paused test file with enough bytes to split cleanly".to_vec();
+    let content = b"relaunch paused test file with enough bytes to split cleanly".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/relaunch-paused.zip".into(),
-        content,
-    );
+    map.insert("https://example.com/relaunch-paused.zip".into(), content);
     let http = StagedFakeHttp::new(map);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -1499,10 +1504,7 @@ fn resume_starts_from_last_byte_not_zero() {
     // when Range is available.
     let full_content = b"exact content for resume test".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/exact.zip".into(),
-        full_content.clone(),
-    );
+    map.insert("https://example.com/exact.zip".into(), full_content.clone());
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = make_core(Box::new(StagedFakeHttp::new(map)));
@@ -1520,14 +1522,10 @@ fn resume_starts_from_last_byte_not_zero() {
     let events = collect_events(&rx);
 
     // Verify completed with expected total
-    let completed = events
-        .iter()
-        .find_map(|e| match e {
-            CoreEvent::JobCompleted {
-                bytes_written, ..
-            } => Some(*bytes_written),
-            _ => None,
-        });
+    let completed = events.iter().find_map(|e| match e {
+        CoreEvent::JobCompleted { bytes_written, .. } => Some(*bytes_written),
+        _ => None,
+    });
     assert_eq!(
         completed,
         Some(full_content.len() as u64),
@@ -1555,21 +1553,16 @@ fn resume_starts_from_last_byte_not_zero() {
 
 #[test]
 fn progress_events_show_cumulative_bytes_on_resume() {
-    let content =
-        b"cumulative progress tracking for resumable transfer test".to_vec();
+    let content = b"cumulative progress tracking for resumable transfer test".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/progress.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/progress.zip".into(), content.clone());
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = make_core(Box::new(StagedFakeHttp::new(map)));
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let _job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/progress.zip");
+    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/progress.zip");
 
     // First pass — partial
     core.process_pending().unwrap();
@@ -1632,8 +1625,7 @@ fn paused_then_resumed_job_uses_range_not_full_redownload() {
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/pause-resume.zip");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/pause-resume.zip");
 
     // First pass — partial
     core.process_pending().unwrap();
@@ -1682,8 +1674,7 @@ fn retry_resets_bytes_received_and_starts_from_zero() {
     let (mut core, rx) = make_core(Box::new(FailingHttp));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/fail-retry.zip");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/fail-retry.zip");
 
     // First attempt fails
     core.process_pending().unwrap();
@@ -1776,18 +1767,14 @@ fn default_transfer_is_uncapped() {
         .repeat(1)
         .to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/uncapped.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/uncapped.zip".into(), content.clone());
     let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx, _clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let _job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/uncapped.zip");
+    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/uncapped.zip");
 
     core.process_pending().unwrap();
     let events = collect_events(&rx);
@@ -1851,8 +1838,7 @@ fn global_bandwidth_cap_limits_aggregate_throughput() {
 #[test]
 fn per_job_bandwidth_cap_limits_that_job_without_global() {
     let content_a = b"small file that fits in one call"; // ~32 bytes
-    let content_b =
-        b"this is a longer file content that spans multiple iterations when capped";
+    let content_b = b"this is a longer file content that spans multiple iterations when capped";
     let mut map = std::collections::HashMap::new();
     map.insert("https://example.com/a.zip".into(), content_a.to_vec());
     map.insert("https://example.com/b.zip".into(), content_b.to_vec());
@@ -1992,18 +1978,14 @@ fn global_cap_more_restrictive_than_per_job_is_effective() {
 fn bandwidth_cap_does_not_affect_small_transfers() {
     let content = b"small".to_vec(); // 5 bytes
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/small.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/small.zip".into(), content.clone());
     let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx, _clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let _job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/small.zip");
+    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/small.zip");
 
     core.set_global_bandwidth_cap(100);
 
@@ -2019,8 +2001,7 @@ fn bandwidth_cap_does_not_affect_small_transfers() {
 
 #[test]
 fn set_and_remove_global_bandwidth_cap_restores_uncapped() {
-    let content =
-        b"this file should transfer uncapped after removing the global cap".to_vec();
+    let content = b"this file should transfer uncapped after removing the global cap".to_vec();
     let mut map = std::collections::HashMap::new();
     map.insert(
         "https://example.com/global-switch.zip".into(),
@@ -2032,8 +2013,7 @@ fn set_and_remove_global_bandwidth_cap_restores_uncapped() {
     let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let _job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/global-switch.zip");
+    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/global-switch.zip");
 
     core.set_global_bandwidth_cap(5);
     assert_eq!(core.global_bandwidth_cap(), Some(5));
@@ -2060,21 +2040,16 @@ fn set_and_remove_global_bandwidth_cap_restores_uncapped() {
 
 #[test]
 fn set_and_remove_job_bandwidth_cap_restores_uncapped() {
-    let content =
-        b"this file should transfer uncapped after removing the per-job cap".to_vec();
+    let content = b"this file should transfer uncapped after removing the per-job cap".to_vec();
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/job-switch.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/job-switch.zip".into(), content.clone());
     let http = no_range_http(map);
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx, clock) = make_capped_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    let job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/job-switch.zip");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/job-switch.zip");
 
     core.set_job_bandwidth_cap(&job_id, 5).unwrap();
     assert_eq!(core.job_bandwidth_cap(&job_id).unwrap(), Some(5));
@@ -2242,10 +2217,7 @@ fn pause_during_in_flight_transfer_stops_without_full_body() {
 
     let content = vec![b'P'; 256];
     let mut map = std::collections::HashMap::new();
-    map.insert(
-        "https://example.com/pause-mid.zip".into(),
-        content.clone(),
-    );
+    map.insert("https://example.com/pause-mid.zip".into(), content.clone());
     let http = SlowNoRangeFakeHttp {
         responses: Arc::new(Mutex::new(map)),
     };
@@ -2330,21 +2302,26 @@ fn probe_returns_items_and_qualities() {
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     // Probe
-    let result = core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    let result = core
+        .probe("https://www.youtube.com/watch?v=abc123")
+        .unwrap();
     assert_eq!(result.items.len(), 1);
     assert_eq!(result.items[0].title, "Test Video");
     assert_eq!(result.items[0].qualities.len(), 2);
 
     // Should emit a ProbeResult event
     let events = collect_events(&rx);
-    let has_probe_event = events.iter().any(|e| matches!(e, CoreEvent::ProbeResult { .. }));
-    assert!(has_probe_event, "should emit ProbeResult event, got: {events:?}");
+    let has_probe_event = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::ProbeResult { .. }));
+    assert!(
+        has_probe_event,
+        "should emit ProbeResult event, got: {events:?}"
+    );
 }
 
 /// Helper: create a FakeHttp that knows the probe item URLs.
-fn fake_http_with_responses(
-    pairs: Vec<(&str, &[u8])>,
-) -> FakeHttp {
+fn fake_http_with_responses(pairs: Vec<(&str, &[u8])>) -> FakeHttp {
     let mut map = std::collections::HashMap::new();
     for (url, data) in pairs {
         map.insert(url.to_string(), data.to_vec());
@@ -2364,13 +2341,23 @@ fn probe_failure_emits_probe_failed_event() {
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     // Probe unknown URL — should fail
-    let err = core.probe("https://www.youtube.com/watch?v=unknown").unwrap_err();
-    assert!(err.contains("no response configured"), "error should mention missing config, got: {err}");
+    let err = core
+        .probe("https://www.youtube.com/watch?v=unknown")
+        .unwrap_err();
+    assert!(
+        err.contains("no response configured"),
+        "error should mention missing config, got: {err}"
+    );
 
     // Should emit a ProbeFailed event
     let events = collect_events(&rx);
-    let has_fail_event = events.iter().any(|e| matches!(e, CoreEvent::ProbeFailed { .. }));
-    assert!(has_fail_event, "should emit ProbeFailed event, got: {events:?}");
+    let has_fail_event = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::ProbeFailed { .. }));
+    assert!(
+        has_fail_event,
+        "should emit ProbeFailed event, got: {events:?}"
+    );
 }
 
 #[test]
@@ -2386,9 +2373,7 @@ fn confirm_probe_selection_creates_jobs_for_selected_items() {
 
     // Register the probe item URL in the HTTP backend
     let video_data = b"fake mp4 video content".to_vec();
-    let http = fake_http_with_responses(vec![
-        ("https://cdn.youtube.com/video.mp4", &video_data),
-    ]);
+    let http = fake_http_with_responses(vec![("https://cdn.youtube.com/video.mp4", &video_data)]);
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
@@ -2396,7 +2381,8 @@ fn confirm_probe_selection_creates_jobs_for_selected_items() {
     core.set_library_root(root.clone()).unwrap();
 
     // First probe
-    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    core.probe("https://www.youtube.com/watch?v=abc123")
+        .unwrap();
     collect_events(&rx); // drain
 
     // Confirm selection — pick 720p
@@ -2406,7 +2392,7 @@ fn confirm_probe_selection_creates_jobs_for_selected_items() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1, "should create exactly one job");
@@ -2474,7 +2460,7 @@ fn confirm_probe_selection_creates_multiple_jobs_for_batch() {
                 quality_id: "720p".to_string(),
             },
         ],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 2, "should create two jobs");
@@ -2500,7 +2486,7 @@ fn confirm_without_previous_probe_errors() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
@@ -2523,7 +2509,8 @@ fn confirm_with_invalid_item_id_errors() {
     let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    core.probe("https://www.youtube.com/watch?v=abc123")
+        .unwrap();
     collect_events(&rx); // drain
 
     // Try to confirm a non-existent item
@@ -2533,7 +2520,7 @@ fn confirm_with_invalid_item_id_errors() {
             item_id: "nonexistent-item".to_string(),
             quality_id: "1080p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
@@ -2556,7 +2543,8 @@ fn confirm_with_invalid_quality_id_errors() {
     let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
-    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    core.probe("https://www.youtube.com/watch?v=abc123")
+        .unwrap();
     collect_events(&rx); // drain
 
     // Try to confirm with a non-existent quality
@@ -2566,7 +2554,7 @@ fn confirm_with_invalid_quality_id_errors() {
             item_id: "item-1".to_string(),
             quality_id: "8k".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
@@ -2588,7 +2576,8 @@ fn confirm_without_library_root_errors() {
     let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
     // No library root set
 
-    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    core.probe("https://www.youtube.com/watch?v=abc123")
+        .unwrap();
     collect_events(&rx); // drain
 
     let selection = ProbeSelection {
@@ -2597,7 +2586,7 @@ fn confirm_without_library_root_errors() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let err = core.confirm_probe_selection(&selection, None).unwrap_err();
     assert!(
@@ -2616,19 +2605,18 @@ fn batch_job_destination_derives_from_source_name() {
     toolchain.insert_batch(
         "https://youtube.com/playlist?list=ABC",
         "My Awesome Playlist",
-        vec![
-            (
-                "vid-1",
-                "Video One",
-                "https://youtube.com/watch?v=1",
-                vec![("1080p", "1080p")],
-            ),
-        ],
+        vec![(
+            "vid-1",
+            "Video One",
+            "https://youtube.com/watch?v=1",
+            vec![("1080p", "1080p")],
+        )],
     );
 
-    let http = fake_http_with_responses(vec![
-        ("https://youtube.com/watch?v=1", b"video one content"),
-    ]);
+    let http = fake_http_with_responses(vec![(
+        "https://youtube.com/watch?v=1",
+        b"video one content",
+    )]);
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
@@ -2644,7 +2632,7 @@ fn batch_job_destination_derives_from_source_name() {
             item_id: "vid-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
@@ -2677,16 +2665,18 @@ fn single_video_probe_without_source_name_uses_title_for_subfolder() {
         vec![("1080p", "1080p")],
     );
 
-    let http = fake_http_with_responses(vec![
-        ("https://cdn.youtube.com/video.mp4", b"fake mp4 content"),
-    ]);
+    let http = fake_http_with_responses(vec![(
+        "https://cdn.youtube.com/video.mp4",
+        b"fake mp4 content",
+    )]);
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    core.probe("https://www.youtube.com/watch?v=abc123")
+        .unwrap();
     collect_events(&rx);
 
     let selection = ProbeSelection {
@@ -2695,7 +2685,7 @@ fn single_video_probe_without_source_name_uses_title_for_subfolder() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
@@ -2732,16 +2722,18 @@ fn probe_created_jobs_share_same_lifecycle_as_direct_jobs() {
         vec![("1080p", "1080p")],
     );
 
-    let http = fake_http_with_responses(vec![
-        ("https://cdn.youtube.com/video.mp4", b"fake video content"),
-    ]);
+    let http = fake_http_with_responses(vec![(
+        "https://cdn.youtube.com/video.mp4",
+        b"fake video content",
+    )]);
 
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     // Create a probe-confirmed job
-    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    core.probe("https://www.youtube.com/watch?v=abc123")
+        .unwrap();
     collect_events(&rx);
 
     let selection = ProbeSelection {
@@ -2750,7 +2742,7 @@ fn probe_created_jobs_share_same_lifecycle_as_direct_jobs() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(job_ids.len(), 1);
@@ -2803,7 +2795,10 @@ fn probe_created_jobs_use_same_storage_rules() {
     // Register both URLs in the HTTP backend
     let http = fake_http_with_responses(vec![
         ("https://example.com/file.zip", b"hello this is a test file"),
-        ("https://cdn.youtube.com/probed.mp4", b"probed video content"),
+        (
+            "https://cdn.youtube.com/probed.mp4",
+            b"probed video content",
+        ),
     ]);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -2812,8 +2807,7 @@ fn probe_created_jobs_use_same_storage_rules() {
     core.set_library_root(root.clone()).unwrap();
 
     // Create a direct job
-    let direct_job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    let direct_job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
 
     // Create a probe-confirmed job
     core.probe("https://www.youtube.com/watch?v=probe").unwrap();
@@ -2824,7 +2818,7 @@ fn probe_created_jobs_use_same_storage_rules() {
             item_id: "item-1".to_string(),
             quality_id: "1080p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let probe_job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     assert_eq!(probe_job_ids.len(), 1);
@@ -2872,10 +2866,7 @@ struct TrackedFakeHttp {
 }
 
 impl TrackedFakeHttp {
-    fn new(
-        responses: std::collections::HashMap<String, Vec<u8>>,
-        range_supported: bool,
-    ) -> Self {
+    fn new(responses: std::collections::HashMap<String, Vec<u8>>, range_supported: bool) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -2949,8 +2940,7 @@ fn segmented_transfer_writes_matching_bytes_via_part_file() {
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
 
     core.process_pending().unwrap();
     let events = collect_events(&rx);
@@ -3006,12 +2996,14 @@ fn segmented_transfer_completes_to_correct_file() {
     let http = TrackedFakeHttp::new(map, true);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http.clone()), Box::new(FakeExtractorToolchain::new()));
+    let (mut core, rx) = Core::new(
+        Box::new(http.clone()),
+        Box::new(FakeExtractorToolchain::new()),
+    );
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
 
     // Process pending — should complete in one call via segmented transfer
     core.process_pending().unwrap();
@@ -3019,9 +3011,7 @@ fn segmented_transfer_completes_to_correct_file() {
 
     // Should have completed with the full content
     let completed = events.iter().find_map(|e| match e {
-        CoreEvent::JobCompleted {
-            bytes_written, ..
-        } => Some(*bytes_written),
+        CoreEvent::JobCompleted { bytes_written, .. } => Some(*bytes_written),
         _ => None,
     });
     assert_eq!(
@@ -3052,12 +3042,14 @@ fn segmented_transfer_makes_multiple_concurrent_range_requests() {
     let http = TrackedFakeHttp::new(map, true);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http.clone()), Box::new(FakeExtractorToolchain::new()));
+    let (mut core, rx) = Core::new(
+        Box::new(http.clone()),
+        Box::new(FakeExtractorToolchain::new()),
+    );
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let _job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
+    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/segmented.bin");
 
     // Process
     core.process_pending().unwrap();
@@ -3096,24 +3088,25 @@ fn segmented_transfer_makes_multiple_concurrent_range_requests() {
     }
 
     // There should be a range starting at 0 (first segment)
-    let starts_at_zero = calls.iter().any(|(_, r)| matches!(r, Some(rng) if rng.start == 0));
+    let starts_at_zero = calls
+        .iter()
+        .any(|(_, r)| matches!(r, Some(rng) if rng.start == 0));
     assert!(
         starts_at_zero,
         "should have a segment starting at 0: {calls:?}"
     );
 
     // The final segment should end at the total file size (100)
-    let ends_at_100 = calls.iter().any(|(_, r)| matches!(r, Some(rng) if rng.end == 100));
+    let ends_at_100 = calls
+        .iter()
+        .any(|(_, r)| matches!(r, Some(rng) if rng.end == 100));
     assert!(
         ends_at_100,
         "should have a segment ending at 100: {calls:?}"
     );
 
     // Ranges should be non-overlapping and cover 0..100
-    let mut ranges: Vec<_> = calls
-        .iter()
-        .filter_map(|(_, r)| r.clone())
-        .collect();
+    let mut ranges: Vec<_> = calls.iter().filter_map(|(_, r)| r.clone()).collect();
     ranges.sort_by_key(|r| r.start);
 
     // Check ranges are contiguous
@@ -3139,12 +3132,14 @@ fn segmented_transfer_falls_back_to_single_connection_when_range_not_supported()
     let http = TrackedFakeHttp::new(map, false); // range NOT supported
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http.clone()), Box::new(FakeExtractorToolchain::new()));
+    let (mut core, rx) = Core::new(
+        Box::new(http.clone()),
+        Box::new(FakeExtractorToolchain::new()),
+    );
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/fallback.bin");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/fallback.bin");
 
     // Process pending
     core.process_pending().unwrap();
@@ -3152,9 +3147,7 @@ fn segmented_transfer_falls_back_to_single_connection_when_range_not_supported()
 
     // Should complete (via single-connection fallback)
     let completed = events.iter().find_map(|e| match e {
-        CoreEvent::JobCompleted {
-            bytes_written, ..
-        } => Some(*bytes_written),
+        CoreEvent::JobCompleted { bytes_written, .. } => Some(*bytes_written),
         _ => None,
     });
     assert_eq!(
@@ -3200,20 +3193,27 @@ fn segmented_transfer_handles_small_files_with_single_segment() {
     let http = TrackedFakeHttp::new(map, true);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = Core::new(Box::new(http.clone()), Box::new(FakeExtractorToolchain::new()));
+    let (mut core, rx) = Core::new(
+        Box::new(http.clone()),
+        Box::new(FakeExtractorToolchain::new()),
+    );
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/small.bin");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/small.bin");
 
     // Process
     core.process_pending().unwrap();
     let events = collect_events(&rx);
 
     // Should complete
-    let completed = events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
-    assert!(completed, "small file should complete via segmented transfer");
+    let completed = events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobCompleted { .. }));
+    assert!(
+        completed,
+        "small file should complete via segmented transfer"
+    );
 
     // Should make seg_count (3) fetch calls, each getting 1 byte
     let calls = http.ranges();
@@ -3249,8 +3249,7 @@ fn segmented_transfer_zero_byte_file_fails_gracefully() {
     let root = tmp.path().join("library");
     core.set_library_root(root.clone()).unwrap();
 
-    let _job_id =
-        enqueue_direct_job_id(&mut core, "https://example.com/empty.bin");
+    let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/empty.bin");
 
     // Processing an empty file should not panic
     core.process_pending().unwrap();
@@ -3260,10 +3259,7 @@ fn segmented_transfer_zero_byte_file_fails_gracefully() {
     let has_failed = events
         .iter()
         .any(|e| matches!(e, CoreEvent::JobFailed { .. }));
-    assert!(
-        has_failed,
-        "empty file should fail, got events: {events:?}"
-    );
+    assert!(has_failed, "empty file should fail, got events: {events:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -3593,10 +3589,7 @@ fn mirror_set_primary_succeeds_no_failover() {
             .collect();
         std::fs::read(files[0].path()).unwrap()
     };
-    assert_eq!(
-        on_disk, content,
-        "should have primary mirror content"
-    );
+    assert_eq!(on_disk, content, "should have primary mirror content");
 }
 
 // Page-local mirror lists can extend a job's mirror set.
@@ -3828,8 +3821,10 @@ fn mirror_set_is_accessible_from_job() {
     let job_id = enqueue_direct_job_id(&mut core, "https://primary.example.com/file.zip");
 
     // Add mirrors
-    core.add_job_mirror(&job_id, "https://m1.example.com/file.zip".into()).unwrap();
-    core.add_job_mirror(&job_id, "https://m2.example.com/file.zip".into()).unwrap();
+    core.add_job_mirror(&job_id, "https://m1.example.com/file.zip".into())
+        .unwrap();
+    core.add_job_mirror(&job_id, "https://m2.example.com/file.zip".into())
+        .unwrap();
 
     let mirrors = core.job_mirrors(&job_id).unwrap();
     assert_eq!(mirrors.len(), 3);
@@ -4254,7 +4249,7 @@ fn silent_extractor_download_emits_mid_transfer_job_progress_from_disk_growth() 
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -4364,7 +4359,7 @@ fn extractor_quality_with_known_size_emits_job_progress_total_bytes() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -4475,7 +4470,7 @@ fn extractor_quality_without_size_keeps_job_progress_total_none() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
     let job_id = job_ids[0].clone();
@@ -4543,20 +4538,14 @@ fn changing_library_root_affects_default_destination_for_new_jobs() {
     let (mut core, _rx) = make_core(Box::new(fake_http()));
 
     core.set_library_root(root_a.clone()).unwrap();
-    let dest_a = match core
-        .enqueue("https://example.com/a.zip", None)
-        .unwrap()
-    {
+    let dest_a = match core.enqueue("https://example.com/a.zip", None).unwrap() {
         EnqueueOutcome::EnqueueDirect { destination, .. } => destination,
         _ => panic!("expected enqueue_direct"),
     };
     assert!(dest_a.starts_with(root_a.join("jobs")));
 
     core.set_library_root(root_b.clone()).unwrap();
-    let dest_b = match core
-        .enqueue("https://example.com/b.zip", None)
-        .unwrap()
-    {
+    let dest_b = match core.enqueue("https://example.com/b.zip", None).unwrap() {
         EnqueueOutcome::EnqueueDirect { destination, .. } => destination,
         _ => panic!("expected enqueue_direct"),
     };
@@ -4573,10 +4562,7 @@ fn enqueue_accepts_absolute_destination_outside_library_root() {
     core.set_library_root(root).unwrap();
 
     let (job_id, destination) = match core
-        .enqueue(
-            "https://example.com/offroot.zip",
-            Some(off_root.clone()),
-        )
+        .enqueue("https://example.com/offroot.zip", Some(off_root.clone()))
         .unwrap()
     {
         EnqueueOutcome::EnqueueDirect {
@@ -4683,7 +4669,7 @@ fn confirm_probe_selection_accepts_absolute_destination_override() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core
         .confirm_probe_selection(&selection, Some(off_root.clone()))
@@ -4806,15 +4792,13 @@ fn preview_probe_destination_shows_batch_subfolder_under_library_root() {
                 quality_id: "1080p".to_string(),
             },
         ],
-            media_extras: None,
+        media_extras: None,
     };
 
     let preview = core
         .preview_probe_destination(&selection, None)
         .expect("preview should resolve");
-    let expected = root
-        .join("jobs")
-        .join("My_Awesome_Playlist-\u{2026}");
+    let expected = root.join("jobs").join("My_Awesome_Playlist-\u{2026}");
     assert_eq!(
         preview.path_display,
         expected.display().to_string(),
@@ -4868,7 +4852,7 @@ fn preview_probe_destination_shows_nested_pattern_for_single_save_to_override() 
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
 
     let preview = core
@@ -4926,7 +4910,7 @@ fn preview_probe_destination_shows_multi_item_pattern_under_save_to_override() {
                 quality_id: "1080p".to_string(),
             },
         ],
-            media_extras: None,
+        media_extras: None,
     };
 
     let preview = core
@@ -4998,7 +4982,7 @@ fn extractor_completed_removes_orphan_temp_siblings_under_job_destination() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core
         .confirm_probe_selection(&selection, Some(save_to.clone()))
@@ -5076,7 +5060,7 @@ fn single_item_save_to_nests_unique_job_destination_under_parent() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core
         .confirm_probe_selection(&selection, Some(shared.clone()))
@@ -5112,10 +5096,7 @@ fn discard_save_to_override_deletes_only_job_owned_tree() {
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let (job_id, job_dir) = match core
-        .enqueue(
-            "https://example.com/override.zip",
-            Some(shared.clone()),
-        )
+        .enqueue("https://example.com/override.zip", Some(shared.clone()))
         .unwrap()
     {
         EnqueueOutcome::EnqueueDirect {
@@ -5197,7 +5178,7 @@ fn extractor_cleanup_and_byte_totals_ignore_siblings_in_shared_parent() {
             item_id: "item-1".to_string(),
             quality_id: "720p".to_string(),
         }],
-            media_extras: None,
+        media_extras: None,
     };
     let job_ids = core
         .confirm_probe_selection(&selection, Some(shared.clone()))
@@ -5372,7 +5353,10 @@ fn slow_tracking_http(urls: &[(&str, usize)]) -> SlowTrackingHttp {
     slow_tracking_http_with_delay(urls, std::time::Duration::from_millis(80))
 }
 
-fn slow_tracking_http_with_delay(urls: &[(&str, usize)], delay: std::time::Duration) -> SlowTrackingHttp {
+fn slow_tracking_http_with_delay(
+    urls: &[(&str, usize)],
+    delay: std::time::Duration,
+) -> SlowTrackingHttp {
     let mut map = std::collections::HashMap::new();
     for (url, size) in urls {
         map.insert((*url).to_string(), vec![b'x'; *size]);
@@ -5405,23 +5389,18 @@ fn set_active_job_limit_rejects_zero() {
 #[test]
 fn active_job_limit_caps_concurrent_transfers() {
     let urls: Vec<_> = (1..=5)
-        .map(|n| {
-            (
-                format!("https://example.com/{n}.zip"),
-                64,
-            )
-        })
+        .map(|n| (format!("https://example.com/{n}.zip"), 64))
         .collect();
-    let url_refs: Vec<(&str, usize)> = urls
-        .iter()
-        .map(|(u, s)| (u.as_str(), *s))
-        .collect();
+    let url_refs: Vec<(&str, usize)> = urls.iter().map(|(u, s)| (u.as_str(), *s)).collect();
     let http = slow_tracking_http(&url_refs);
 
     let tmp = tempfile::tempdir().unwrap();
     let (core, rx) = Core::new(Box::new(http.clone()), Box::new(fake_toolchain()));
     let core = Arc::new(Mutex::new(core));
-    core.lock().unwrap().set_library_root(tmp.path().join("library")).unwrap();
+    core.lock()
+        .unwrap()
+        .set_library_root(tmp.path().join("library"))
+        .unwrap();
 
     let mut job_ids = Vec::new();
     for (url, _) in &urls {
@@ -5443,7 +5422,9 @@ fn active_job_limit_caps_concurrent_transfers() {
     Core::dispatch_pending(Arc::clone(&core)).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));
     assert!(
-        http.max_concurrent.load(std::sync::atomic::Ordering::SeqCst) <= 3,
+        http.max_concurrent
+            .load(std::sync::atomic::Ordering::SeqCst)
+            <= 3,
         "at most 3 jobs should transfer concurrently"
     );
 
@@ -5488,19 +5469,16 @@ fn reorder_does_not_preempt_active_transfer() {
     let urls: Vec<String> = (1..=3)
         .map(|n| format!("https://example.com/job{n}.zip"))
         .collect();
-    let url_refs: Vec<(&str, usize)> = urls
-        .iter()
-        .map(|u| (u.as_str(), 256))
-        .collect();
-    let http = slow_tracking_http_with_delay(
-        &url_refs,
-        std::time::Duration::from_millis(400),
-    );
+    let url_refs: Vec<(&str, usize)> = urls.iter().map(|u| (u.as_str(), 256)).collect();
+    let http = slow_tracking_http_with_delay(&url_refs, std::time::Duration::from_millis(400));
 
     let tmp = tempfile::tempdir().unwrap();
     let (core, _rx) = Core::new(Box::new(http), Box::new(fake_toolchain()));
     let core = Arc::new(Mutex::new(core));
-    core.lock().unwrap().set_library_root(tmp.path().join("library")).unwrap();
+    core.lock()
+        .unwrap()
+        .set_library_root(tmp.path().join("library"))
+        .unwrap();
 
     let mut job_ids = Vec::new();
     for url in &urls {
@@ -5552,8 +5530,7 @@ fn reorder_does_not_preempt_active_transfer() {
 // Acceptance: Integrity Check (issue #51)
 // ---------------------------------------------------------------------------
 
-const HELLO_FILE_SHA256: &str =
-    "f69af9e91e9e5d93dac3c583e5e896dc71b756ef1a42ecbc2a0028393b487868";
+const HELLO_FILE_SHA256: &str = "f69af9e91e9e5d93dac3c583e5e896dc71b756ef1a42ecbc2a0028393b487868";
 
 #[test]
 fn integrity_check_pass_completes_when_hash_matches() {
@@ -5569,11 +5546,15 @@ fn integrity_check_pass_completes_when_hash_matches() {
     let events = collect_events(&rx);
 
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "matching hash should complete, got: {events:?}"
     );
     assert!(
-        !events.iter().any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
         "matching hash must not fail"
     );
 
@@ -5605,7 +5586,9 @@ fn integrity_check_mismatch_fails_and_keeps_file_on_disk() {
         "mismatch should emit JobFailed, got: {events:?}"
     );
     assert!(
-        !events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "mismatch must not complete"
     );
 
@@ -5637,11 +5620,15 @@ fn integrity_check_skipped_when_no_expected_hash() {
     let events = collect_events(&rx);
 
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "no hash should complete normally, got: {events:?}"
     );
     assert!(
-        !events.iter().any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
         "no hash must not fail verification"
     );
 
@@ -5676,7 +5663,9 @@ fn add_metalink_to_job_sets_expected_hash_from_xml() {
     let events = collect_events(&rx);
 
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "metalink hash match should complete, got: {events:?}"
     );
 }
@@ -5689,11 +5678,7 @@ fn set_job_expected_hash_from_sidecar_loads_checksum_file() {
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
     let sidecar = tmp.path().join("file.zip.sha256");
-    std::fs::write(
-        &sidecar,
-        format!("{HELLO_FILE_SHA256}  file.zip\n"),
-    )
-    .unwrap();
+    std::fs::write(&sidecar, format!("{HELLO_FILE_SHA256}  file.zip\n")).unwrap();
     core.set_job_expected_hash_from_sidecar(&job_id, &sidecar)
         .unwrap();
 
@@ -5701,7 +5686,9 @@ fn set_job_expected_hash_from_sidecar_loads_checksum_file() {
     let events = collect_events(&rx);
 
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "sidecar hash match should complete, got: {events:?}"
     );
 }
@@ -5752,7 +5739,9 @@ fn disk_precheck_refuses_when_known_size_insufficient() {
         "known size with too little free space should fail clearly, got: {events:?}"
     );
     assert!(
-        !events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "insufficient disk must not complete"
     );
 
@@ -5769,8 +5758,7 @@ fn disk_precheck_allows_when_known_size_fits_with_margin() {
     let tmp = tempfile::tempdir().unwrap();
     let body_len = b"hello world this is a test file".len() as u64;
     let free = required_free_bytes(body_len);
-    let (mut core, rx) =
-        make_core_with_free_space(Box::new(NoRangeFakeHttp(fake_http())), free);
+    let (mut core, rx) = make_core_with_free_space(Box::new(NoRangeFakeHttp(fake_http())), free);
     core.set_library_root(tmp.path().join("library")).unwrap();
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
@@ -5778,11 +5766,15 @@ fn disk_precheck_allows_when_known_size_fits_with_margin() {
     let events = collect_events(&rx);
 
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "known size with enough free space should complete, got: {events:?}"
     );
     assert!(
-        !events.iter().any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
         "sufficient disk must not fail"
     );
 
@@ -5806,9 +5798,7 @@ fn disk_precheck_allows_when_size_unknown() {
 
     let url = "https://example.com/unknown.bin";
     let job_id = {
-        let outcome = core
-            .enqueue(url, None)
-            .expect("enqueue should succeed");
+        let outcome = core.enqueue(url, None).expect("enqueue should succeed");
         match outcome {
             EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
             _ => panic!("expected direct enqueue"),
@@ -5819,7 +5809,9 @@ fn disk_precheck_allows_when_size_unknown() {
     let events = collect_events(&rx);
 
     assert!(
-        events.iter().any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
         "unknown size should start even with zero reported free space, got: {events:?}"
     );
     assert!(
@@ -6067,7 +6059,11 @@ fn remux_stripped_when_ffmpeg_unavailable_and_job_completes() {
         .unwrap();
     let dest = PathBuf::from(&snap.destination);
     let webm = dest.join("clip.webm");
-    assert!(webm.is_file(), "download output retained at {}", webm.display());
+    assert!(
+        webm.is_file(),
+        "download output retained at {}",
+        webm.display()
+    );
 }
 
 #[test]
@@ -6272,7 +6268,11 @@ fn confirm_skips_archived_items_when_shell_omits_them() {
         media_extras: None,
     };
     let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
-    assert_eq!(job_ids.len(), 1, "only non-archived selection should enqueue");
+    assert_eq!(
+        job_ids.len(),
+        1,
+        "only non-archived selection should enqueue"
+    );
 }
 
 #[test]
@@ -6353,7 +6353,8 @@ fn list_history_returns_completed_entries_newest_first() {
     let (mut core, rx) = Core::new(Box::new(http), Box::new(toolchain));
     core.set_library_root(root).unwrap();
 
-    core.probe("https://youtube.com/playlist?list=hist").unwrap();
+    core.probe("https://youtube.com/playlist?list=hist")
+        .unwrap();
     collect_events(&rx);
     let selection = ProbeSelection {
         url: "https://youtube.com/playlist?list=hist".to_string(),
@@ -6386,9 +6387,13 @@ fn list_history_returns_completed_entries_newest_first() {
     let ids: std::collections::HashSet<_> = history.iter().map(|e| e.media_id.as_str()).collect();
     assert_eq!(
         ids,
-        ["hist-first", "hist-second"].into_iter().collect::<std::collections::HashSet<_>>()
+        ["hist-first", "hist-second"]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
     );
-    assert!(history.iter().all(|e| e.outcome == ArchiveOutcome::Completed));
+    assert!(history
+        .iter()
+        .all(|e| e.outcome == ArchiveOutcome::Completed));
 }
 
 #[test]
@@ -6416,7 +6421,10 @@ fn list_history_by_outcome_filters_completed_and_failed() {
     );
     let http = fake_http_with_responses(vec![
         ("https://cdn.youtube.com/ok.mp4", b"ok"),
-        ("https://cdn.youtube.com/bad.mp4", b"bad content for hash test"),
+        (
+            "https://cdn.youtube.com/bad.mp4",
+            b"bad content for hash test",
+        ),
     ]);
 
     let tmp = tempfile::tempdir().unwrap();
@@ -6552,12 +6560,18 @@ fn remove_history_entry_removes_archive_only_and_keeps_files() {
         .find(|e| e.media_id == "item-remove")
         .expect("history entry");
     let output_path = entry.destination.clone();
-    assert!(output_path.exists(), "completed output should exist on disk");
+    assert!(
+        output_path.exists(),
+        "completed output should exist on disk"
+    );
 
     let removed = core.remove_history_entry("item-remove").expect("removed");
     assert_eq!(removed.media_id, "item-remove");
     assert!(core.list_history().is_empty());
-    assert!(output_path.exists(), "remove-from-history must not delete files");
+    assert!(
+        output_path.exists(),
+        "remove-from-history must not delete files"
+    );
     assert!(
         std::fs::metadata(&output_path).unwrap().len() > 0,
         "output file should remain on disk with content"
@@ -6992,7 +7006,8 @@ fn extractor_confirm_applies_filename_template() {
     core.set_filename_template("clip-%(id)s.%(ext)s".to_string())
         .unwrap();
 
-    core.probe("https://www.youtube.com/watch?v=abc123").unwrap();
+    core.probe("https://www.youtube.com/watch?v=abc123")
+        .unwrap();
     let selection = ProbeSelection {
         url: "https://www.youtube.com/watch?v=abc123".to_string(),
         items: vec![ItemSelection {
@@ -7003,8 +7018,7 @@ fn extractor_confirm_applies_filename_template() {
     };
     core.confirm_probe_selection(&selection, None).unwrap();
 
-    let queue_raw =
-        std::fs::read_to_string(root.join(".phlegethon").join("jobs.json")).unwrap();
+    let queue_raw = std::fs::read_to_string(root.join(".phlegethon").join("jobs.json")).unwrap();
     assert!(
         queue_raw.contains("clip-1.mp4"),
         "expected templated filename in persisted job, got: {queue_raw}"
@@ -7042,8 +7056,7 @@ fn filename_template_collision_suffix_in_core_module() {
         upload_date: None,
         ext: "mp4",
     };
-    let (ytdlp, basename) =
-        prepare_extractor_output(&dest, "%(title)s.%(ext)s", &vars);
+    let (ytdlp, basename) = prepare_extractor_output(&dest, "%(title)s.%(ext)s", &vars);
     assert_eq!(ytdlp, basename);
     assert_eq!(basename, "Clip (1).mp4");
 }
@@ -7114,7 +7127,6 @@ fn clear_pending_probe_allows_re_probe_after_cancel() {
     assert!(core.find_active_job_for_url(url).is_none());
 }
 
-
 // ---------------------------------------------------------------------------
 // Transfers run outside the Core mutex (extractor + segmented)
 // ---------------------------------------------------------------------------
@@ -7179,7 +7191,12 @@ impl HttpBackend for SlowRangeFakeHttp {
     }
 }
 
-fn wait_for_status(core: &Arc<Mutex<Core>>, job_id: &str, status: &str, timeout: std::time::Duration) {
+fn wait_for_status(
+    core: &Arc<Mutex<Core>>,
+    job_id: &str,
+    status: &str,
+    timeout: std::time::Duration,
+) {
     let started = std::time::Instant::now();
     loop {
         let snap = core
@@ -7219,7 +7236,8 @@ fn extractor_download_does_not_hold_core_mutex() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
     core.set_library_root(tmp.path().join("library")).unwrap();
-    core.probe("https://www.youtube.com/watch?v=unlocked-ext").unwrap();
+    core.probe("https://www.youtube.com/watch?v=unlocked-ext")
+        .unwrap();
     collect_events(&rx);
     let selection = ProbeSelection {
         url: "https://www.youtube.com/watch?v=unlocked-ext".to_string(),
@@ -7252,13 +7270,21 @@ fn extractor_download_does_not_hold_core_mutex() {
         "list_job_snapshots blocked for {waited:?} during an extractor download"
     );
     assert_eq!(snapshots.len(), 1);
-    assert_eq!(snapshots[0].status, "downloading", "active transfers report downloading");
+    assert_eq!(
+        snapshots[0].status, "downloading",
+        "active transfers report downloading"
+    );
     assert!(
         *chunks_written.lock().unwrap() < 40,
         "snapshot should have been taken mid-download"
     );
 
-    wait_for_status(&core, &job_id, "completed", std::time::Duration::from_secs(10));
+    wait_for_status(
+        &core,
+        &job_id,
+        "completed",
+        std::time::Duration::from_secs(10),
+    );
     let events = collect_events(&rx);
     assert!(
         events
@@ -7272,7 +7298,10 @@ fn extractor_download_does_not_hold_core_mutex() {
 fn segmented_pause_then_resume_produces_intact_file() {
     let content: Vec<u8> = (0..400u32).map(|i| (i % 251) as u8).collect();
     let mut map = std::collections::HashMap::new();
-    map.insert("https://example.com/seg-pause.bin".to_string(), content.clone());
+    map.insert(
+        "https://example.com/seg-pause.bin".to_string(),
+        content.clone(),
+    );
     let http = SlowRangeFakeHttp {
         responses: Arc::new(Mutex::new(map)),
         delay_per_byte: std::time::Duration::from_millis(2),
@@ -7308,7 +7337,10 @@ fn segmented_pause_then_resume_produces_intact_file() {
         .into_iter()
         .find(|j| j.job_id == job_id)
         .unwrap();
-    assert_eq!(paused_snap.bytes_downloaded, 0, "no resumable bytes after segmented pause");
+    assert_eq!(
+        paused_snap.bytes_downloaded, 0,
+        "no resumable bytes after segmented pause"
+    );
     collect_events(&rx);
 
     // Resume: the transfer restarts and must produce byte-identical output.
@@ -7317,11 +7349,19 @@ fn segmented_pause_then_resume_produces_intact_file() {
         guard.resume_job(&job_id).unwrap();
     }
     Core::dispatch_pending(core.clone()).unwrap();
-    wait_for_status(&core, &job_id, "completed", std::time::Duration::from_secs(20));
+    wait_for_status(
+        &core,
+        &job_id,
+        "completed",
+        std::time::Duration::from_secs(20),
+    );
 
     let final_path = job_dir.join("seg-pause.bin");
     let on_disk = std::fs::read(&final_path).expect("final file written");
-    assert_eq!(on_disk, content, "resumed segmented download must be intact");
+    assert_eq!(
+        on_disk, content,
+        "resumed segmented download must be intact"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -7367,9 +7407,14 @@ fn launch_site_probe_still_hard_fails_on_generic_extractor() {
         .unwrap_err();
     assert!(err.contains("generic"), "got: {err}");
     let calls = probe_calls_handle.probe_calls();
-    assert!(calls.is_empty() || calls.iter().all(|(_, allow)| !allow), "Launch Sites never allow generic: {calls:?}");
+    assert!(
+        calls.is_empty() || calls.iter().all(|(_, allow)| !allow),
+        "Launch Sites never allow generic: {calls:?}"
+    );
     let events = collect_events(&rx);
-    assert!(events.iter().any(|e| matches!(e, CoreEvent::ProbeFailed { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::ProbeFailed { .. })));
 }
 
 #[test]
@@ -7390,7 +7435,10 @@ fn unknown_site_accepts_generic_extractor_with_warning() {
     let result = core.probe("https://videos.example.org/watch/42").unwrap();
     assert_eq!(result.tier, ExtractionTier::GenericExtractor);
     assert_eq!(result.extractor_key.as_deref(), Some("Generic"));
-    assert!(!result.warnings.is_empty(), "generic results carry a warning");
+    assert!(
+        !result.warnings.is_empty(),
+        "generic results carry a warning"
+    );
     assert_eq!(result.items.len(), 1);
     assert_eq!(result.items[0].fetch_kind, MediaFetchKind::Extractor);
 
@@ -7434,8 +7482,13 @@ fn generic_disabled_in_settings_makes_unknown_site_fail_through_to_sniff() {
     })
     .unwrap();
 
-    let err = core.probe("https://videos.example.org/watch/43").unwrap_err();
-    assert!(err.contains("yt-dlp"), "error names the failing tier: {err}");
+    let err = core
+        .probe("https://videos.example.org/watch/43")
+        .unwrap_err();
+    assert!(
+        err.contains("yt-dlp"),
+        "error names the failing tier: {err}"
+    );
     assert!(
         sniffer.calls().iter().any(|(_, kind)| *kind == "sniff"),
         "page sniff ran after yt-dlp was rejected: {:?}",
@@ -7519,7 +7572,10 @@ fn unknown_site_falls_back_to_page_sniff_and_downloads_plain_file() {
         .into_iter()
         .find(|j| j.job_id == ids[0])
         .unwrap();
-    assert!(!snap.is_extractor, "sniffed plain files use the HTTP backend");
+    assert!(
+        !snap.is_extractor,
+        "sniffed plain files use the HTTP backend"
+    );
     assert_eq!(snap.url, "https://cdn.example.net/media/clip_720.mp4");
     assert_eq!(snap.extraction_tier, Some(ExtractionTier::PageSniff));
 
@@ -7551,15 +7607,27 @@ fn sniffed_variant_quality_selects_its_own_url() {
         SniffOutcome::Page {
             title: None,
             media: vec![
-                sniffed("https://cdn.example.net/v/x_1080.mp4", SniffedKind::DirectFile { ext: "mp4".into() }, None),
-                sniffed("https://cdn.example.net/v/x_480.mp4", SniffedKind::DirectFile { ext: "mp4".into() }, None),
+                sniffed(
+                    "https://cdn.example.net/v/x_1080.mp4",
+                    SniffedKind::DirectFile { ext: "mp4".into() },
+                    None,
+                ),
+                sniffed(
+                    "https://cdn.example.net/v/x_480.mp4",
+                    SniffedKind::DirectFile { ext: "mp4".into() },
+                    None,
+                ),
             ],
         },
     );
     core.set_page_sniffer(sniffer);
     let result = core.probe(page).unwrap();
     let item = &result.items[0];
-    let q480 = item.qualities.iter().find(|q| q.id.starts_with("480p")).unwrap();
+    let q480 = item
+        .qualities
+        .iter()
+        .find(|q| q.id.starts_with("480p"))
+        .unwrap();
     let ids = core
         .confirm_probe_selection(
             &ProbeSelection {
@@ -7574,7 +7642,11 @@ fn sniffed_variant_quality_selects_its_own_url() {
         )
         .unwrap();
     process_until_job_done(&mut core, &rx, &ids[0]);
-    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == ids[0]).unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == ids[0])
+        .unwrap();
     assert_eq!(snap.url, "https://cdn.example.net/v/x_480.mp4");
     assert_eq!(std::fs::read(snap.path.unwrap()).unwrap(), b"small-file");
 }
@@ -7609,7 +7681,10 @@ fn head_binary_short_circuits_to_direct_file_without_spawning_ytdlp() {
     // ...and the probe resolves it as a plain file from the HEAD alone.
     let result = core.probe(url).unwrap();
     assert_eq!(result.tier, ExtractionTier::DirectFile);
-    assert!(calls.probe_calls().is_empty(), "yt-dlp must not run for binary bodies");
+    assert!(
+        calls.probe_calls().is_empty(),
+        "yt-dlp must not run for binary bodies"
+    );
     let item = &result.items[0];
     assert_eq!(item.title, "void-live.iso");
     assert_eq!(item.fetch_kind, MediaFetchKind::DirectHttp);
@@ -7630,7 +7705,11 @@ fn head_binary_short_circuits_to_direct_file_without_spawning_ytdlp() {
         )
         .unwrap();
     process_until_job_done(&mut core, &rx, &ids[0]);
-    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == ids[0]).unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == ids[0])
+        .unwrap();
     assert_eq!(snap.status, "completed");
     let path = PathBuf::from(snap.path.unwrap());
     assert_eq!(path.file_name().unwrap(), "void-live.iso");
@@ -7641,20 +7720,35 @@ fn head_binary_short_circuits_to_direct_file_without_spawning_ytdlp() {
 fn probe_with_nothing_found_reports_both_tiers() {
     let url = "https://nothing.example.org/page";
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(FakeExtractorToolchain::new()));
+    let (mut core, _rx) = Core::new(
+        Box::new(fake_http()),
+        Box::new(FakeExtractorToolchain::new()),
+    );
     core.set_library_root(tmp.path().join("library")).unwrap();
     let sniffer = Arc::new(FakePageSniffer::new());
-    sniffer.insert_page(url, SniffOutcome::Page { title: Some("x".into()), media: vec![] });
+    sniffer.insert_page(
+        url,
+        SniffOutcome::Page {
+            title: Some("x".into()),
+            media: vec![],
+        },
+    );
     core.set_page_sniffer(sniffer);
     let err = core.probe(url).unwrap_err();
-    assert!(err.contains("yt-dlp") && err.contains("page sniff"), "got: {err}");
+    assert!(
+        err.contains("yt-dlp") && err.contains("page sniff"),
+        "got: {err}"
+    );
 }
 
 #[test]
 fn cancel_probe_aborts_between_tiers() {
     let url = "https://slow.example.org/page";
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(FakeExtractorToolchain::new()));
+    let (mut core, _rx) = Core::new(
+        Box::new(fake_http()),
+        Box::new(FakeExtractorToolchain::new()),
+    );
     core.set_library_root(tmp.path().join("library")).unwrap();
     core.set_page_sniffer(Arc::new(FakePageSniffer::new()));
     let plan = core.plan_probe(url).unwrap();
@@ -7682,7 +7776,10 @@ fn probe_tier_settings_persist_across_library_root_reload() {
         assert_eq!(core.probe_tier_settings(), ProbeTierSettings::default());
         core.set_probe_tier_settings(custom).unwrap();
         let err = core
-            .set_probe_tier_settings(ProbeTierSettings { probe_timeout_secs: 1, ..custom })
+            .set_probe_tier_settings(ProbeTierSettings {
+                probe_timeout_secs: 1,
+                ..custom
+            })
             .unwrap_err();
         assert!(err.contains("timeout"));
     }
@@ -7706,7 +7803,11 @@ fn enqueue_force_direct_skips_probe_classification() {
         panic!("force_direct must enqueue a plain job");
     };
     process_until_job_done(&mut core, &rx, &job_id);
-    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == job_id).unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap();
     assert_eq!(snap.status, "completed");
     assert_eq!(snap.extraction_tier, Some(ExtractionTier::DirectFile));
     assert_eq!(snap.queue_index, 0);
@@ -7719,11 +7820,22 @@ fn failed_job_snapshot_carries_last_error_until_retry() {
     core.set_library_root(tmp.path().join("library")).unwrap();
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
     core.process_pending().unwrap();
-    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == job_id).unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap();
     assert_eq!(snap.status, "failed");
-    assert!(snap.last_error.is_some(), "failed jobs expose the error text");
+    assert!(
+        snap.last_error.is_some(),
+        "failed jobs expose the error text"
+    );
     core.retry_job(&job_id).unwrap();
-    let snap = core.list_job_snapshots().into_iter().find(|j| j.job_id == job_id).unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap();
     assert_eq!(snap.last_error, None);
 }
 
@@ -7739,7 +7851,8 @@ fn clear_history_removes_archive_entries() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
     core.set_library_root(tmp.path().join("library")).unwrap();
-    core.probe("https://www.youtube.com/watch?v=hist-clear").unwrap();
+    core.probe("https://www.youtube.com/watch?v=hist-clear")
+        .unwrap();
     let ids = core
         .confirm_probe_selection(
             &ProbeSelection {

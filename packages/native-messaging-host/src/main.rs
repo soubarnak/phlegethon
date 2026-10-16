@@ -1,8 +1,8 @@
 //! Chrome native messaging host — validates extension envelopes and forwards to shell.
 
 use companion_protocol::{
-    read_native_message, write_native_message, CompanionRequest, CompanionResponse,
-    forward_to_shell, PROTOCOL_VERSION,
+    forward_to_shell, read_native_message, write_native_message, CompanionRequest,
+    CompanionResponse, PROTOCOL_VERSION,
 };
 use std::io;
 

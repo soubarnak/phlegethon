@@ -80,7 +80,11 @@ fn extension(path: &str) -> Option<&str> {
     let last_segment = path.rsplit('/').next().filter(|s| !s.is_empty())?;
     let dot = last_segment.rfind('.')?;
     let ext = &last_segment[dot + 1..];
-    if ext.is_empty() { None } else { Some(ext) }
+    if ext.is_empty() {
+        None
+    } else {
+        Some(ext)
+    }
 }
 
 fn is_direct_extension(ext: &str) -> bool {

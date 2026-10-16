@@ -132,10 +132,7 @@ fn write_doh_patch_script(
     args: &[String],
 ) -> Result<PathBuf, String> {
     let dir = std::env::temp_dir();
-    let path = dir.join(format!(
-        "phlegethon-doh-ytdlp-{}.py",
-        std::process::id()
-    ));
+    let path = dir.join(format!("phlegethon-doh-ytdlp-{}.py", std::process::id()));
 
     let mut map_literal = String::from("{");
     for (host, ip) in map {
@@ -165,8 +162,8 @@ raise SystemExit(main())
 "#
     );
 
-    let mut file = std::fs::File::create(&path)
-        .map_err(|e| format!("create DoH yt-dlp script: {e}"))?;
+    let mut file =
+        std::fs::File::create(&path).map_err(|e| format!("create DoH yt-dlp script: {e}"))?;
     file.write_all(source.as_bytes())
         .map_err(|e| format!("write DoH yt-dlp script: {e}"))?;
     Ok(path)

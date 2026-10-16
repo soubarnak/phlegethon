@@ -51,8 +51,15 @@ pub fn render_template(template: &str, vars: &TemplateVars<'_>) -> String {
 pub fn sanitize_filename(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
-        if c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<'
-            || c == '>' || c == '|'
+        if c == '/'
+            || c == '\\'
+            || c == ':'
+            || c == '*'
+            || c == '?'
+            || c == '"'
+            || c == '<'
+            || c == '>'
+            || c == '|'
         {
             out.push('_');
         } else if c.is_control() {

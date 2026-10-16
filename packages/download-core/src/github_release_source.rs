@@ -94,7 +94,11 @@ pub fn parse_sha256sums(text: &str) -> HashMap<String, String> {
 }
 
 /// Build the toolchain half of an [`UpdateCatalog`] from release JSON + checksums.
-pub fn catalog_from_release(json: &str, sums: Option<&str>, platform: &PlatformInfo) -> Result<UpdateCatalog, String> {
+pub fn catalog_from_release(
+    json: &str,
+    sums: Option<&str>,
+    platform: &PlatformInfo,
+) -> Result<UpdateCatalog, String> {
     let release: ReleaseJson =
         serde_json::from_str(json).map_err(|e| format!("parse GitHub release JSON: {e}"))?;
     let wanted = select_asset(platform);
@@ -196,7 +200,11 @@ impl GitHubReleaseUpdateSource {
             .assets
             .iter()
             .find(|a| a.name == "SHA2-256SUMS")
-            .and_then(|a| self.http.fetch_capped(&a.browser_download_url, METADATA_CAP).ok())
+            .and_then(|a| {
+                self.http
+                    .fetch_capped(&a.browser_download_url, METADATA_CAP)
+                    .ok()
+            })
             .map(|(bytes, _, _)| String::from_utf8_lossy(&bytes).into_owned());
         let catalog = catalog_from_release(&json, sums.as_deref(), &self.platform)?;
         if let Ok(mut guard) = self.cache.lock() {
@@ -251,7 +259,8 @@ impl SidecarUpdateSource for GitHubReleaseUpdateSource {
             self.http
                 .fetch(url, None, &mut file)
                 .map_err(|e| format!("download {name} {version}: {e}"))?;
-            file.flush().map_err(|e| format!("flush {}: {e}", tmp.display()))?;
+            file.flush()
+                .map_err(|e| format!("flush {}: {e}", tmp.display()))?;
         }
         if let Some(expected) = &entry.sha256 {
             let actual = sha256_file(&tmp)?;
@@ -262,7 +271,8 @@ impl SidecarUpdateSource for GitHubReleaseUpdateSource {
                 ));
             }
         }
-        std::fs::rename(&tmp, &dest).map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), dest.display()))?;
+        std::fs::rename(&tmp, &dest)
+            .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), dest.display()))?;
         Ok(dest)
     }
 }
@@ -317,7 +327,7 @@ mod tests {
             {"name":"yt-dlp.exe","browser_download_url":"https://dl.example/yt-dlp.exe"},
             {"name":"SHA2-256SUMS","browser_download_url":"https://dl.example/SHA2-256SUMS"}
         ]}"#
-            .to_string()
+        .to_string()
     }
 
     fn source(binary: &[u8], sums_hex: Option<&str>) -> GitHubReleaseUpdateSource {
@@ -326,13 +336,21 @@ mod tests {
             "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest".to_string(),
             release_json().into_bytes(),
         );
-        bodies.insert("https://dl.example/yt-dlp_linux".to_string(), binary.to_vec());
+        bodies.insert(
+            "https://dl.example/yt-dlp_linux".to_string(),
+            binary.to_vec(),
+        );
         let sums = format!(
             "{}  yt-dlp_linux\n{}  yt-dlp\n",
-            sums_hex.map(str::to_string).unwrap_or_else(|| format!("{:x}", Sha256::digest(binary))),
+            sums_hex
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{:x}", Sha256::digest(binary))),
             "0".repeat(64)
         );
-        bodies.insert("https://dl.example/SHA2-256SUMS".to_string(), sums.into_bytes());
+        bodies.insert(
+            "https://dl.example/SHA2-256SUMS".to_string(),
+            sums.into_bytes(),
+        );
         GitHubReleaseUpdateSource::new(
             Arc::new(CannedHttp {
                 bodies,
@@ -346,23 +364,39 @@ mod tests {
     fn asset_selection_covers_libc_and_arch() {
         assert_eq!(select_asset(&glibc_x86()), "yt-dlp_linux");
         assert_eq!(
-            select_asset(&PlatformInfo { arch: "aarch64".into(), ..glibc_x86() }),
+            select_asset(&PlatformInfo {
+                arch: "aarch64".into(),
+                ..glibc_x86()
+            }),
             "yt-dlp_linux_aarch64"
         );
         assert_eq!(
-            select_asset(&PlatformInfo { libc: Libc::Musl, ..glibc_x86() }),
+            select_asset(&PlatformInfo {
+                libc: Libc::Musl,
+                ..glibc_x86()
+            }),
             "yt-dlp"
         );
-        assert!(asset_needs_python(select_asset(&PlatformInfo { libc: Libc::Musl, ..glibc_x86() })));
+        assert!(asset_needs_python(select_asset(&PlatformInfo {
+            libc: Libc::Musl,
+            ..glibc_x86()
+        })));
         assert_eq!(
-            select_asset(&PlatformInfo { os: "windows".into(), ..glibc_x86() }),
+            select_asset(&PlatformInfo {
+                os: "windows".into(),
+                ..glibc_x86()
+            }),
             "yt-dlp.exe"
         );
     }
 
     #[test]
     fn sha256sums_are_parsed() {
-        let text = format!("{}  yt-dlp_linux\n{} *yt-dlp.exe\nbad line\n", "a".repeat(64), "b".repeat(64));
+        let text = format!(
+            "{}  yt-dlp_linux\n{} *yt-dlp.exe\nbad line\n",
+            "a".repeat(64),
+            "b".repeat(64)
+        );
         let m = parse_sha256sums(&text);
         assert_eq!(m["yt-dlp_linux"], "a".repeat(64));
         assert_eq!(m["yt-dlp.exe"], "b".repeat(64));
@@ -377,7 +411,10 @@ mod tests {
         assert_eq!(catalog.toolchain_latest.as_deref(), Some("2026.10.01"));
         let entry = &catalog.toolchain_versions["2026.10.01"];
         assert_eq!(entry.asset_name.as_deref(), Some("yt-dlp_linux"));
-        assert_eq!(entry.asset_url.as_deref(), Some("https://dl.example/yt-dlp_linux"));
+        assert_eq!(
+            entry.asset_url.as_deref(),
+            Some("https://dl.example/yt-dlp_linux")
+        );
         assert!(entry.sha256.is_some());
         // Second lookup hits the cache (no new API call).
         let http_calls_before = {
@@ -400,7 +437,13 @@ mod tests {
         let path = src
             .materialize(tmp.path(), SidecarComponent::Toolchain, "2026.10.01", entry)
             .unwrap();
-        assert_eq!(path, tmp.path().join("downloads").join("2026.10.01").join("yt-dlp_linux"));
+        assert_eq!(
+            path,
+            tmp.path()
+                .join("downloads")
+                .join("2026.10.01")
+                .join("yt-dlp_linux")
+        );
         assert_eq!(std::fs::read(&path).unwrap(), body);
         // Reuse without re-downloading.
         let again = src
@@ -410,7 +453,8 @@ mod tests {
         // Plugin entries are untouched (local paths).
         let local = CatalogVersionEntry::local(PathBuf::from("/tmp/x"));
         assert_eq!(
-            src.materialize(tmp.path(), SidecarComponent::Plugin, "1", &local).unwrap(),
+            src.materialize(tmp.path(), SidecarComponent::Plugin, "1", &local)
+                .unwrap(),
             PathBuf::from("/tmp/x")
         );
     }
@@ -425,12 +469,17 @@ mod tests {
             .materialize(tmp.path(), SidecarComponent::Toolchain, "2026.10.01", entry)
             .unwrap_err();
         assert!(err.contains("checksum mismatch"), "{err}");
-        assert!(!tmp.path().join("downloads/2026.10.01/yt-dlp_linux").exists());
+        assert!(!tmp
+            .path()
+            .join("downloads/2026.10.01/yt-dlp_linux")
+            .exists());
     }
 
     #[test]
     fn install_through_update_manager_sets_executable_bit() {
-        use crate::sidecar_updates::{apply_sidecar_updates, SidecarRuntimeState, SidecarUpdateSettings};
+        use crate::sidecar_updates::{
+            apply_sidecar_updates, SidecarRuntimeState, SidecarUpdateSettings,
+        };
         let tmp = tempfile::tempdir().unwrap();
         let body = b"#!/bin/sh\necho yt-dlp 2026.10.01\n";
         let src = source(body, None);

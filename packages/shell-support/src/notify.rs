@@ -66,7 +66,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let logged = std::fs::read_to_string(&log).unwrap();
-        assert!(logged.contains("Done") && logged.contains("file.mp4"), "{logged}");
+        assert!(
+            logged.contains("Done") && logged.contains("file.mp4"),
+            "{logged}"
+        );
     }
 
     #[test]

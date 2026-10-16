@@ -29,13 +29,9 @@ pub struct SingleFetchOutcome {
 }
 
 pub fn execute_single_fetch(params: SingleFetchParams) -> SingleFetchOutcome {
-    params
-        .transfer_active
-        .store(true, Ordering::Release);
+    params.transfer_active.store(true, Ordering::Release);
     let result = run_single_fetch(&params);
-    params
-        .transfer_active
-        .store(false, Ordering::Release);
+    params.transfer_active.store(false, Ordering::Release);
     result
 }
 
@@ -157,9 +153,6 @@ impl Write for OffsetWriter {
     }
 }
 
-pub fn make_job_bucket(
-    rate: u64,
-    clock: Arc<dyn crate::bandwidth::Clock>,
-) -> SharedTokenBucket {
+pub fn make_job_bucket(rate: u64, clock: Arc<dyn crate::bandwidth::Clock>) -> SharedTokenBucket {
     shared_token_bucket(rate, clock)
 }

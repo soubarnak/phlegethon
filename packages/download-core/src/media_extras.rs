@@ -43,10 +43,7 @@ impl Default for MediaExtrasOptions {
 impl MediaExtrasOptions {
     /// Whether any write-sidecar option is enabled.
     pub fn any_write(&self) -> bool {
-        self.write_subs
-            || self.write_chapters
-            || self.write_thumbnail
-            || self.write_metadata
+        self.write_subs || self.write_chapters || self.write_thumbnail || self.write_metadata
     }
 
     /// Whether any embed/remux post-process option is enabled.
@@ -155,7 +152,10 @@ pub fn apply_remux_postprocess(
         return PostprocessOutcome::Unchanged(input.to_path_buf());
     }
 
-    if input.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp4")) {
+    if input
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+    {
         return PostprocessOutcome::Unchanged(input.to_path_buf());
     }
 
@@ -170,7 +170,10 @@ pub fn apply_remux_postprocess(
         return PostprocessOutcome::Unchanged(input.to_path_buf());
     }
 
-    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
     let output = input.with_file_name(format!("{stem}.remux.mp4"));
 
     let status = Command::new(&ffmpeg)
@@ -198,7 +201,10 @@ pub fn apply_remux_postprocess(
 }
 
 /// Build yt-dlp CLI args for media extras (write + embed when ffmpeg present).
-pub fn ytdlp_media_extras_args(options: &MediaExtrasOptions, ffmpeg_available: bool) -> Vec<String> {
+pub fn ytdlp_media_extras_args(
+    options: &MediaExtrasOptions,
+    ffmpeg_available: bool,
+) -> Vec<String> {
     let mut args = Vec::new();
 
     if options.write_subs {

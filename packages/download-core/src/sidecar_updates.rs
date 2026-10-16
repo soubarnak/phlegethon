@@ -298,8 +298,8 @@ pub fn save_sidecar_runtime_state(
     let dir = sidecar_root.join(SIDECAR_META_DIR);
     fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = sidecar_state_path(sidecar_root);
-    let raw = serde_json::to_string_pretty(state)
-        .map_err(|e| format!("serialize sidecar state: {e}"))?;
+    let raw =
+        serde_json::to_string_pretty(state).map_err(|e| format!("serialize sidecar state: {e}"))?;
     fs::write(&path, raw).map_err(|e| format!("write sidecar state {}: {e}", path.display()))
 }
 
@@ -430,13 +430,7 @@ fn copy_file(src: &Path, dst: &Path) -> Result<(), String> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    fs::copy(src, dst).map_err(|e| {
-        format!(
-            "copy {} -> {}: {e}",
-            src.display(),
-            dst.display()
-        )
-    })?;
+    fs::copy(src, dst).map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
     Ok(())
 }
 
@@ -590,7 +584,9 @@ fn apply_component_if_needed(
     }
 
     match component {
-        SidecarComponent::Toolchain => install_toolchain_version(sidecar_root, version, entry, source)?,
+        SidecarComponent::Toolchain => {
+            install_toolchain_version(sidecar_root, version, entry, source)?
+        }
         SidecarComponent::Plugin => install_plugin_version(sidecar_root, version, entry, source)?,
     }
     Ok(Some(component))
@@ -757,8 +753,8 @@ fn restore_plugin_from_snapshot(
     let manifest_path = snapshot.backup_root.join(PLUGIN_MANIFEST_FILENAME);
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("read rollback plugin manifest: {e}"))?;
-    let manifest: PluginManifest = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse rollback plugin manifest: {e}"))?;
+    let manifest: PluginManifest =
+        serde_json::from_str(&raw).map_err(|e| format!("parse rollback plugin manifest: {e}"))?;
     install_plugin_package(
         sidecar_root,
         &snapshot.backup_root.join("package"),
@@ -797,9 +793,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn write_minimal_plugin_package(root: &Path) {
-        let extractor = root
-            .join("yt_dlp_plugins")
-            .join("extractor");
+        let extractor = root.join("yt_dlp_plugins").join("extractor");
         fs::create_dir_all(&extractor).unwrap();
         fs::write(extractor.join("luxuretv.py"), b"# fixture\n").unwrap();
     }
@@ -824,8 +818,9 @@ mod tests {
             ..Default::default()
         });
 
-        let result = check_sidecar_updates(&sidecar, &SidecarUpdateSettings::default(), source.as_ref())
-            .unwrap();
+        let result =
+            check_sidecar_updates(&sidecar, &SidecarUpdateSettings::default(), source.as_ref())
+                .unwrap();
         assert!(result.toolchain.update_available);
         assert_eq!(result.toolchain.installed_version.as_deref(), Some("1.0.0"));
         assert_eq!(result.toolchain.available_version.as_deref(), Some("2.0.0"));

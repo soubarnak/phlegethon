@@ -90,7 +90,10 @@ pub fn load(path: &Path) -> Result<ReferenceFile, String> {
     let file: ReferenceFile =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     if file.version != 1 {
-        return Err(format!("unsupported reference file version {}", file.version));
+        return Err(format!(
+            "unsupported reference file version {}",
+            file.version
+        ));
     }
     Ok(file)
 }
@@ -131,13 +134,23 @@ pub fn evaluate(expect: &Expect, outcome: &Result<ProbeResult, String>) -> Verdi
     }
     if let Some(min) = expect.min_items {
         if result.items.len() < min {
-            return Verdict::Fail(format!("{} items, expected at least {min}", result.items.len()));
+            return Verdict::Fail(format!(
+                "{} items, expected at least {min}",
+                result.items.len()
+            ));
         }
     }
     if let Some(min) = expect.min_qualities {
-        let best = result.items.iter().map(|i| i.qualities.len()).max().unwrap_or(0);
+        let best = result
+            .items
+            .iter()
+            .map(|i| i.qualities.len())
+            .max()
+            .unwrap_or(0);
         if best < min {
-            return Verdict::Fail(format!("best item has {best} qualities, expected at least {min}"));
+            return Verdict::Fail(format!(
+                "best item has {best} qualities, expected at least {min}"
+            ));
         }
     }
     Verdict::Pass
@@ -253,7 +266,12 @@ mod tests {
         }
     }
 
-    fn result(tier: ExtractionTier, key: Option<&str>, items: usize, qualities: usize) -> ProbeResult {
+    fn result(
+        tier: ExtractionTier,
+        key: Option<&str>,
+        items: usize,
+        qualities: usize,
+    ) -> ProbeResult {
         ProbeResult {
             url: "https://example.com".to_string(),
             items: (0..items)
@@ -279,7 +297,10 @@ mod tests {
 
     #[test]
     fn error_codes_parse() {
-        assert_eq!(error_code("[needs_browser_cookies] blocked"), Some("needs_browser_cookies"));
+        assert_eq!(
+            error_code("[needs_browser_cookies] blocked"),
+            Some("needs_browser_cookies")
+        );
         assert_eq!(error_code("plain message"), None);
         assert_eq!(error_code("[Mixed Case] x"), None);
         assert_eq!(error_code("[] x"), None);
@@ -307,10 +328,17 @@ mod tests {
             min_qualities: Some(2),
             blocked_error: None,
         };
-        let wrong_tier = Ok(result(ExtractionTier::GenericExtractor, Some("Youtube"), 2, 2));
+        let wrong_tier = Ok(result(
+            ExtractionTier::GenericExtractor,
+            Some("Youtube"),
+            2,
+            2,
+        ));
         assert!(matches!(evaluate(&expect, &wrong_tier), Verdict::Fail(m) if m.contains("tier")));
         let wrong_key = Ok(result(ExtractionTier::Dedicated, Some("Generic"), 2, 2));
-        assert!(matches!(evaluate(&expect, &wrong_key), Verdict::Fail(m) if m.contains("extractor")));
+        assert!(
+            matches!(evaluate(&expect, &wrong_key), Verdict::Fail(m) if m.contains("extractor"))
+        );
         let few_items = Ok(result(ExtractionTier::Dedicated, Some("Youtube"), 1, 2));
         assert!(matches!(evaluate(&expect, &few_items), Verdict::Fail(m) if m.contains("items")));
         let few_q = Ok(result(ExtractionTier::Dedicated, Some("Youtube"), 2, 1));
@@ -328,7 +356,10 @@ mod tests {
         assert!(evaluate(&expect, &blocked).is_ok());
         let other = Err("[timeout] too slow".to_string());
         assert!(matches!(evaluate(&expect, &other), Verdict::Fail(_)));
-        assert!(!evaluate(&Expect::default(), &blocked).is_ok(), "unexpected block is a failure");
+        assert!(
+            !evaluate(&Expect::default(), &blocked).is_ok(),
+            "unexpected block is a failure"
+        );
     }
 
     #[test]

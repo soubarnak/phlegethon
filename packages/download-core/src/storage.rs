@@ -4,14 +4,14 @@
 //! Writes are atomic (temp file + rename).
 
 use crate::cookie_channel::CookieChannel;
-use crate::filename_template::DEFAULT_FILENAME_TEMPLATE;
 use crate::extractor::{ExtractionTier, ProbeTierSettings};
-use crate::proxy_settings::ProxySettings;
-use crate::sidecar_updates::SidecarUpdateSettings;
+use crate::filename_template::DEFAULT_FILENAME_TEMPLATE;
 use crate::integrity::ExpectedHash;
 use crate::job::{Job, JobState};
 use crate::media_extras::MediaExtrasOptions;
+use crate::proxy_settings::ProxySettings;
 use crate::quality_policy::DefaultQualityPolicy;
+use crate::sidecar_updates::SidecarUpdateSettings;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -168,10 +168,10 @@ pub fn load_jobs(library_root: &Path) -> Result<Vec<Job>, String> {
         return Ok(Vec::new());
     }
 
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
 
     if queue.version != QUEUE_VERSION {
         return Err(format!(
@@ -195,10 +195,10 @@ pub fn load_global_bandwidth_cap(library_root: &Path) -> Result<Option<u64>, Str
     if !path.exists() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(queue.global_bandwidth_cap)
 }
 
@@ -208,10 +208,10 @@ pub fn load_active_job_limit(library_root: &Path) -> Result<u32, String> {
     if !path.exists() {
         return Ok(DEFAULT_ACTIVE_JOB_LIMIT);
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(queue.active_job_limit)
 }
 
@@ -224,10 +224,10 @@ pub fn load_quality_settings(library_root: &Path) -> Result<QualitySettings, Str
             audio_only_mode: false,
         });
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(QualitySettings {
         policy: queue.default_quality_policy,
         audio_only_mode: queue.audio_only_mode,
@@ -242,10 +242,10 @@ pub fn load_media_extras_settings(library_root: &Path) -> Result<MediaExtrasSett
             defaults: MediaExtrasOptions::default(),
         });
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(MediaExtrasSettings {
         defaults: queue.default_media_extras,
     })
@@ -257,10 +257,10 @@ pub fn load_cookie_channel(library_root: &Path) -> Result<CookieChannel, String>
     if !path.exists() {
         return Ok(CookieChannel::default());
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(queue.cookie_channel.normalized())
 }
 
@@ -270,10 +270,10 @@ pub fn load_proxy_settings(library_root: &Path) -> Result<ProxySettings, String>
     if !path.exists() {
         return Ok(ProxySettings::default());
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(queue.proxy_settings.normalized())
 }
 
@@ -283,10 +283,10 @@ pub fn load_sidecar_update_settings(library_root: &Path) -> Result<SidecarUpdate
     if !path.exists() {
         return Ok(SidecarUpdateSettings::default());
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(queue.sidecar_update_settings)
 }
 
@@ -296,10 +296,10 @@ pub fn load_filename_template(library_root: &Path) -> Result<String, String> {
     if !path.exists() {
         return Ok(DEFAULT_FILENAME_TEMPLATE.to_string());
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(queue.filename_template)
 }
 
@@ -309,10 +309,10 @@ pub fn load_probe_tier_settings(library_root: &Path) -> Result<ProbeTierSettings
     if !path.exists() {
         return Ok(ProbeTierSettings::default());
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read queue {}: {e}", path.display()))?;
-    let queue: PersistedQueue = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse queue {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
+    let queue: PersistedQueue =
+        serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
     Ok(queue.probe_tier_settings)
 }
 
@@ -350,21 +350,14 @@ pub fn build_queue(
 /// Atomically write the queue index to disk.
 pub fn save_queue(library_root: &Path, queue: &PersistedQueue) -> Result<(), String> {
     let dir = library_root.join(PHLEGETHON_DIR);
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
     let path = dir.join(JOBS_FILENAME);
     let tmp = dir.join(".jobs.json.tmp");
-    let raw = serde_json::to_string_pretty(queue)
-        .map_err(|e| format!("serialize queue: {e}"))?;
+    let raw = serde_json::to_string_pretty(queue).map_err(|e| format!("serialize queue: {e}"))?;
     fs::write(&tmp, &raw).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, &path).map_err(|e| {
-        format!(
-            "rename {} -> {}: {e}",
-            tmp.display(),
-            path.display()
-        )
-    })?;
+    fs::rename(&tmp, &path)
+        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
     Ok(())
 }
 

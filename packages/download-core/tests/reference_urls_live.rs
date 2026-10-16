@@ -32,7 +32,13 @@ fn reference_file_is_well_formed() {
         assert!(matches!(url.scheme(), "http" | "https"), "{}", entry.id);
         for tier in &entry.expect.tiers {
             assert!(
-                ["dedicated", "generic_extractor", "page_sniff", "direct_file"].contains(&tier.as_str()),
+                [
+                    "dedicated",
+                    "generic_extractor",
+                    "page_sniff",
+                    "direct_file"
+                ]
+                .contains(&tier.as_str()),
                 "{}: unknown tier {tier}",
                 entry.id
             );
@@ -61,15 +67,19 @@ fn reference_urls_resolve_with_the_real_toolchain() {
     opts.cookies.cookies_from_browser = std::env::var("PHLEGETHON_REF_COOKIES_FROM_BROWSER").ok();
 
     let mut rows = Vec::new();
-    for entry in file
-        .entries
-        .iter()
-        .filter(|e| filter.as_deref().map_or(true, |f| e.site.eq_ignore_ascii_case(f)))
-    {
+    for entry in file.entries.iter().filter(|e| {
+        filter
+            .as_deref()
+            .map_or(true, |f| e.site.eq_ignore_ascii_case(f))
+    }) {
         rows.push(reference::run_entry(entry, &opts).0);
     }
     assert!(!rows.is_empty(), "no entries matched PHLEGETHON_REF_FILTER");
     println!("{}", reference::markdown_table(&rows));
-    let failures: Vec<_> = rows.iter().filter(|r| !r.verdict.is_ok()).map(|r| r.id.as_str()).collect();
+    let failures: Vec<_> = rows
+        .iter()
+        .filter(|r| !r.verdict.is_ok())
+        .map(|r| r.id.as_str())
+        .collect();
     assert!(failures.is_empty(), "failed: {failures:?}");
 }

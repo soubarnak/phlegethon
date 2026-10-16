@@ -39,8 +39,8 @@ impl Drop for DohProxyGuard {
 pub fn start_doh_connect_proxy(
     host_overrides: HashMap<String, IpAddr>,
 ) -> Result<DohProxyGuard, String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("bind DoH CONNECT proxy: {e}"))?;
+    let listener =
+        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind DoH CONNECT proxy: {e}"))?;
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("DoH proxy set nonblocking: {e}"))?;
@@ -83,7 +83,10 @@ pub fn start_doh_connect_proxy(
     })
 }
 
-fn handle_client(mut client: TcpStream, overrides: &HashMap<String, IpAddr>) -> std::io::Result<()> {
+fn handle_client(
+    mut client: TcpStream,
+    overrides: &HashMap<String, IpAddr>,
+) -> std::io::Result<()> {
     let header_bytes = read_http_headers(&mut client)?;
     let req = String::from_utf8_lossy(&header_bytes);
     let first_line = req.lines().next().unwrap_or("");
@@ -201,10 +204,7 @@ fn read_http_headers(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 fn split_host_port(target: &str) -> (String, u16) {
     if let Some((h, p)) = target.rsplit_once(':') {
         if let Ok(port) = p.parse::<u16>() {
-            return (
-                h.trim_matches(|c| c == '[' || c == ']').to_string(),
-                port,
-            );
+            return (h.trim_matches(|c| c == '[' || c == ']').to_string(), port);
         }
     }
     (target.to_string(), 443)
@@ -260,8 +260,7 @@ mod tests {
             output.status.success(),
             "yt-dlp via Rust CONNECT proxy failed: {stderr}"
         );
-        let json: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("parse json");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse json");
         let count = json
             .get("entries")
             .and_then(|e| e.as_array())

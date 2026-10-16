@@ -19,9 +19,9 @@ struct CompanionIntentEvent {
 /// Start the background companion listener (NMH → local socket → enqueue).
 pub fn start_companion_receiver(app: AppHandle) {
     std::thread::spawn(move || {
-        if let Err(err) = run_companion_server(move |request| {
-            handle_companion_intent(&app, request)
-        }) {
+        if let Err(err) =
+            run_companion_server(move |request| handle_companion_intent(&app, request))
+        {
             log::error!("companion receiver stopped: {err}");
         }
     });

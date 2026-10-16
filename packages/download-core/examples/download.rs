@@ -37,7 +37,9 @@ fn run() -> Result<(), String> {
         match arg.as_str() {
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--max-height" => {
-                max_height = value("--max-height")?.parse().map_err(|_| "bad --max-height")?
+                max_height = value("--max-height")?
+                    .parse()
+                    .map_err(|_| "bad --max-height")?
             }
             "--items" => items = value("--items")?.parse().map_err(|_| "bad --items")?,
             other if !other.starts_with("--") && url.is_none() => url = Some(other.to_string()),
@@ -64,7 +66,10 @@ fn run() -> Result<(), String> {
         serde_json::to_string(&probe.tier).unwrap_or_default(),
         probe.extractor_key.as_deref().unwrap_or("-")
     );
-    let policy = DefaultQualityPolicy { max_height, prefer_mp4: true };
+    let policy = DefaultQualityPolicy {
+        max_height,
+        prefer_mp4: true,
+    };
     let selected: Vec<ItemSelection> = probe
         .items
         .iter()
@@ -73,14 +78,21 @@ fn run() -> Result<(), String> {
         .filter_map(|item| {
             select_default_quality(&item.qualities, &policy, false).map(|quality_id| {
                 println!("  {} -> {quality_id}", item.title);
-                ItemSelection { item_id: item.id.clone(), quality_id }
+                ItemSelection {
+                    item_id: item.id.clone(),
+                    quality_id,
+                }
             })
         })
         .collect();
     if selected.is_empty() {
         return Err("nothing to download".to_string());
     }
-    let selection = ProbeSelection { url: url.clone(), items: selected, media_extras: None };
+    let selection = ProbeSelection {
+        url: url.clone(),
+        items: selected,
+        media_extras: None,
+    };
     let job_ids = core.confirm_probe_selection(&selection, None)?;
     println!("queued {} job(s); downloading...", job_ids.len());
     core.process_pending()?;

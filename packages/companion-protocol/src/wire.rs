@@ -28,7 +28,10 @@ pub fn read_native_message<R: Read, T: DeserializeOwned>(reader: &mut R) -> Resu
 }
 
 /// Write one native messaging frame to `writer`.
-pub fn write_native_message<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<(), String> {
+pub fn write_native_message<W: Write, T: Serialize>(
+    writer: &mut W,
+    value: &T,
+) -> Result<(), String> {
     let json = serde_json::to_vec(value).map_err(|e| format!("serialize JSON: {e}"))?;
     let len = u32::try_from(json.len())
         .map_err(|_| format!("message too large: {} bytes", json.len()))?;

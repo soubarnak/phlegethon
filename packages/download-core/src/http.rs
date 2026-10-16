@@ -130,7 +130,12 @@ fn build_ureq_agent(proxy: &ProxySettings) -> Result<ureq::Agent, String> {
     let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout_read(std::time::Duration::from_secs(30));
-    if let Some(url) = proxy.url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(url) = proxy
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let proxy_cfg = ureq::Proxy::new(url).map_err(|e| format!("proxy {url}: {e}"))?;
         builder = builder.proxy(proxy_cfg);
     } else {
@@ -149,15 +154,13 @@ impl ProdHttpBackend {
 
     pub fn with_proxy(proxy: &ProxySettings) -> Self {
         Self {
-            client: RwLock::new(
-                build_ureq_agent(proxy).unwrap_or_else(|_| {
-                    ureq::AgentBuilder::new()
-                        .try_proxy_from_env(true)
-                        .timeout_connect(std::time::Duration::from_secs(10))
-                        .timeout_read(std::time::Duration::from_secs(30))
-                        .build()
-                }),
-            ),
+            client: RwLock::new(build_ureq_agent(proxy).unwrap_or_else(|_| {
+                ureq::AgentBuilder::new()
+                    .try_proxy_from_env(true)
+                    .timeout_connect(std::time::Duration::from_secs(10))
+                    .timeout_read(std::time::Duration::from_secs(30))
+                    .build()
+            })),
         }
     }
 
@@ -192,9 +195,7 @@ impl HttpBackend for ProdHttpBackend {
             let header_val = format!("bytes={}-{}", r.start, r.end.saturating_sub(1));
             req = req.set("Range", &header_val);
         }
-        let resp = req
-            .call()
-            .map_err(|e| format!("GET {url}: {e}"))?;
+        let resp = req.call().map_err(|e| format!("GET {url}: {e}"))?;
 
         let total: u64 = resp
             .header("Content-Length")
@@ -260,19 +261,18 @@ impl HttpBackend for ProdHttpBackend {
 
     fn head_info(&self, url: &str) -> Result<HeadInfo, String> {
         let client = self.client();
-        let head = client
-            .head(url)
-            .set("User-Agent", PAGE_USER_AGENT)
-            .call();
+        let head = client.head(url).set("User-Agent", PAGE_USER_AGENT).call();
         let resp = match head {
             Ok(resp) => resp,
             // Some servers reject HEAD; ask for the first byte instead.
-            Err(ureq::Error::Status(405 | 403 | 501, _)) | Err(ureq::Error::Status(400, _)) => client
-                .get(url)
-                .set("User-Agent", PAGE_USER_AGENT)
-                .set("Range", "bytes=0-0")
-                .call()
-                .map_err(|e| format!("GET(range 0-0) {url}: {e}"))?,
+            Err(ureq::Error::Status(405 | 403 | 501, _)) | Err(ureq::Error::Status(400, _)) => {
+                client
+                    .get(url)
+                    .set("User-Agent", PAGE_USER_AGENT)
+                    .set("Range", "bytes=0-0")
+                    .call()
+                    .map_err(|e| format!("GET(range 0-0) {url}: {e}"))?
+            }
             Err(e) => return Err(format!("HEAD {url}: {e}")),
         };
         let content_length = resp

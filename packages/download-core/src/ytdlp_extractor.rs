@@ -18,26 +18,26 @@
 
 use crate::cookie_channel::{ytdlp_cookie_args, CookieChannel};
 use crate::doh_ytdlp::ytdlp_command_with_optional_doh_dns;
+use crate::extractor::{
+    is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain,
+    MediaFetchKind, MediaItem, ProbePolicy, ProbeResult, Quality,
+};
+use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtrasOptions};
 use crate::proxy_settings::{ytdlp_proxy_args, ProxySettings};
+use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
 use crate::toolchain_discovery::{
     classify_ytdlp_failure, detect_js_runtime, discover_ytdlp, find_in_path, path_dirs_from_env,
     python_has_module, run_command_with_deadline_polling, tag_error, tool_version,
     ytdlp_js_runtime_args, CommandOutcome, DiscoveryEnv, EjsStatus, JsRuntime, PlatformInfo,
     ToolInfo, ToolchainStatus, YtDlpLauncher, YtDlpSource, ERROR_CODE_TIMEOUT,
 };
-use crate::extractor::{
-    ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult, Quality, is_generic_extractor_key,
-};
-use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtrasOptions};
-use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -266,7 +266,10 @@ impl YtDlpExtractorToolchain {
                     let help = String::from_utf8_lossy(&stdout);
                     help.split(|c: char| c.is_whitespace() || c == ',' || c == '=')
                         .filter(|t| t.starts_with("--"))
-                        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-').to_string())
+                        .map(|t| {
+                            t.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                                .to_string()
+                        })
                         .collect::<HashSet<String>>()
                 }
                 _ => HashSet::new(),
@@ -348,7 +351,8 @@ impl YtDlpExtractorToolchain {
                 Duration::from_millis(20),
             ) {
                 Ok(CommandOutcome::Finished { status, stdout, .. }) if status.success() => {
-                    Some(String::from_utf8_lossy(&stdout).trim().to_string()).filter(|v| !v.is_empty())
+                    Some(String::from_utf8_lossy(&stdout).trim().to_string())
+                        .filter(|v| !v.is_empty())
                 }
                 _ => None,
             }
@@ -530,7 +534,12 @@ impl YtDlpExtractorToolchain {
     /// extracting each video. Multi-item probes keep standard quality presets
     /// from flat parse so the probe sheet opens without N+1 yt-dlp calls.
     /// `--plugin-dirs` is included when configured (Launch Site Extractor Plugins).
-    pub(crate) fn probe_args(&self, url: &str, cookies: &CookieChannel, proxy: &ProxySettings) -> Vec<String> {
+    pub(crate) fn probe_args(
+        &self,
+        url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Vec<String> {
         self.probe_args_for(url, true, cookies, proxy)
     }
 
@@ -563,7 +572,12 @@ impl YtDlpExtractorToolchain {
     }
 
     /// Run yt-dlp with `-J` and return the raw JSON stdout.
-    fn run_probe(&self, url: &str, cookies: &CookieChannel, proxy: &ProxySettings) -> Result<String, String> {
+    fn run_probe(
+        &self,
+        url: &str,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+    ) -> Result<String, String> {
         self.run_probe_json(url, true, cookies, proxy, &ProbePolicy::default())
     }
 
@@ -651,8 +665,8 @@ impl YtDlpExtractorToolchain {
         url: &str,
         allow_generic: bool,
     ) -> Result<ProbeResult, String> {
-        let info: YtDlpVideoInfo = serde_json::from_str(json)
-            .map_err(|e| format!("failed to parse yt-dlp JSON: {e}"))?;
+        let info: YtDlpVideoInfo =
+            serde_json::from_str(json).map_err(|e| format!("failed to parse yt-dlp JSON: {e}"))?;
 
         // Validate extractor key
         self.validate_extractor(url, &info.extractor_key, allow_generic)?;
@@ -786,19 +800,20 @@ impl YtDlpExtractorToolchain {
         let mut seen_labels: Vec<String> = Vec::new();
         let mut result: Vec<Quality> = Vec::new();
 
-        let has_video = |f: &YtDlpFormat| -> bool {
-            f.vcodec.as_deref().map(|c| c != "none").unwrap_or(true)
-        };
-        let has_audio = |f: &YtDlpFormat| -> bool {
-            f.acodec.as_deref().map(|c| c != "none").unwrap_or(true)
-        };
+        let has_video =
+            |f: &YtDlpFormat| -> bool { f.vcodec.as_deref().map(|c| c != "none").unwrap_or(true) };
+        let has_audio =
+            |f: &YtDlpFormat| -> bool { f.acodec.as_deref().map(|c| c != "none").unwrap_or(true) };
 
         for format in formats {
             let label = self.format_label(format);
 
             // Same label already kept: prefer mp4, upgrade missing size.
             if let Some(idx) = seen_labels.iter().position(|l| l == &label) {
-                let incoming_mp4 = format.ext.as_deref().is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+                let incoming_mp4 = format
+                    .ext
+                    .as_deref()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
                 let existing_mp4 = result[idx]
                     .container
                     .as_deref()
@@ -858,12 +873,10 @@ impl YtDlpExtractorToolchain {
     }
 
     fn quality_from_format(&self, format: &YtDlpFormat, label: &str) -> Quality {
-        let has_video = |f: &YtDlpFormat| -> bool {
-            f.vcodec.as_deref().map(|c| c != "none").unwrap_or(true)
-        };
-        let has_audio = |f: &YtDlpFormat| -> bool {
-            f.acodec.as_deref().map(|c| c != "none").unwrap_or(true)
-        };
+        let has_video =
+            |f: &YtDlpFormat| -> bool { f.vcodec.as_deref().map(|c| c != "none").unwrap_or(true) };
+        let has_audio =
+            |f: &YtDlpFormat| -> bool { f.acodec.as_deref().map(|c| c != "none").unwrap_or(true) };
         Quality {
             id: Self::quality_id_for_format(format, has_video, has_audio),
             label: label.to_string(),
@@ -874,8 +887,16 @@ impl YtDlpExtractorToolchain {
 
     /// Build a human-readable label for a format entry.
     fn format_label(&self, format: &YtDlpFormat) -> String {
-        let has_video = format.vcodec.as_deref().map(|c| c != "none").unwrap_or(true);
-        let has_audio = format.acodec.as_deref().map(|c| c != "none").unwrap_or(true);
+        let has_video = format
+            .vcodec
+            .as_deref()
+            .map(|c| c != "none")
+            .unwrap_or(true);
+        let has_audio = format
+            .acodec
+            .as_deref()
+            .map(|c| c != "none")
+            .unwrap_or(true);
 
         let resolution_part = if let Some(h) = format.height {
             if let Some(w) = format.width {
@@ -922,8 +943,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         proxy: &ProxySettings,
     ) -> Result<ProbeResult, String> {
         // Validate URL first
-        url::Url::parse(url)
-            .map_err(|e| format!("invalid URL '{url}': {e}"))?;
+        url::Url::parse(url).map_err(|e| format!("invalid URL '{url}': {e}"))?;
 
         // Run yt-dlp
         let json = self.run_probe(url, cookies, proxy)?;
@@ -940,8 +960,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         proxy: &ProxySettings,
         policy: &ProbePolicy,
     ) -> Result<ProbeResult, String> {
-        url::Url::parse(url)
-            .map_err(|e| format!("invalid URL '{url}': {e}"))?;
+        url::Url::parse(url).map_err(|e| format!("invalid URL '{url}': {e}"))?;
         let json = self.run_probe_json(url, true, cookies, proxy, policy)?;
         self.parse_probe_result_with_policy(&json, url, policy.allow_generic)
     }
@@ -1156,12 +1175,8 @@ fn quality_id_to_ytdlp_format(quality_id: &str, can_merge: bool) -> String {
                 (false, false) => format!("{base}/best"),
             }
         }
-        id if id.ends_with("-audio") || id.ends_with("k-audio") => {
-            "bestaudio/best".to_string()
-        }
-        id if id.ends_with('p')
-            && id.trim_end_matches('p').chars().all(|c| c.is_ascii_digit()) =>
-        {
+        id if id.ends_with("-audio") || id.ends_with("k-audio") => "bestaudio/best".to_string(),
+        id if id.ends_with('p') && id.trim_end_matches('p').chars().all(|c| c.is_ascii_digit()) => {
             let height = id.trim_end_matches('p');
             // Prefer HLS/combined streams; progressive xHamster formats are often unusable.
             format!("best[height={height}]/best[height<={height}]/best")
@@ -1941,7 +1956,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(80));
         stop.store(true, std::sync::atomic::Ordering::Release);
 
-        let outcome = worker.join().expect("worker join").expect("interruptible wait");
+        let outcome = worker
+            .join()
+            .expect("worker join")
+            .expect("interruptible wait");
         assert!(
             matches!(outcome, InterruptibleOutput::Stopped),
             "expected Stopped after kill, got {outcome:?}"
@@ -1971,33 +1989,65 @@ mod tests {
         let tc = YtDlpExtractorToolchain::new(config);
         // Old yt-dlp without the flags: nothing extra is passed.
         tc.set_supported_flags_for_test(&["-J"]);
-        let args = tc.probe_args("https://example.com/v", &CookieChannel::default(), &ProxySettings::default());
+        let args = tc.probe_args(
+            "https://example.com/v",
+            &CookieChannel::default(),
+            &ProxySettings::default(),
+        );
         assert!(!args.iter().any(|a| a == "--js-runtimes"), "{args:?}");
         assert!(!args.iter().any(|a| a == "--impersonate"), "{args:?}");
         // Current yt-dlp: runtime, remote components and impersonation.
         tc.set_supported_flags_for_test(&["--js-runtimes", "--remote-components", "--impersonate"]);
-        let args = tc.probe_args("https://example.com/v", &CookieChannel::default(), &ProxySettings::default());
-        assert!(args.windows(2).any(|w| w == ["--js-runtimes", "node:/usr/bin/node"]), "{args:?}");
-        assert!(args.windows(2).any(|w| w == ["--remote-components", "ejs:github"]), "{args:?}");
-        assert!(args.windows(2).any(|w| w == ["--impersonate", "chrome"]), "{args:?}");
-        assert_eq!(args.last().map(String::as_str), Some("https://example.com/v"));
+        let args = tc.probe_args(
+            "https://example.com/v",
+            &CookieChannel::default(),
+            &ProxySettings::default(),
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--js-runtimes", "node:/usr/bin/node"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--remote-components", "ejs:github"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--impersonate", "chrome"]),
+            "{args:?}"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://example.com/v")
+        );
     }
 
     #[test]
     fn python_module_launcher_is_used_when_configured() {
         let config = YtDlpConfig {
-            launcher: Some(YtDlpLauncher::PythonModule { python: PathBuf::from("/usr/bin/python3") }),
+            launcher: Some(YtDlpLauncher::PythonModule {
+                python: PathBuf::from("/usr/bin/python3"),
+            }),
             ..YtDlpConfig::default()
         };
         let tc = YtDlpExtractorToolchain::new(config);
         assert_eq!(
             tc.effective_launcher(),
-            YtDlpLauncher::PythonModule { python: PathBuf::from("/usr/bin/python3") }
+            YtDlpLauncher::PythonModule {
+                python: PathBuf::from("/usr/bin/python3")
+            }
         );
         let cmd = tc.effective_launcher().command();
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(args, vec!["-m", "yt_dlp"]);
-        assert_eq!(tc.effective_binary_path(), PathBuf::from("/usr/bin/python3"));
+        assert_eq!(
+            tc.effective_binary_path(),
+            PathBuf::from("/usr/bin/python3")
+        );
     }
 
     #[test]
@@ -2072,21 +2122,21 @@ mod tests {
     #[test]
     fn validate_youtube_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        assert!(
-            extractor
-                .validate_extractor("https://www.youtube.com/watch?v=abc", "Youtube", false)
-                .is_ok()
-        );
+        assert!(extractor
+            .validate_extractor("https://www.youtube.com/watch?v=abc", "Youtube", false)
+            .is_ok());
     }
 
     #[test]
     fn validate_youtube_extractor_with_playlist_key_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        assert!(
-            extractor
-                .validate_extractor("https://www.youtube.com/playlist?list=ABC", "YoutubePlaylist", false)
-                .is_ok()
-        );
+        assert!(extractor
+            .validate_extractor(
+                "https://www.youtube.com/playlist?list=ABC",
+                "YoutubePlaylist",
+                false
+            )
+            .is_ok());
     }
 
     #[test]
@@ -2116,18 +2166,24 @@ mod tests {
     #[test]
     fn validate_xhamster_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        assert!(
-            extractor
-                .validate_extractor("https://xhamster.com/videos/example-12345", "XHamster", false)
-                .is_ok()
-        );
+        assert!(extractor
+            .validate_extractor(
+                "https://xhamster.com/videos/example-12345",
+                "XHamster",
+                false
+            )
+            .is_ok());
     }
 
     #[test]
     fn validate_unknown_extractor_for_known_site_fails() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .validate_extractor("https://www.youtube.com/watch?v=abc", "SomeUnknownExtractor", false)
+            .validate_extractor(
+                "https://www.youtube.com/watch?v=abc",
+                "SomeUnknownExtractor",
+                false,
+            )
             .unwrap_err();
         assert!(
             err.contains("extractor mismatch"),
@@ -2140,11 +2196,9 @@ mod tests {
         // For sites we don't have in our expected map, any non-generic
         // extractor is accepted (it might be a plugin or custom extractor).
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        assert!(
-            extractor
-                .validate_extractor("https://example.com/video", "CustomExtractor", false)
-                .is_ok()
-        );
+        assert!(extractor
+            .validate_extractor("https://example.com/video", "CustomExtractor", false)
+            .is_ok());
     }
 
     #[test]
@@ -2162,11 +2216,9 @@ mod tests {
     #[test]
     fn youtu_be_short_url_expected_youtube() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        assert!(
-            extractor
-                .validate_extractor("https://youtu.be/abc123", "Youtube", false)
-                .is_ok()
-        );
+        assert!(extractor
+            .validate_extractor("https://youtu.be/abc123", "Youtube", false)
+            .is_ok());
     }
 
     // ---- YouTube JSON parsing ----
@@ -2221,7 +2273,10 @@ mod tests {
             "720p video-only should collapse into the combined 720p, got: {qualities:?}"
         );
         assert_eq!(
-            qualities.iter().filter(|q| q.label.starts_with("720p")).count(),
+            qualities
+                .iter()
+                .filter(|q| q.label.starts_with("720p"))
+                .count(),
             1,
             "{qualities:?}"
         );
@@ -2229,16 +2284,16 @@ mod tests {
         // Should have audio-only format (140=130k-audio).
         // Format 251 has the same note "medium" so it gets deduplicated.
         let has_audio = qualities.iter().any(|q| q.id.ends_with("-audio"));
-        assert!(
-            has_audio,
-            "should have audio quality, got: {qualities:?}"
-        );
+        assert!(has_audio, "should have audio quality, got: {qualities:?}");
 
         // Verify quality labels are human-readable
         let q18 = qualities.iter().find(|q| q.id == "360p").unwrap();
         assert_eq!(q18.label, "360p (640×360)");
 
-        let q137 = qualities.iter().find(|q| q.id == "1080p-videoonly").unwrap();
+        let q137 = qualities
+            .iter()
+            .find(|q| q.id == "1080p-videoonly")
+            .unwrap();
         assert_eq!(q137.label, "1080p (1920×1080)");
 
         let q140 = qualities.iter().find(|q| q.id == "130k-audio").unwrap();
@@ -2290,17 +2345,11 @@ mod tests {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let json = canned_youtube_playlist_item_json();
         let result = extractor
-            .parse_probe_result(
-                json,
-                "https://www.youtube.com/watch?v=abc123def&list=PLabc",
-            )
+            .parse_probe_result(json, "https://www.youtube.com/watch?v=abc123def&list=PLabc")
             .unwrap();
 
         assert_eq!(result.items.len(), 1);
-        assert_eq!(
-            result.source_name,
-            Some("My Awesome Playlist".to_string())
-        );
+        assert_eq!(result.source_name, Some("My Awesome Playlist".to_string()));
     }
 
     // ---- YouTube multi-item (playlist / channel / user) ----
@@ -2316,10 +2365,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.items.len(), 2, "null entries must be skipped");
-        assert_eq!(
-            result.source_name,
-            Some("My Awesome Playlist".to_string())
-        );
+        assert_eq!(result.source_name, Some("My Awesome Playlist".to_string()));
         assert_eq!(result.items[0].id, "yt-vidOne111");
         assert_eq!(result.items[0].title, "First Playlist Video");
         assert_eq!(
@@ -2329,10 +2375,7 @@ mod tests {
         assert_eq!(result.items[1].id, "yt-vidTwo222");
         // Flat playlist entries expose a selectable default quality
         assert!(
-            result.items[0]
-                .qualities
-                .iter()
-                .any(|q| q.id == "best"),
+            result.items[0].qualities.iter().any(|q| q.id == "best"),
             "flat entries need a default quality, got: {:?}",
             result.items[0].qualities
         );
@@ -2373,7 +2416,11 @@ mod tests {
     fn validate_youtube_tab_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor("https://www.youtube.com/@ExampleChannel/videos", "YoutubeTab", false)
+            .validate_extractor(
+                "https://www.youtube.com/@ExampleChannel/videos",
+                "YoutubeTab",
+                false
+            )
             .is_ok());
     }
 
@@ -2423,10 +2470,7 @@ mod tests {
         assert_eq!(result.items[0].id, "xh-xh-item-aaa");
         assert_eq!(result.items[1].title, "Creator Video B");
         assert!(
-            result.items[0]
-                .qualities
-                .iter()
-                .any(|q| q.id == "best"),
+            result.items[0].qualities.iter().any(|q| q.id == "best"),
             "flat user entries need default quality"
         );
     }
@@ -2464,13 +2508,11 @@ mod tests {
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.source_name, Some("your-eshita".to_string()));
         assert_eq!(
-            result.items[0].id,
-            "xh-creator-video-a-abc123",
+            result.items[0].id, "xh-creator-video-a-abc123",
             "id should be derived from URL slug"
         );
         assert_eq!(
-            result.items[0].title,
-            "creator video a abc123",
+            result.items[0].title, "creator video a abc123",
             "title should be humanized from slug when missing"
         );
         assert_eq!(
@@ -2483,7 +2525,11 @@ mod tests {
     fn validate_xhamster_user_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor("https://xhamster.com/creators/example-creator", "XHamsterUser", false)
+            .validate_extractor(
+                "https://xhamster.com/creators/example-creator",
+                "XHamsterUser",
+                false
+            )
             .is_ok());
     }
 
@@ -2534,10 +2580,7 @@ mod tests {
     fn parse_xxxbp_plugin_probe_returns_items_and_qualities() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let result = extractor
-            .parse_probe_result(
-                canned_xxxbp_probe_json(),
-                "https://www.xxxbp.tv/v/12345",
-            )
+            .parse_probe_result(canned_xxxbp_probe_json(), "https://www.xxxbp.tv/v/12345")
             .unwrap();
 
         assert_eq!(result.items.len(), 1);
@@ -2597,7 +2640,10 @@ mod tests {
         );
         assert!(args.contains(&"--plugin-dirs".to_string()));
         assert!(args.contains(&"/app/sidecar/yt-dlp-plugins".to_string()));
-        assert_eq!(args.last().map(String::as_str), Some("https://www.luxuretv.com/videos/x-1.html"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("https://www.luxuretv.com/videos/x-1.html")
+        );
     }
 
     #[test]
@@ -2623,7 +2669,9 @@ mod tests {
             &channel,
             &ProxySettings::default(),
         );
-        assert!(args.windows(2).any(|w| w == ["--cookies-from-browser", "chrome"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--cookies-from-browser", "chrome"]));
     }
 
     #[test]
@@ -2638,7 +2686,9 @@ mod tests {
             &channel,
             &ProxySettings::default(),
         );
-        assert!(args.windows(2).any(|w| w == ["--cookies", "C:\\cookies.txt"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--cookies", "C:\\cookies.txt"]));
     }
 
     #[test]
@@ -2652,7 +2702,9 @@ mod tests {
             &CookieChannel::default(),
             &proxy,
         );
-        assert!(args.windows(2).any(|w| w == ["--proxy", "http://127.0.0.1:8080"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--proxy", "http://127.0.0.1:8080"]));
     }
 
     // ---- FakeYtDlpExtractor ----
@@ -2666,7 +2718,11 @@ mod tests {
         );
 
         let result = fake
-            .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &CookieChannel::default(), &ProxySettings::default())
+            .probe(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
             .unwrap();
         assert_eq!(result.items.len(), 1);
         // 360p, 720p, 1080p (video-only, audio merged on download), audio.
@@ -2677,7 +2733,11 @@ mod tests {
     fn fake_ytdlp_extractor_fails_for_unknown_url() {
         let fake = FakeYtDlpExtractor::new();
         let err = fake
-            .probe("https://www.youtube.com/watch?v=unknown", &CookieChannel::default(), &ProxySettings::default())
+            .probe(
+                "https://www.youtube.com/watch?v=unknown",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
             .unwrap_err();
         assert!(err.contains("no canned response"), "got: {err}");
     }
@@ -2688,7 +2748,11 @@ mod tests {
         fake.insert_failure("https://www.youtube.com/watch?v=fail");
 
         let err = fake
-            .probe("https://www.youtube.com/watch?v=fail", &CookieChannel::default(), &ProxySettings::default())
+            .probe(
+                "https://www.youtube.com/watch?v=fail",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
             .unwrap_err();
         assert!(
             err.contains("process error"),
@@ -2823,7 +2887,10 @@ mod tests {
             quality_id_to_ytdlp_format("hls-1-videoonly", true),
             "hls-1+bestaudio/hls-1/best"
         );
-        assert_eq!(quality_id_to_ytdlp_format("hls-1-videoonly", false), "hls-1/best");
+        assert_eq!(
+            quality_id_to_ytdlp_format("hls-1-videoonly", false),
+            "hls-1/best"
+        );
     }
 
     #[test]
@@ -3008,7 +3075,11 @@ mod tests {
     fn invalid_url_returns_error() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         let err = extractor
-            .probe("not-a-valid-url", &CookieChannel::default(), &ProxySettings::default())
+            .probe(
+                "not-a-valid-url",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
             .unwrap_err();
         assert!(
             err.contains("invalid URL"),
@@ -3096,7 +3167,11 @@ mod tests {
     fn validate_luxuretv_plugin_extractor_passes() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert!(extractor
-            .validate_extractor("https://en.luxuretv.com/videos/sample-16982.html", "LuxureTV", false)
+            .validate_extractor(
+                "https://en.luxuretv.com/videos/sample-16982.html",
+                "LuxureTV",
+                false
+            )
             .is_ok());
     }
 
@@ -3111,8 +3186,7 @@ mod tests {
     #[test]
     fn expected_extractor_for_unknown_site_returns_none() {
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        let keys = extractor
-            .expected_extractor_for_url("https://example.com/file.zip");
+        let keys = extractor.expected_extractor_for_url("https://example.com/file.zip");
         assert!(keys.is_none());
     }
 
@@ -3120,8 +3194,8 @@ mod tests {
     fn expected_extractor_for_youtube_subdomain() {
         // Subdomains like music.youtube.com should still match
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
-        let keys = extractor
-            .expected_extractor_for_url("https://music.youtube.com/playlist?list=ABC");
+        let keys =
+            extractor.expected_extractor_for_url("https://music.youtube.com/playlist?list=ABC");
         assert!(
             keys.is_some(),
             "music.youtube.com should match youtube.com extractors"
@@ -3138,10 +3212,9 @@ mod tests {
             return;
         };
         let diverges = crate::doh_dns::system_dns_diverges_from_doh(host, &doh_ips);
-        let map = crate::doh_proxy::doh_override_map_for_url(
-            "https://xhamster.com/creators/your-eshita",
-        )
-        .expect("DoH map lookup");
+        let map =
+            crate::doh_proxy::doh_override_map_for_url("https://xhamster.com/creators/your-eshita")
+                .expect("DoH map lookup");
         if diverges {
             let map = map.expect("expected DoH override when system DNS diverges");
             assert!(map.contains_key("xhamster.com"));
@@ -3217,7 +3290,11 @@ esac
             .expect("probe through a real process succeeds");
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].title, "Real Process Video");
-        assert!(result.items[0].qualities.len() >= 2, "{:?}", result.items[0].qualities);
+        assert!(
+            result.items[0].qualities.len() >= 2,
+            "{:?}",
+            result.items[0].qualities
+        );
         assert_eq!(result.extractor_key.as_deref(), Some("Youtube"));
     }
 

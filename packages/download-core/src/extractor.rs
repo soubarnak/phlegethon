@@ -312,7 +312,16 @@ pub trait ExtractorToolchain: Send + Sync {
         output_template: &str,
         _referer: Option<&str>,
     ) -> Result<ExtractorDownloadOutcome, String> {
-        self.download(url, format, dest_dir, stop, media_extras, cookies, proxy, output_template)
+        self.download(
+            url,
+            format,
+            dest_dir,
+            stop,
+            media_extras,
+            cookies,
+            proxy,
+            output_template,
+        )
     }
 
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
@@ -412,10 +421,7 @@ impl FakeExtractorToolchain {
 
     /// How many times [`ExtractorToolchain::apply_sidecar_root`] was called.
     pub fn sidecar_root_apply_count(&self) -> u32 {
-        self.sidecar_root_applies
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(0)
+        self.sidecar_root_applies.lock().map(|g| *g).unwrap_or(0)
     }
 
     /// Shared apply counter for tests that hand the fake to Core.
@@ -433,19 +439,16 @@ impl FakeExtractorToolchain {
 
     /// `(url, allow_generic)` for every probe call so far.
     pub fn probe_calls(&self) -> Vec<(String, bool)> {
-        self.probe_calls.lock().map(|g| g.clone()).unwrap_or_default()
+        self.probe_calls
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Insert a single-item probe response.
     ///
     /// When `url` is probed, returns one item with the given qualities.
-    pub fn insert(
-        &mut self,
-        url: &str,
-        title: &str,
-        item_url: &str,
-        qualities: Vec<(&str, &str)>,
-    ) {
+    pub fn insert(&mut self, url: &str, title: &str, item_url: &str, qualities: Vec<(&str, &str)>) {
         let item = MediaItem {
             id: "item-1".to_string(),
             title: title.to_string(),
@@ -632,8 +635,7 @@ impl ExtractorToolchain for FakeExtractorToolchain {
 
         if let Some(slow) = &self.slow_download {
             let path = dest_dir.join("extractor-partial.bin");
-            std::fs::write(&path, b"")
-                .map_err(|e| format!("create partial {path:?}: {e}"))?;
+            std::fs::write(&path, b"").map_err(|e| format!("create partial {path:?}: {e}"))?;
 
             for chunk in 0..slow.total_chunks {
                 if stop.load(Ordering::Acquire) {
@@ -718,10 +720,7 @@ mod tests {
             "https://example.com/video",
             "Test Video",
             "https://cdn.example.com/video.mp4",
-            vec![
-                ("1080p", "1080p (1920×1080)"),
-                ("720p", "720p (1280×720)"),
-            ],
+            vec![("1080p", "1080p (1920×1080)"), ("720p", "720p (1280×720)")],
         );
 
         let result = fake
@@ -745,8 +744,18 @@ mod tests {
             "https://youtube.com/playlist?list=ABC",
             "My Playlist",
             vec![
-                ("vid-1", "Video One", "https://youtube.com/watch?v=1", vec![("1080p", "1080p")]),
-                ("vid-2", "Video Two", "https://youtube.com/watch?v=2", vec![("720p", "720p")]),
+                (
+                    "vid-1",
+                    "Video One",
+                    "https://youtube.com/watch?v=1",
+                    vec![("1080p", "1080p")],
+                ),
+                (
+                    "vid-2",
+                    "Video Two",
+                    "https://youtube.com/watch?v=2",
+                    vec![("720p", "720p")],
+                ),
             ],
         );
 
@@ -773,7 +782,10 @@ mod tests {
                 &ProxySettings::default(),
             )
             .unwrap_err();
-        assert!(err.contains("no response configured"), "error should mention missing config, got: {err}");
+        assert!(
+            err.contains("no response configured"),
+            "error should mention missing config, got: {err}"
+        );
     }
 
     #[test]

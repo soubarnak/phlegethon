@@ -62,10 +62,12 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| "--timeout must be a number of seconds".to_string())?
             }
             "--cookies-from-browser" => {
-                args.opts.cookies.cookies_from_browser = Some(value(&mut it, "--cookies-from-browser")?)
+                args.opts.cookies.cookies_from_browser =
+                    Some(value(&mut it, "--cookies-from-browser")?)
             }
             "--cookie-file" => {
-                args.opts.cookies.cookie_file = Some(PathBuf::from(value(&mut it, "--cookie-file")?))
+                args.opts.cookies.cookie_file =
+                    Some(PathBuf::from(value(&mut it, "--cookie-file")?))
             }
             "--proxy" => args.opts.proxy.url = Some(value(&mut it, "--proxy")?),
             "-h" | "--help" => return Err(String::new()),
@@ -85,12 +87,18 @@ fn parse_args() -> Result<Args, String> {
 
 fn print_result(result: &ProbeResult, secs: f64, json: bool) {
     if json {
-        println!("{}", serde_json::to_string_pretty(result).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(result).unwrap_or_default()
+        );
         return;
     }
     println!("URL        {}", result.url);
     println!("Tier       {}", reference::tier_name(result.tier));
-    println!("Extractor  {}", result.extractor_key.as_deref().unwrap_or("-"));
+    println!(
+        "Extractor  {}",
+        result.extractor_key.as_deref().unwrap_or("-")
+    );
     println!("Time       {secs:.1}s");
     println!("Items      {}", result.items.len());
     for w in &result.warnings {
@@ -102,9 +110,17 @@ fn print_result(result: &ProbeResult, secs: f64, json: bool) {
             "{:>3}. {}{}\n     {}\n     qualities: {}",
             n + 1,
             item.title,
-            if item.archived { "  [already downloaded]" } else { "" },
+            if item.archived {
+                "  [already downloaded]"
+            } else {
+                ""
+            },
             item.url,
-            if qualities.is_empty() { "-".to_string() } else { qualities.join(", ") }
+            if qualities.is_empty() {
+                "-".to_string()
+            } else {
+                qualities.join(", ")
+            }
         );
     }
     if result.items.len() > 20 {
@@ -136,7 +152,10 @@ fn run_check(path: &PathBuf, site: Option<&str>, opts: &RunOptions) -> ExitCode 
     }
     print!("{}", reference::markdown_table(&rows));
     if rows.iter().all(|r| r.verdict.is_ok()) {
-        if rows.iter().any(|r| matches!(r.verdict, Verdict::Blocked(_))) {
+        if rows
+            .iter()
+            .any(|r| matches!(r.verdict, Verdict::Blocked(_)))
+        {
             eprintln!("note: BLOCKED rows need browser cookies (--cookies-from-browser NAME) for a real check");
         }
         ExitCode::SUCCESS
@@ -152,7 +171,16 @@ fn main() -> ExitCode {
             if !msg.is_empty() {
                 eprintln!("error: {msg}\n");
             }
-            eprintln!("{}", include_str!("probe.rs").lines().skip(2).take(21).map(|l| l.trim_start_matches("//! ").trim_start_matches("//!")).collect::<Vec<_>>().join("\n"));
+            eprintln!(
+                "{}",
+                include_str!("probe.rs")
+                    .lines()
+                    .skip(2)
+                    .take(21)
+                    .map(|l| l.trim_start_matches("//! ").trim_start_matches("//!"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
             return ExitCode::from(2);
         }
     };
