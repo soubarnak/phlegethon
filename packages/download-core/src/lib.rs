@@ -210,6 +210,14 @@ pub struct Core {
     probe_cookie_sessions: HashMap<String, CookieChannel>,
 }
 
+/// What [`Core::set_library_root`] found while restoring the queue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct LibraryRootReport {
+    /// Human-readable notes: files moved aside as corrupt, queue entries
+    /// skipped, settings reset. Empty when everything loaded cleanly.
+    pub warnings: Vec<String>,
+}
+
 /// Options for [`Core::enqueue_with_options`].
 ///
 /// Construct with `EnqueueOptions { force_direct: true, ..Default::default() }`
@@ -1154,39 +1162,61 @@ impl Core {
     ///
     /// Creates the directory if it does not exist and restores any persisted
     /// queue state from `{library_root}/.phlegethon/jobs.json`.
-    pub fn set_library_root(&mut self, root: PathBuf) -> Result<(), String> {
+    ///
+    /// Refuses (`Err`) while any transfer is active, because the swap replaces
+    /// every live job and its signals. The same applies when the root is the
+    /// current one: pause the jobs or wait first.
+    ///
+    /// Nothing changes unless the whole load succeeds. An unreadable
+    /// `jobs.json` or `archive.json` does not make the root unusable: the file
+    /// is moved to `<name>.corrupt-<timestamp>`, Core starts with an empty
+    /// queue or archive, and the returned [`LibraryRootReport`] says so. Single
+    /// bad queue rows are skipped the same way. Show the warnings to the user.
+    pub fn set_library_root(&mut self, root: PathBuf) -> Result<LibraryRootReport, String> {
+        if self.transfers_active() {
+            return Err(
+                "cannot change the Library Root while transfers are active; pause them or wait \
+                 for them to finish"
+                    .to_string(),
+            );
+        }
         std::fs::create_dir_all(&root).map_err(|e| format!("create library root: {e}"))?;
-        self.jobs = storage::load_jobs(&root)?;
+        let mut loaded = storage::load_queue(&root)?;
+        let (archive, archive_warning) = download_archive::DownloadArchive::load_or_reset(&root)?;
+        let mut warnings = std::mem::take(&mut loaded.warnings);
+        warnings.extend(archive_warning);
+
+        // Everything is loaded; commit it together.
         for job in &self.jobs {
+            self.job_signals.unregister(job.id());
+        }
+        for job in &loaded.jobs {
             self.register_job_signals(job);
         }
-        if let Some(cap) = storage::load_global_bandwidth_cap(&root)? {
-            self.bandwidth_cap = Some(cap);
-            self.rebuild_global_bucket();
-        }
-        self.active_job_limit = storage::load_active_job_limit(&root)?;
-        let quality_settings = storage::load_quality_settings(&root)?;
-        self.default_quality_policy = quality_settings.policy;
-        self.audio_only_mode = quality_settings.audio_only_mode;
-        let media_settings = storage::load_media_extras_settings(&root)?;
-        self.default_media_extras = media_settings.defaults;
-        self.cookie_channel = storage::load_cookie_channel(&root)?;
-        self.proxy_settings = storage::load_proxy_settings(&root)?;
+        self.jobs = loaded.jobs;
+        self.bandwidth_cap = loaded.global_bandwidth_cap;
+        self.rebuild_global_bucket();
+        self.active_job_limit = loaded.active_job_limit;
+        self.default_quality_policy = loaded.quality.policy;
+        self.audio_only_mode = loaded.quality.audio_only_mode;
+        self.default_media_extras = loaded.media_extras.defaults;
+        self.cookie_channel = loaded.cookie_channel;
+        self.proxy_settings = loaded.proxy_settings;
         // A persisted setting the HTTP client rejects (for example an `https://` proxy saved
         // by an older release) must not stop the library from opening; the backend refuses
         // requests until the user fixes the setting.
         if let Err(e) = self.http.apply_proxy_settings(&self.proxy_settings) {
             eprintln!("saved proxy setting rejected: {e}");
         }
-        self.sidecar_update_settings = storage::load_sidecar_update_settings(&root)?;
-        self.filename_template = storage::load_filename_template(&root)?;
-        self.probe_tier_settings = storage::load_probe_tier_settings(&root)?;
-        self.download_archive = download_archive::DownloadArchive::load(&root)?;
+        self.sidecar_update_settings = loaded.sidecar_update_settings;
+        self.filename_template = loaded.filename_template;
+        self.probe_tier_settings = loaded.probe_tier_settings;
+        self.download_archive = archive;
         self.library_root = Some(root);
         self.last_progress_flush = Instant::now();
         self.bytes_since_progress_flush = 0;
         self.progress_flush_pending = false;
-        Ok(())
+        Ok(LibraryRootReport { warnings })
     }
 
     /// Current Library Root, if set.

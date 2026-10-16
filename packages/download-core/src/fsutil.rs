@@ -35,6 +35,38 @@ pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Name `path` as `<path>.corrupt-<unix seconds>` (with a `-N` suffix when that
+/// name is taken), so a bad file can be kept for inspection.
+fn corrupt_sibling(path: &Path) -> PathBuf {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let base = path.as_os_str().to_string_lossy().into_owned();
+    let mut candidate = PathBuf::from(format!("{base}.corrupt-{secs}"));
+    let mut n = 1u32;
+    while candidate.exists() {
+        candidate = PathBuf::from(format!("{base}.corrupt-{secs}-{n}"));
+        n += 1;
+    }
+    candidate
+}
+
+/// Move an unreadable file to `<path>.corrupt-<timestamp>` and return the new path.
+pub(crate) fn move_aside_corrupt(path: &Path) -> io::Result<PathBuf> {
+    let target = corrupt_sibling(path);
+    fs::rename(path, &target)?;
+    sync_dir(parent_of(path))?;
+    Ok(target)
+}
+
+/// Copy a file to `<path>.corrupt-<timestamp>` and return the new path.
+pub(crate) fn copy_aside_corrupt(path: &Path) -> io::Result<PathBuf> {
+    let target = corrupt_sibling(path);
+    fs::copy(path, &target)?;
+    Ok(target)
+}
+
 fn write_synced(tmp: &Path, data: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(tmp)?;
     file.write_all(data)?;

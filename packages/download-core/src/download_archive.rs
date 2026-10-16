@@ -77,6 +77,36 @@ impl DownloadArchive {
         })
     }
 
+    /// Like [`Self::load`], but an archive that cannot be parsed or has an
+    /// unsupported version is moved to `archive.json.corrupt-<timestamp>` and
+    /// an empty archive is returned with a warning, so a bad archive never
+    /// blocks a Library Root. Only an I/O error is returned as `Err`.
+    pub fn load_or_reset(library_root: &Path) -> Result<(Self, Option<String>), String> {
+        let path = archive_path(library_root);
+        match fs::read(&path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Self::default(), None));
+            }
+            Err(e) => return Err(format!("read archive {}: {e}", path.display())),
+        }
+        match Self::load(library_root) {
+            Ok(archive) => Ok((archive, None)),
+            Err(reason) => {
+                let aside = crate::fsutil::move_aside_corrupt(&path)
+                    .map_err(|e| format!("move aside archive {}: {e}", path.display()))?;
+                Ok((
+                    Self::default(),
+                    Some(format!(
+                        "Download Archive {} could not be read ({reason}). It was moved to {} and History starts empty.",
+                        path.display(),
+                        aside.display()
+                    )),
+                ))
+            }
+        }
+    }
+
     pub fn save(&self, library_root: &Path) -> Result<(), String> {
         let dir = library_root.join(PHLEGETHON_DIR);
         fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
