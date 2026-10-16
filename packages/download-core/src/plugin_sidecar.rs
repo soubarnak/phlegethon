@@ -45,6 +45,11 @@ pub struct PluginManifest {
     /// packages installed from a catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundled_sha256: Option<String>,
+    /// SHA-256 of the installed package files, written at install time. Lets a
+    /// deleted or edited file be noticed instead of reported as up to date
+    /// (M-41). Absent in manifests written by older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_sha256: Option<String>,
 }
 
 impl PluginManifest {
@@ -54,14 +59,23 @@ impl PluginManifest {
     /// `remove_dir_all`, so `..`, separators and absolute paths are refused
     /// (M-37).
     pub fn validate(&self) -> Result<(), String> {
-        if fsutil::is_single_component(&self.package) {
-            Ok(())
-        } else {
-            Err(format!(
+        if !fsutil::is_single_component(&self.package) {
+            return Err(format!(
                 "plugin manifest package {:?} is not a plain directory name",
                 self.package
-            ))
+            ));
         }
+        if self.extractors.is_empty() {
+            return Err("plugin manifest lists no extractors".to_string());
+        }
+        for key in &self.extractors {
+            if !is_extractor_key(key) {
+                return Err(format!(
+                    "plugin manifest extractor {key:?} is not a yt-dlp extractor key"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Canonical manifest for the in-tree Launch Site plugin package.
@@ -74,7 +88,85 @@ impl PluginManifest {
                 .map(str::to_string)
                 .collect(),
             bundled_sha256: None,
+            package_sha256: None,
         }
+    }
+}
+
+/// A yt-dlp extractor key: ASCII letters, digits and underscores, not starting with a digit.
+fn is_extractor_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `true` for a 64-character hex string.
+pub(crate) fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Digest over the files of a plugin package: for each regular file in
+/// ascending relative-path order, the `/`-separated path, a NUL, the content and
+/// a NUL. Symlinks and other non-files are skipped, as the installer skips them.
+/// Equal to [`bundled_digest`] for the embedded copy.
+pub(crate) fn package_digest(dir: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+        for entry in fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("read dir entry: {e}"))?;
+            let ty = entry
+                .file_type()
+                .map_err(|e| format!("file type {}: {e}", entry.path().display()))?;
+            if ty.is_dir() {
+                collect(root, &entry.path(), out)?;
+            } else if ty.is_file() {
+                let rel = entry
+                    .path()
+                    .strip_prefix(root)
+                    .map_err(|e| e.to_string())?
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push((rel, entry.path()));
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    collect(dir, dir, &mut files)?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for (rel, path) in &files {
+        let content = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        hasher.update(rel.as_bytes());
+        hasher.update([0]);
+        hasher.update(&content);
+        hasher.update([0]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Whether the plugin package named by the installed manifest is present and
+/// still matches the digest recorded at install time (M-41). A manifest from an
+/// older build has no digest, so only the package files' presence is checked.
+pub fn installed_package_is_intact(sidecar_root: &Path, manifest: &PluginManifest) -> bool {
+    let Some(dirs) = plugin_dirs_path(sidecar_root) else {
+        return false;
+    };
+    let package = dirs.join(&manifest.package);
+    if !package.join("yt_dlp_plugins").is_dir() {
+        return false;
+    }
+    match manifest.package_sha256.as_deref() {
+        Some(expected) => package_digest(&package).is_ok_and(|actual| actual == expected),
+        None => true,
     }
 }
 
@@ -184,10 +276,24 @@ pub fn install_plugin_package(
     source_package: &Path,
     manifest: &PluginManifest,
 ) -> Result<PathBuf, String> {
+    install_plugin_package_verified(sidecar_root, source_package, manifest, None)
+}
+
+/// [`install_plugin_package`] that also checks the copied files against
+/// `expected_sha256` (see [`package_digest`]) before they replace anything.
+///
+/// The digest is taken from the staged copy, not from `source_package`, so a
+/// source that changes after the check cannot slip in (M-43).
+pub fn install_plugin_package_verified(
+    sidecar_root: &Path,
+    source_package: &Path,
+    manifest: &PluginManifest,
+    expected_sha256: Option<&str>,
+) -> Result<PathBuf, String> {
     manifest.validate()?;
     let _lock = lock_sidecar_root(sidecar_root)?;
     sweep_staging(sidecar_root);
-    install_plugin_package_locked(sidecar_root, source_package, manifest)
+    install_plugin_package_locked(sidecar_root, source_package, manifest, expected_sha256)
 }
 
 /// [`install_plugin_package`] for a caller that already holds the sidecar lock.
@@ -195,6 +301,7 @@ fn install_plugin_package_locked(
     sidecar_root: &Path,
     source_package: &Path,
     manifest: &PluginManifest,
+    expected_sha256: Option<&str>,
 ) -> Result<PathBuf, String> {
     if !source_package.is_dir() {
         return Err(format!(
@@ -218,10 +325,22 @@ fn install_plugin_package_locked(
     // Stage beside the plugin directory, not inside it: yt-dlp scans
     // `yt-dlp-plugins/` and would load a half-copied package.
     let staging = sidecar_root.join(format!(".plugin-staging-{}", Uuid::new_v4()));
-    if let Err(err) = copy_dir_recursive(source_package, &staging) {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(err);
-    }
+    let staged = copy_dir_recursive(source_package, &staging).and_then(|()| {
+        let actual = package_digest(&staging)?;
+        match expected_sha256 {
+            Some(expected) if !actual.eq_ignore_ascii_case(expected) => Err(format!(
+                "plugin package checksum mismatch: expected {expected}, got {actual}"
+            )),
+            _ => Ok(actual),
+        }
+    });
+    let package_sha256 = match staged {
+        Ok(digest) => digest,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(err);
+        }
+    };
 
     let retired = sidecar_root.join(format!(".plugin-old-{}", Uuid::new_v4()));
     let had_old = dest.exists();
@@ -241,7 +360,9 @@ fn install_plugin_package_locked(
     let _ = fsutil::sync_dir(&dest_parent);
     let _ = fs::remove_dir_all(&retired);
 
-    write_manifest(sidecar_root, manifest)?;
+    let mut recorded = manifest.clone();
+    recorded.package_sha256 = Some(package_sha256);
+    write_manifest(sidecar_root, &recorded)?;
 
     Ok(dest_parent)
 }
@@ -343,12 +464,6 @@ pub fn version_is_newer(candidate: &str, installed: &str) -> bool {
     a > b
 }
 
-fn package_dir_has_files(sidecar_root: &Path, package: &str) -> bool {
-    plugin_dirs_path(sidecar_root)
-        .map(|dirs| dirs.join(package).join("yt_dlp_plugins").is_dir())
-        .unwrap_or(false)
-}
-
 /// Install the plugin package embedded in this build into `sidecar_root`, unless
 /// an equal or newer one is already there.
 ///
@@ -358,14 +473,17 @@ pub fn ensure_bundled_plugins(sidecar_root: &Path) -> Result<BundledInstall, Str
     let _lock = lock_sidecar_root(sidecar_root)?;
     let bundled = bundled_manifest();
     if let Ok(installed) = load_manifest(sidecar_root) {
-        if package_dir_has_files(sidecar_root, &installed.package) {
+        if installed_package_is_intact(sidecar_root, &installed) {
             if version_is_newer(&installed.version, &bundled.version) {
                 return Ok(BundledInstall::KeptNewer {
                     installed: installed.version,
                 });
             }
+            // A manifest from before `package_sha256` existed is rewritten once, so
+            // later edits or deletions of the files are detectable.
             if installed.version == bundled.version
                 && installed.bundled_sha256 == bundled.bundled_sha256
+                && installed.package_sha256 == bundled.bundled_sha256
             {
                 return Ok(BundledInstall::UpToDate);
             }
@@ -383,7 +501,7 @@ pub fn ensure_bundled_plugins(sidecar_root: &Path) -> Result<BundledInstall, Str
             }
             fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
         }
-        install_plugin_package_locked(sidecar_root, &staging, &bundled)
+        install_plugin_package_locked(sidecar_root, &staging, &bundled, None)
     })();
     let _ = fs::remove_dir_all(&staging);
     result.map(|_| BundledInstall::Installed {
@@ -435,13 +553,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = load_manifest(tmp.path()).unwrap_err();
         assert!(err.contains("failed to read"), "got: {err}");
-    }
-
-    #[test]
-    fn needs_update_when_versions_differ() {
-        let installed = PluginManifest::launch_sites_default();
-        assert!(needs_update(&installed, "0.3.0"));
-        assert!(!needs_update(&installed, "0.2.1"));
     }
 
     #[test]
@@ -637,6 +748,14 @@ mod tests {
         fs::write(&marker, "# out-of-band update").unwrap();
         let mut newer = load_manifest(tmp.path()).unwrap();
         newer.version = "99.0.0".to_string();
+        newer.package_sha256 = Some(
+            package_digest(
+                &plugin_dirs_path(tmp.path())
+                    .unwrap()
+                    .join(PLUGIN_PACKAGE_NAME),
+            )
+            .unwrap(),
+        );
         write_manifest(tmp.path(), &newer).unwrap();
         assert_eq!(
             ensure_bundled_plugins(tmp.path()).unwrap(),
@@ -777,5 +896,116 @@ mod tests {
             names,
             vec![".sidecar.lock", "plugins-manifest.json", "yt-dlp-plugins"]
         );
+    }
+
+    fn package_with(root: &Path, body: &str) {
+        let extractor = root.join("yt_dlp_plugins/extractor");
+        fs::create_dir_all(&extractor).unwrap();
+        fs::write(extractor.join("luxuretv.py"), body).unwrap();
+    }
+
+    #[test]
+    fn package_digest_matches_the_bundled_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (rel, content) in BUNDLED_FILES {
+            let path = tmp.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+        assert_eq!(package_digest(tmp.path()).unwrap(), bundled_digest());
+    }
+
+    #[test]
+    fn verified_install_rejects_a_wrong_digest_and_keeps_the_old_package() {
+        // M-43
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let v1 = tmp.path().join("v1");
+        package_with(&v1, "v1");
+        let manifest = PluginManifest::launch_sites_default();
+        install_plugin_package(&sidecar, &v1, &manifest).unwrap();
+
+        let v2 = tmp.path().join("v2");
+        package_with(&v2, "v2 with a backdoor");
+        let err = install_plugin_package_verified(&sidecar, &v2, &manifest, Some(&"0".repeat(64)))
+            .unwrap_err();
+        assert!(err.contains("checksum mismatch"), "{err}");
+        let live = sidecar.join(PLUGIN_DIRS_REL).join(PLUGIN_PACKAGE_NAME);
+        assert_eq!(
+            fs::read_to_string(live.join("yt_dlp_plugins/extractor/luxuretv.py")).unwrap(),
+            "v1"
+        );
+
+        let good = package_digest(&v2).unwrap();
+        install_plugin_package_verified(&sidecar, &v2, &manifest, Some(&good)).unwrap();
+        assert_eq!(
+            fs::read_to_string(live.join("yt_dlp_plugins/extractor/luxuretv.py")).unwrap(),
+            "v2 with a backdoor"
+        );
+        assert_eq!(load_manifest(&sidecar).unwrap().package_sha256, Some(good));
+    }
+
+    #[test]
+    fn an_edited_or_deleted_package_file_is_not_intact() {
+        // M-41
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let src = tmp.path().join("src");
+        package_with(&src, "original");
+        install_plugin_package(&sidecar, &src, &PluginManifest::launch_sites_default()).unwrap();
+        let manifest = load_manifest(&sidecar).unwrap();
+        assert!(installed_package_is_intact(&sidecar, &manifest));
+
+        let file = sidecar
+            .join(PLUGIN_DIRS_REL)
+            .join(PLUGIN_PACKAGE_NAME)
+            .join("yt_dlp_plugins/extractor/luxuretv.py");
+        fs::write(&file, "edited").unwrap();
+        assert!(!installed_package_is_intact(&sidecar, &manifest));
+        fs::remove_file(&file).unwrap();
+        assert!(!installed_package_is_intact(&sidecar, &manifest));
+    }
+
+    #[test]
+    fn bundled_install_repairs_an_edited_file_of_the_same_version() {
+        // M-41: the doc comment promised this; only a missing directory was repaired.
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_bundled_plugins(tmp.path()).unwrap();
+        let file = plugin_dirs_path(tmp.path())
+            .unwrap()
+            .join(PLUGIN_PACKAGE_NAME)
+            .join("yt_dlp_plugins/extractor/luxuretv.py");
+        fs::write(&file, "# tampered\n").unwrap();
+        assert!(matches!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::Installed { .. }
+        ));
+        assert_ne!(fs::read_to_string(&file).unwrap(), "# tampered\n");
+        assert_eq!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::UpToDate
+        );
+    }
+
+    #[test]
+    fn manifest_extractor_keys_are_validated() {
+        // L-34
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in [
+            vec![],
+            vec!["".to_string()],
+            vec!["Lux ure".to_string()],
+            vec!["../x".to_string()],
+            vec!["1Abc".to_string()],
+        ] {
+            let mut manifest = PluginManifest::launch_sites_default();
+            manifest.extractors = bad.clone();
+            fs::write(
+                manifest_path(tmp.path()),
+                serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(load_manifest(tmp.path()).is_err(), "{bad:?}");
+        }
     }
 }

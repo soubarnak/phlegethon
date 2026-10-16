@@ -165,6 +165,7 @@ pub fn catalog_from_release(
             asset_url: Some(asset.browser_download_url.clone()),
             asset_name: Some(asset.name.clone()),
             sha256: Some(sha256),
+            extractors: Vec::new(),
         },
     );
     Ok(catalog)

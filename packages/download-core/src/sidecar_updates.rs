@@ -6,8 +6,8 @@
 
 use crate::fsutil;
 use crate::plugin_sidecar::{
-    install_plugin_package, load_manifest, PluginManifest,
-    MANIFEST_FILENAME as PLUGIN_MANIFEST_FILENAME,
+    install_plugin_package, install_plugin_package_verified, installed_package_is_intact,
+    is_sha256_hex, load_manifest, PluginManifest, MANIFEST_FILENAME as PLUGIN_MANIFEST_FILENAME,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -103,6 +103,11 @@ pub struct ToolchainManifest {
     pub version: String,
     #[serde(default = "default_toolchain_binary_name")]
     pub binary_name: String,
+    /// SHA-256 of the installed binary, written at install time so a deleted or
+    /// replaced file is not reported as up to date (M-41). Absent in manifests
+    /// from older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 fn default_toolchain_binary_name() -> String {
@@ -130,6 +135,7 @@ impl ToolchainManifest {
         Self {
             version: version.into(),
             binary_name: default_toolchain_binary_name(),
+            sha256: None,
         }
     }
 }
@@ -148,9 +154,15 @@ pub struct CatalogVersionEntry {
     /// File name the asset is installed under (becomes the manifest `binary_name`).
     #[serde(default)]
     pub asset_name: Option<String>,
-    /// Expected SHA-256 (hex) of the asset, verified after download.
+    /// Expected SHA-256 (hex): of the downloaded asset for a toolchain, of the
+    /// package files (see `plugin_sidecar::package_digest`) for a plugin.
+    /// Required for plugin entries.
     #[serde(default)]
     pub sha256: Option<String>,
+    /// Extractor keys a plugin package provides. Empty means the Launch Site
+    /// defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extractors: Vec<String>,
 }
 
 impl CatalogVersionEntry {
@@ -161,6 +173,7 @@ impl CatalogVersionEntry {
             asset_url: None,
             asset_name: None,
             sha256: None,
+            extractors: Vec::new(),
         }
     }
 }
@@ -390,15 +403,28 @@ fn catalog_entry<'a>(
     }
 }
 
+/// Installed plugin version, or `None` when the manifest is missing or the
+/// package it names is missing or no longer matches its recorded digest (M-41).
 fn installed_plugin_version(sidecar_root: &Path) -> Option<String> {
-    load_manifest(sidecar_root).ok().map(|m| m.version)
+    let manifest = load_manifest(sidecar_root).ok()?;
+    installed_package_is_intact(sidecar_root, &manifest).then_some(manifest.version)
 }
 
+/// Installed toolchain version, or `None` when the manifest is missing or its
+/// binary is missing or no longer matches the recorded digest.
 fn installed_toolchain_version(sidecar_root: &Path) -> Option<String> {
-    load_toolchain_manifest(sidecar_root)
-        .ok()
-        .flatten()
-        .map(|m| m.version)
+    let manifest = load_toolchain_manifest(sidecar_root).ok().flatten()?;
+    let binary = toolchain_binary_path(sidecar_root, &manifest);
+    if !binary.is_file() {
+        return None;
+    }
+    if let Some(expected) = manifest.sha256.as_deref() {
+        let actual = crate::github_release_source::sha256_file(&binary).ok()?;
+        if !actual.eq_ignore_ascii_case(expected) {
+            return None;
+        }
+    }
+    Some(manifest.version)
 }
 
 fn component_status(
@@ -438,7 +464,20 @@ pub fn check_sidecar_updates(
 ) -> Result<SidecarUpdateCheckResult, String> {
     let catalog = source.load_catalog(sidecar_root)?;
     let toolchain_target = target_version(&catalog, SidecarComponent::Toolchain, settings);
-    let plugin_target = target_version(&catalog, SidecarComponent::Plugin, settings);
+    let mut plugin_target = target_version(&catalog, SidecarComponent::Plugin, settings);
+    let mut plugin_error = catalog.plugin_error.clone();
+    if let Some(version) = plugin_target.clone() {
+        // M-43: a plugin entry without a usable sha256 can never be installed, so
+        // do not offer it as an update.
+        if let Some(entry) = catalog_entry(&catalog, SidecarComponent::Plugin, &version) {
+            if !entry.sha256.as_deref().is_some_and(is_sha256_hex) {
+                plugin_error.get_or_insert(format!(
+                    "plugin catalog entry {version} has no valid sha256; it will not be installed"
+                ));
+                plugin_target = None;
+            }
+        }
+    }
     Ok(SidecarUpdateCheckResult {
         toolchain: component_status(
             SidecarComponent::Toolchain,
@@ -452,7 +491,7 @@ pub fn check_sidecar_updates(
             installed_plugin_version(sidecar_root),
             plugin_target,
             settings,
-            catalog.plugin_error.clone(),
+            plugin_error,
         ),
     })
 }
@@ -564,7 +603,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 /// Copy `src` to `dst` through a temp file in the same directory, mark it
 /// executable, and rename it into place. A running yt-dlp keeps the old inode;
 /// nothing ever sees a half-written binary (H-23).
-fn install_executable_atomic(src: &Path, dst: &Path) -> Result<(), String> {
+fn install_executable_atomic(src: &Path, dst: &Path) -> Result<String, String> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
@@ -576,8 +615,10 @@ fn install_executable_atomic(src: &Path, dst: &Path) -> Result<(), String> {
         fs::File::open(&tmp)
             .and_then(|f| f.sync_all())
             .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+        let digest = crate::github_release_source::sha256_file(&tmp)?;
         fsutil::rename_durable(&tmp, dst)
-            .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), dst.display()))
+            .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), dst.display()))?;
+        Ok(digest)
     })();
     if staged.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -599,7 +640,7 @@ fn install_toolchain_version(
     manifest.validate()?;
     let previous = load_toolchain_manifest(sidecar_root).ok().flatten();
     let dest = toolchain_binary_path(sidecar_root, &manifest);
-    install_executable_atomic(&src, &dest)?;
+    manifest.sha256 = Some(install_executable_atomic(&src, &dest)?);
     write_toolchain_manifest(sidecar_root, &manifest)?;
     // A different asset name (glibc build to zipimport script) leaves the old file behind.
     if let Some(previous) = previous.filter(|p| p.binary_name != manifest.binary_name) {
@@ -631,10 +672,22 @@ fn install_plugin_version(
     entry: &CatalogVersionEntry,
     source: &dyn SidecarUpdateSource,
 ) -> Result<(), String> {
+    // The package is Python code that every yt-dlp process loads, so an entry
+    // must name the digest of its files and the copy must match it (M-43).
+    let expected = entry
+        .sha256
+        .as_deref()
+        .filter(|h| is_sha256_hex(h))
+        .ok_or_else(|| {
+            format!("refusing to install plugin {version}: the catalog entry has no valid sha256")
+        })?;
     let src = source.materialize(sidecar_root, SidecarComponent::Plugin, version, entry)?;
     let mut manifest = PluginManifest::launch_sites_default();
     manifest.version = version.to_string();
-    install_plugin_package(sidecar_root, &src, &manifest)?;
+    if !entry.extractors.is_empty() {
+        manifest.extractors = entry.extractors.clone();
+    }
+    install_plugin_package_verified(sidecar_root, &src, &manifest, Some(expected))?;
     Ok(())
 }
 
@@ -816,6 +869,15 @@ fn restore_toolchain_from_snapshot(
         .map_err(|e| format!("parse rollback toolchain manifest: {e}"))?;
     manifest.validate()?;
     let src = snapshot.backup_root.join(&manifest.binary_name);
+    if let Some(expected) = manifest.sha256.as_deref() {
+        let actual = crate::github_release_source::sha256_file(&src)?;
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "rollback backup of {} is damaged: expected {expected}, got {actual}",
+                manifest.binary_name
+            ));
+        }
+    }
     let entry = CatalogVersionEntry {
         asset_name: Some(manifest.binary_name.clone()),
         ..CatalogVersionEntry::local(src)
@@ -1065,5 +1127,149 @@ mod tests {
         // The next save writes a fresh, valid file.
         save_sidecar_runtime_state(tmp.path(), &SidecarRuntimeState::default()).unwrap();
         assert!(load_sidecar_runtime_state(tmp.path()).is_ok());
+    }
+
+    fn plugin_source_dir(tmp: &Path, name: &str, body: &str) -> PathBuf {
+        let dir = tmp.join(name);
+        let extractor = dir.join("yt_dlp_plugins/extractor");
+        fs::create_dir_all(&extractor).unwrap();
+        fs::write(extractor.join("luxuretv.py"), body).unwrap();
+        dir
+    }
+
+    fn plugin_catalog(version: &str, entry: CatalogVersionEntry) -> UpdateCatalog {
+        UpdateCatalog {
+            plugin_latest: Some(version.to_string()),
+            plugin_versions: HashMap::from([(version.to_string(), entry)]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn plugin_catalog_entry_without_sha256_is_never_installed() {
+        // M-43: unsigned Python code from update-catalog.json used to be loaded by yt-dlp.
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let src = plugin_source_dir(tmp.path(), "evil", "import os  # no hash");
+        let source =
+            FakeSidecarUpdateSource::new(plugin_catalog("9.9.9", CatalogVersionEntry::local(src)));
+
+        let check =
+            check_sidecar_updates(&sidecar, &SidecarUpdateSettings::default(), source.as_ref())
+                .unwrap();
+        assert!(
+            !check.plugin.update_available,
+            "an unverifiable entry is not an update"
+        );
+        assert!(check.plugin.lookup_error.unwrap().contains("sha256"));
+
+        let mut state = SidecarRuntimeState::default();
+        let result = apply_sidecar_updates(
+            &sidecar,
+            &SidecarUpdateSettings::default(),
+            source.as_ref(),
+            false,
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(result.outcome, SidecarApplyOutcome::NothingToApply);
+        assert!(!sidecar.join("yt-dlp-plugins").exists());
+    }
+
+    #[test]
+    fn plugin_install_refuses_an_entry_without_sha256_even_when_called_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let src = plugin_source_dir(tmp.path(), "pkg", "x");
+        let err = install_plugin_version(
+            &sidecar,
+            "9.9.9",
+            &CatalogVersionEntry::local(src),
+            &FileSidecarUpdateSource,
+        )
+        .unwrap_err();
+        assert!(err.contains("no valid sha256"), "{err}");
+    }
+
+    #[test]
+    fn plugin_catalog_entry_is_verified_and_its_extractors_recorded() {
+        // M-43 / L-34
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let src = plugin_source_dir(tmp.path(), "pkg", "# genuine");
+        let digest = crate::plugin_sidecar::package_digest(&src).unwrap();
+        let entry = CatalogVersionEntry {
+            sha256: Some(digest.clone()),
+            extractors: vec!["LuxureTV".to_string(), "NewSite".to_string()],
+            ..CatalogVersionEntry::local(src.clone())
+        };
+        let source = FakeSidecarUpdateSource::new(plugin_catalog("9.9.9", entry.clone()));
+        let mut state = SidecarRuntimeState::default();
+        let result = apply_sidecar_updates(
+            &sidecar,
+            &SidecarUpdateSettings::default(),
+            source.as_ref(),
+            false,
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(result.applied, vec![SidecarComponent::Plugin]);
+        let manifest = load_manifest(&sidecar).unwrap();
+        assert_eq!(manifest.version, "9.9.9");
+        assert_eq!(manifest.extractors, vec!["LuxureTV", "NewSite"]);
+        assert_eq!(manifest.package_sha256, Some(digest));
+
+        // A package that changes after the catalog was written no longer matches.
+        let tampered = plugin_source_dir(tmp.path(), "pkg2", "# swapped");
+        let bad = CatalogVersionEntry {
+            source_path: tampered,
+            ..entry
+        };
+        let err =
+            install_plugin_version(&sidecar, "10.0.0", &bad, &FileSidecarUpdateSource).unwrap_err();
+        assert!(err.contains("checksum mismatch"), "{err}");
+        assert_eq!(load_manifest(&sidecar).unwrap().version, "9.9.9");
+    }
+
+    #[test]
+    fn deleted_or_replaced_toolchain_binary_is_not_reported_installed() {
+        // M-41
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let (catalog, _) = catalog_with_binary(tmp.path(), "2.0.0", b"genuine");
+        let source = FakeSidecarUpdateSource::new(catalog);
+        let settings = SidecarUpdateSettings::default();
+        apply_sidecar_updates(
+            &sidecar,
+            &settings,
+            source.as_ref(),
+            false,
+            &mut SidecarRuntimeState::default(),
+        )
+        .unwrap();
+        let check = check_sidecar_updates(&sidecar, &settings, source.as_ref()).unwrap();
+        assert_eq!(check.toolchain.installed_version.as_deref(), Some("2.0.0"));
+        assert!(!check.toolchain.update_available);
+
+        fs::write(sidecar.join("yt-dlp"), b"replaced").unwrap();
+        let check = check_sidecar_updates(&sidecar, &settings, source.as_ref()).unwrap();
+        assert_eq!(check.toolchain.installed_version, None);
+        assert!(check.toolchain.update_available);
+
+        fs::remove_file(sidecar.join("yt-dlp")).unwrap();
+        let check = check_sidecar_updates(&sidecar, &settings, source.as_ref()).unwrap();
+        assert_eq!(check.toolchain.installed_version, None);
+        assert!(check.toolchain.update_available);
+
+        // The next apply repairs it.
+        apply_sidecar_updates(
+            &sidecar,
+            &settings,
+            source.as_ref(),
+            false,
+            &mut SidecarRuntimeState::default(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(sidecar.join("yt-dlp")).unwrap(), b"genuine");
     }
 }
