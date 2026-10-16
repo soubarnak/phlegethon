@@ -9,6 +9,7 @@ function make(readValues: string[], urlsFor: (t: string) => string[]) {
     readClipboardText: async () => readValues[Math.min(i++, readValues.length - 1)],
     splitUrls: async (t) => urlsFor(t),
     onUrlsDetected: (u) => detected.push(u),
+    isActive: () => true,
     setInterval: (fn) => {
       scheduled = fn;
       return 1;
@@ -36,6 +37,7 @@ describe("clipboard watcher", () => {
       },
       splitUrls: async () => ["x"],
       onUrlsDetected: detected,
+      isActive: () => true,
     });
     await watcher.tick();
     expect(detected).not.toHaveBeenCalled();
