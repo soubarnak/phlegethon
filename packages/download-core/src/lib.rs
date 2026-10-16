@@ -67,7 +67,7 @@ pub use github_release_source::{
 pub use http::{ContentRange, FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
-pub use job_signals::JobSignals;
+pub use job_signals::{JobSignals, ProbeGuard};
 pub use media_extras::{
     apply_remux_postprocess, effective_options, ffmpeg_available, ytdlp_media_extras_args,
     MediaExtrasCapabilities, MediaExtrasOptions, PostprocessOutcome,
@@ -228,6 +228,8 @@ pub struct ProbePlan {
     proxy: ProxySettings,
     settings: ProbeTierSettings,
     cancel: Arc<AtomicBool>,
+    /// Keeps the sidecar installer from swapping yt-dlp while this probe runs.
+    _probe_guard: Option<job_signals::ProbeGuard>,
 }
 
 impl ProbePlan {
@@ -251,6 +253,7 @@ impl ProbePlan {
             proxy,
             settings,
             cancel: Arc::new(AtomicBool::new(false)),
+            _probe_guard: None,
         })
     }
 
@@ -472,6 +475,8 @@ pub struct EnrichPlan {
     extractor: Arc<dyn ExtractorToolchain>,
     cookies: CookieChannel,
     proxy: ProxySettings,
+    /// Keeps the sidecar installer from swapping yt-dlp while this lookup runs.
+    _probe_guard: job_signals::ProbeGuard,
 }
 
 impl EnrichPlan {
@@ -1972,8 +1977,10 @@ impl Core {
         guard.apply_sidecar_updates()
     }
 
+    /// Whether anything is using the sidecar yt-dlp: a body-writing job, a
+    /// running probe, or a quality lookup.
     fn transfers_active(&self) -> bool {
-        self.job_signals.active_transfer_count() > 0
+        self.job_signals.active_transfer_count() > 0 || self.job_signals.probes_in_flight() > 0
     }
 
     fn require_sidecar_root(&self) -> Result<&Path, String> {
@@ -2268,7 +2275,7 @@ impl Core {
 
     /// Capture everything a probe needs (settings, toolchain, cancel flag).
     pub fn plan_probe(&mut self, url: &str) -> Result<ProbePlan, String> {
-        let plan = ProbePlan::standalone(
+        let mut plan = ProbePlan::standalone(
             url,
             Arc::clone(&self.extractor),
             Arc::clone(&self.sniffer),
@@ -2276,6 +2283,7 @@ impl Core {
             self.cookie_channel.clone(),
             self.proxy_settings.clone(),
         )?;
+        plan._probe_guard = Some(self.job_signals.begin_probe());
         self.probe_cancels
             .insert(plan.url().to_string(), plan.cancel_flag());
         Ok(plan)
@@ -2399,6 +2407,7 @@ impl Core {
             extractor: Arc::clone(&self.extractor),
             cookies: self.cookie_channel.clone(),
             proxy: self.proxy_settings.clone(),
+            _probe_guard: self.job_signals.begin_probe(),
         })
     }
 

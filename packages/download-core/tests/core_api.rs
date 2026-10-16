@@ -6947,6 +6947,66 @@ fn manual_check_drops_the_cached_release_lookup() {
 }
 
 #[test]
+fn apply_sidecar_updates_waits_for_in_flight_probes() {
+    // H-23: probes run outside the Core lock and were invisible to the guard.
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    let plan = core.plan_probe("https://example.com/watch?v=1").unwrap();
+    let result = core.apply_sidecar_updates().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::BlockedMidTransfer);
+    assert_eq!(
+        core.check_sidecar_updates()
+            .unwrap()
+            .toolchain
+            .installed_version
+            .as_deref(),
+        Some("1.0.0"),
+        "installed toolchain must not change while a probe is running"
+    );
+
+    drop(plan);
+    let result = core.apply_sidecar_updates().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::Applied);
+}
+
+#[test]
+fn apply_sidecar_updates_waits_for_quality_lookups_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    let guard = core.job_signals().begin_probe();
+    assert_eq!(
+        core.apply_sidecar_updates().unwrap().outcome,
+        SidecarApplyOutcome::BlockedMidTransfer
+    );
+    drop(guard);
+    assert_eq!(
+        core.apply_sidecar_updates().unwrap().outcome,
+        SidecarApplyOutcome::Applied
+    );
+}
+
+#[test]
+fn corrupt_sidecar_state_does_not_block_set_sidecar_root() {
+    // M-38: a bad `sidecar-state.json` made every sidecar command fail for the session.
+    let tmp = tempfile::tempdir().unwrap();
+    let sidecar = tmp.path().join("sidecar");
+    let state_dir = sidecar.join(".phlegethon");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(state_dir.join("sidecar-state.json"), "{ not json").unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_sidecar_root(sidecar.clone()).unwrap();
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    assert_eq!(core.sidecar_root(), Some(sidecar.as_path()));
+    assert!(core.check_sidecar_updates().is_ok());
+}
+
+#[test]
 fn rollback_rebinds_extractor_via_apply_sidecar_root() {
     let tmp = tempfile::tempdir().unwrap();
     let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");

@@ -15,9 +15,12 @@
 //!   plugins-manifest.json           ← independent update metadata
 //! ```
 
+use crate::fsutil;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Package directory name under `yt-dlp-plugins/`.
 pub const PLUGIN_PACKAGE_NAME: &str = "phlegethon-launch-sites";
@@ -45,6 +48,22 @@ pub struct PluginManifest {
 }
 
 impl PluginManifest {
+    /// Reject a manifest whose `package` could leave the plugin directory.
+    ///
+    /// The value is joined into a path that is later removed with
+    /// `remove_dir_all`, so `..`, separators and absolute paths are refused
+    /// (M-37).
+    pub fn validate(&self) -> Result<(), String> {
+        if fsutil::is_single_component(&self.package) {
+            Ok(())
+        } else {
+            Err(format!(
+                "plugin manifest package {:?} is not a plain directory name",
+                self.package
+            ))
+        }
+    }
+
     /// Canonical manifest for the in-tree Launch Site plugin package.
     pub fn launch_sites_default() -> Self {
         Self {
@@ -81,19 +100,66 @@ pub fn load_manifest(sidecar_root: &Path) -> Result<PluginManifest, String> {
     let path = manifest_path(sidecar_root);
     let raw = fs::read_to_string(&path)
         .map_err(|e| format!("failed to read plugin manifest {}: {e}", path.display()))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| format!("failed to parse plugin manifest {}: {e}", path.display()))
+    let manifest: PluginManifest = serde_json::from_str(&raw)
+        .map_err(|e| format!("failed to parse plugin manifest {}: {e}", path.display()))?;
+    manifest.validate()?;
+    Ok(manifest)
 }
 
-/// Write a plugins manifest to a sidecar root.
+/// Write a plugins manifest to a sidecar root (temp file, fsync, rename).
 pub fn write_manifest(sidecar_root: &Path, manifest: &PluginManifest) -> Result<(), String> {
     fs::create_dir_all(sidecar_root)
         .map_err(|e| format!("create sidecar root {}: {e}", sidecar_root.display()))?;
     let path = manifest_path(sidecar_root);
     let raw = serde_json::to_string_pretty(manifest)
         .map_err(|e| format!("serialize plugin manifest: {e}"))?;
-    fs::write(&path, raw).map_err(|e| format!("write plugin manifest {}: {e}", path.display()))?;
-    Ok(())
+    fsutil::write_atomic(&path, raw.as_bytes())
+        .map_err(|e| format!("write plugin manifest {}: {e}", path.display()))
+}
+
+/// File under the sidecar root that serializes writers across app instances.
+const LOCK_FILENAME: &str = ".sidecar.lock";
+
+/// Exclusive advisory lock on a sidecar root; released on drop.
+///
+/// Two app instances share one sidecar root. Without the lock both rewrite the
+/// plugin package and manifest at startup (M-34).
+pub(crate) struct SidecarLock {
+    _file: fs::File,
+}
+
+/// Block until this process holds the exclusive lock on `sidecar_root`.
+pub(crate) fn lock_sidecar_root(sidecar_root: &Path) -> Result<SidecarLock, String> {
+    fs::create_dir_all(sidecar_root)
+        .map_err(|e| format!("create sidecar root {}: {e}", sidecar_root.display()))?;
+    let path = sidecar_root.join(LOCK_FILENAME);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    file.lock_exclusive()
+        .map_err(|e| format!("lock {}: {e}", path.display()))?;
+    Ok(SidecarLock { _file: file })
+}
+
+/// Name prefixes of directories this module creates beside the plugin package.
+const STAGING_PREFIXES: [&str; 3] = [".plugin-staging-", ".plugin-old-", ".bundled-plugins-"];
+
+/// Remove staging and swap leftovers from a crashed run. Needs the sidecar lock,
+/// so no live installer owns them (L-33).
+fn sweep_staging(sidecar_root: &Path) {
+    let Ok(entries) = fs::read_dir(sidecar_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if STAGING_PREFIXES.iter().any(|p| name.starts_with(p)) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Whether an installed sidecar needs updating relative to a desired version.
@@ -106,9 +172,26 @@ pub fn needs_update(installed: &PluginManifest, desired_version: &str) -> bool {
 /// Copies `source_package` (a directory containing `yt_dlp_plugins/`) into
 /// `sidecar_root/yt-dlp-plugins/<package>/` and writes `manifest`.
 ///
+/// The package is copied to a staging directory beside the plugin directory and
+/// moved into place, so a failed copy leaves the installed package and manifest
+/// as they were, and the manifest is written last (H-23, M-36). Holds the
+/// sidecar lock for the whole swap (M-34).
+///
 /// This is the independent update path: a newer plugin package can be swapped
 /// without shipping a full app release.
 pub fn install_plugin_package(
+    sidecar_root: &Path,
+    source_package: &Path,
+    manifest: &PluginManifest,
+) -> Result<PathBuf, String> {
+    manifest.validate()?;
+    let _lock = lock_sidecar_root(sidecar_root)?;
+    sweep_staging(sidecar_root);
+    install_plugin_package_locked(sidecar_root, source_package, manifest)
+}
+
+/// [`install_plugin_package`] for a caller that already holds the sidecar lock.
+fn install_plugin_package_locked(
     sidecar_root: &Path,
     source_package: &Path,
     manifest: &PluginManifest,
@@ -129,16 +212,35 @@ pub fn install_plugin_package(
 
     let dest_parent = sidecar_root.join(PLUGIN_DIRS_REL);
     let dest = dest_parent.join(&manifest.package);
-
-    // Replace existing package for out-of-band updates.
-    if dest.exists() {
-        fs::remove_dir_all(&dest)
-            .map_err(|e| format!("remove old plugin package {}: {e}", dest.display()))?;
-    }
     fs::create_dir_all(&dest_parent)
         .map_err(|e| format!("create plugin dirs {}: {e}", dest_parent.display()))?;
 
-    copy_dir_recursive(source_package, &dest)?;
+    // Stage beside the plugin directory, not inside it: yt-dlp scans
+    // `yt-dlp-plugins/` and would load a half-copied package.
+    let staging = sidecar_root.join(format!(".plugin-staging-{}", Uuid::new_v4()));
+    if let Err(err) = copy_dir_recursive(source_package, &staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(err);
+    }
+
+    let retired = sidecar_root.join(format!(".plugin-old-{}", Uuid::new_v4()));
+    let had_old = dest.exists();
+    if had_old {
+        if let Err(e) = fs::rename(&dest, &retired) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("retire old plugin package {}: {e}", dest.display()));
+        }
+    }
+    if let Err(e) = fs::rename(&staging, &dest) {
+        if had_old {
+            let _ = fs::rename(&retired, &dest);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("install plugin package {}: {e}", dest.display()));
+    }
+    let _ = fsutil::sync_dir(&dest_parent);
+    let _ = fs::remove_dir_all(&retired);
+
     write_manifest(sidecar_root, manifest)?;
 
     Ok(dest_parent)
@@ -253,6 +355,7 @@ fn package_dir_has_files(sidecar_root: &Path, package: &str) -> bool {
 /// Call once at startup, before the yt-dlp configuration is built. A package that
 /// was updated out of band to a higher version is never downgraded.
 pub fn ensure_bundled_plugins(sidecar_root: &Path) -> Result<BundledInstall, String> {
+    let _lock = lock_sidecar_root(sidecar_root)?;
     let bundled = bundled_manifest();
     if let Ok(installed) = load_manifest(sidecar_root) {
         if package_dir_has_files(sidecar_root, &installed.package) {
@@ -269,13 +372,8 @@ pub fn ensure_bundled_plugins(sidecar_root: &Path) -> Result<BundledInstall, Str
         }
     }
 
-    fs::create_dir_all(sidecar_root)
-        .map_err(|e| format!("create sidecar root {}: {e}", sidecar_root.display()))?;
-    let staging = sidecar_root.join(format!(".bundled-plugins-{}", std::process::id()));
-    if staging.exists() {
-        fs::remove_dir_all(&staging)
-            .map_err(|e| format!("clear staging {}: {e}", staging.display()))?;
-    }
+    sweep_staging(sidecar_root);
+    let staging = sidecar_root.join(format!(".bundled-plugins-{}", Uuid::new_v4()));
     let result = (|| {
         for (rel, content) in BUNDLED_FILES {
             let path = staging.join(rel);
@@ -285,7 +383,7 @@ pub fn ensure_bundled_plugins(sidecar_root: &Path) -> Result<BundledInstall, Str
             }
             fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
         }
-        install_plugin_package(sidecar_root, &staging, &bundled)
+        install_plugin_package_locked(sidecar_root, &staging, &bundled)
     })();
     let _ = fs::remove_dir_all(&staging);
     result.map(|_| BundledInstall::Installed {
@@ -547,5 +645,137 @@ mod tests {
             }
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "# out-of-band update");
+    }
+
+    #[test]
+    fn failed_copy_keeps_the_installed_package_and_manifest() {
+        // H-23 / M-36: the old package used to be deleted before the copy started.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let v1 = tmp.path().join("v1");
+        write_minimal_package(&v1);
+        let mut manifest = PluginManifest::launch_sites_default();
+        install_plugin_package(&sidecar, &v1, &manifest).unwrap();
+
+        let broken = tmp.path().join("broken");
+        write_minimal_package(&broken);
+        let unreadable = broken.join("yt_dlp_plugins/extractor/xxxbp.py");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&unreadable).is_ok() {
+            return; // running as root: permissions do not stop the read
+        }
+        manifest.version = "0.9.0".to_string();
+        assert!(install_plugin_package(&sidecar, &broken, &manifest).is_err());
+
+        let live = sidecar.join(PLUGIN_DIRS_REL).join(PLUGIN_PACKAGE_NAME);
+        assert!(live.join("yt_dlp_plugins/extractor/luxuretv.py").is_file());
+        assert!(live.join("yt_dlp_plugins/extractor/xxxbp.py").is_file());
+        assert_eq!(load_manifest(&sidecar).unwrap().version, "0.2.1");
+        let leftovers: Vec<_> = fs::read_dir(&sidecar)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".plugin-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging directory left behind");
+    }
+
+    #[test]
+    fn install_leaves_no_staging_or_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let src = tmp.path().join("src");
+        write_minimal_package(&src);
+        install_plugin_package(&sidecar, &src, &PluginManifest::launch_sites_default()).unwrap();
+        let mut names: Vec<_> = fs::read_dir(&sidecar)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![".sidecar.lock", "plugins-manifest.json", "yt-dlp-plugins"]
+        );
+        let inner: Vec<_> = fs::read_dir(sidecar.join(PLUGIN_DIRS_REL))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(inner, vec![PLUGIN_PACKAGE_NAME]);
+    }
+
+    #[test]
+    fn manifest_package_cannot_leave_the_plugin_directory() {
+        // M-37: `"package": ".."` made `remove_dir_all` hit the sidecar root.
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let src = tmp.path().join("src");
+        write_minimal_package(&src);
+        fs::create_dir_all(&sidecar).unwrap();
+        fs::write(sidecar.join("keep-me"), b"x").unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep-me"), b"x").unwrap();
+
+        for bad in ["..", "../..", "a/b", outside.to_str().unwrap(), ""] {
+            let mut manifest = PluginManifest::launch_sites_default();
+            manifest.package = bad.to_string();
+            let err = install_plugin_package(&sidecar, &src, &manifest).unwrap_err();
+            assert!(err.contains("not a plain directory name"), "{bad:?}: {err}");
+            fs::write(
+                manifest_path(&sidecar),
+                serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(load_manifest(&sidecar).is_err(), "{bad:?}");
+        }
+        assert!(sidecar.join("keep-me").is_file());
+        assert!(outside.join("keep-me").is_file());
+    }
+
+    #[test]
+    fn install_waits_for_the_sidecar_lock() {
+        // M-34: a second instance must not rewrite the package while the first is at it.
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = tmp.path().join("sidecar");
+        let src = tmp.path().join("src");
+        write_minimal_package(&src);
+        let held = lock_sidecar_root(&sidecar).unwrap();
+
+        let (sidecar2, src2) = (sidecar.clone(), src.clone());
+        let installer = std::thread::spawn(move || {
+            install_plugin_package(&sidecar2, &src2, &PluginManifest::launch_sites_default())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !manifest_path(&sidecar).exists() && !sidecar.join(PLUGIN_DIRS_REL).exists(),
+            "installer ran while the lock was held"
+        );
+        drop(held);
+        installer.join().unwrap().unwrap();
+        assert!(manifest_path(&sidecar).is_file());
+    }
+
+    #[test]
+    fn startup_sweeps_staging_directories_from_crashed_runs() {
+        // L-33: each crash used to leave a `.bundled-plugins-<pid>` directory.
+        let tmp = tempfile::tempdir().unwrap();
+        for name in [
+            ".bundled-plugins-4242",
+            ".plugin-staging-x",
+            ".plugin-old-y",
+        ] {
+            let dir = tmp.path().join(name);
+            fs::create_dir_all(dir.join("yt_dlp_plugins")).unwrap();
+        }
+        ensure_bundled_plugins(tmp.path()).unwrap();
+        let mut names: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![".sidecar.lock", "plugins-manifest.json", "yt-dlp-plugins"]
+        );
     }
 }
