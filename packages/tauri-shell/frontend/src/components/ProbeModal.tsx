@@ -45,7 +45,7 @@ import {
   type QualityByItem,
 } from "@/lib/probeSelection";
 import { useReturnFocus } from "@/state/useReturnFocus";
-import { FolderPicker } from "./FolderPicker";
+import { FOLDER_DIALOG_CLASS, FolderPicker } from "./FolderPicker";
 
 interface ProbeModalProps {
   /** URL to probe; `null` closes the modal. */
@@ -271,7 +271,14 @@ export function ProbeModal({
   if (url == null) return null;
 
   return (
-    <ComposedModal open size="lg" className="ph-probe" onClose={close} preventCloseOnClickOutside>
+    <ComposedModal
+      open
+      size="lg"
+      className="ph-probe"
+      onClose={close}
+      preventCloseOnClickOutside
+      selectorsFloatingMenus={[`.${FOLDER_DIALOG_CLASS}`]}
+    >
       <ModalHeader title={heading} label={t("probe.title")} closeModal={close} />
       <ModalBody hasScrollingContent={phase.kind === "results"}>
         {phase.kind === "probing" && (
@@ -369,7 +376,7 @@ export function ProbeModal({
             <Table size="md" aria-label={t("probe.results")}>
               <TableHead>
                 <TableRow>
-                  <TableHeader style={{ width: "3rem" }}>
+                  <TableHeader className="ph-probe__col ph-probe__col--select" style={{ width: "3rem" }}>
                     <Checkbox
                       id="probe-select-all"
                       labelText={t("probe.selectAll")}
@@ -379,9 +386,9 @@ export function ProbeModal({
                       onChange={(_, { checked }) => setSelected(checked ? new Set(items.map((i) => i.id)) : new Set())}
                     />
                   </TableHeader>
-                  <TableHeader>{t("queue.col.title")}</TableHeader>
-                  <TableHeader>{t("probe.quality")}</TableHeader>
-                  <TableHeader>{t("queue.col.size")}</TableHeader>
+                  <TableHeader className="ph-probe__col ph-probe__col--title">{t("queue.col.title")}</TableHeader>
+                  <TableHeader className="ph-probe__col ph-probe__col--quality">{t("probe.quality")}</TableHeader>
+                  <TableHeader className="ph-probe__col ph-probe__col--size">{t("queue.col.size")}</TableHeader>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -391,7 +398,7 @@ export function ProbeModal({
                   const meta = [item.uploader, item.upload_date ? formatUploadDate(item.upload_date) : null].filter(Boolean).join(" · ");
                   return (
                     <TableRow key={item.id} data-testid={`probe-row-${item.id}`}>
-                      <TableCell>
+                      <TableCell className="ph-probe__col ph-probe__col--select">
                         <Checkbox
                           id={`probe-pick-${item.id}`}
                           labelText={t("probe.selectItem", { title: item.title })}
@@ -400,7 +407,7 @@ export function ProbeModal({
                           onChange={(_, { checked }) => toggleItem(item.id, checked)}
                         />
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="ph-probe__col ph-probe__col--title">
                         <div className="ph-probe__item-title" title={item.title}>
                           {item.title}
                         </div>
@@ -413,7 +420,7 @@ export function ProbeModal({
                           {meta}
                         </div>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="ph-probe__col ph-probe__col--quality">
                         <div
                           className="ph-probe__quality"
                           onFocusCapture={() => void ensureEnriched(item.id)}
@@ -442,7 +449,7 @@ export function ProbeModal({
                           )}
                         </div>
                       </TableCell>
-                      <TableCell>{q?.size_bytes ? formatBytes(q.size_bytes) : "—"}</TableCell>
+                      <TableCell className="ph-probe__col ph-probe__col--size">{q?.size_bytes ? formatBytes(q.size_bytes) : "—"}</TableCell>
                     </TableRow>
                   );
                 })}

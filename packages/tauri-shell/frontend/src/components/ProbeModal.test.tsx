@@ -182,4 +182,21 @@ describe("ProbeModal", () => {
     await waitFor(() => expect(ipc.callsTo("clear_pending_probe")).toHaveLength(1));
     expect(p.onClose).toHaveBeenCalled();
   });
+
+  it("the typed-path dialog keeps focus and closes alone on Escape (UI-8, UI-9)", async () => {
+    baseIpc(probeResult(items));
+    const p = props();
+    render(<ProbeModal {...p} />);
+    const user = userEvent.setup();
+    await screen.findByTestId("probe-row-yt-a");
+    await user.click(screen.getByTestId("folder-picker-manual"));
+    const field = await screen.findByLabelText("Absolute folder path");
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "/mnt/x");
+    expect(field).toHaveValue("/mnt/x");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByLabelText("Absolute folder path")).toBeNull());
+    expect(p.onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId("probe-row-yt-a")).toBeInTheDocument();
+  });
 });

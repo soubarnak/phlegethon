@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import type { SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 import { Button, Modal, TextInput } from "@carbon/react";
 import { FolderAdd } from "@carbon/icons-react";
@@ -21,6 +22,11 @@ interface FolderPickerProps {
 }
 
 const DEFAULT_PICK_TIMEOUT_MS = 120_000;
+
+/** Class on the typed-path dialog's wrapper. A host ComposedModal lists it in `selectorsFloatingMenus` so its focus trap lets focus into the dialog. */
+export const FOLDER_DIALOG_CLASS = "ph-folder-dialog";
+
+const stop = (e: SyntheticEvent) => e.stopPropagation();
 
 /**
  * Folder chooser: the native portal/zenity/kdialog picker via Rust, with a
@@ -120,30 +126,35 @@ export function FolderPicker({
       {manualOpen &&
         // Portaled to <body>: inside the probe sheet the open modal's transform makes it the containing
         // block for `position: fixed`, so the dialog and its backdrop were sized to the sheet (UI-8).
+        // React events still bubble to the probe sheet through the portal, so the wrapper keeps focus and
+        // mouse events to itself. Keydown must reach `document` for Carbon's Escape handling. The sheet's
+        // focus trap would also pull focus out of the field; it skips FOLDER_DIALOG_CLASS.
         createPortal(
-          <Modal
-            open
-            modalHeading={t("folder.manual.title")}
-            primaryButtonText={t("folder.manual.use")}
-            secondaryButtonText={t("discard.cancel")}
-            primaryButtonDisabled={!manualValid}
-            onRequestClose={() => setManualOpen(false)}
-            onRequestSubmit={acceptManualPath}
-            size="sm"
-          >
-            <TextInput
-              id="manual-folder-path"
-              data-modal-primary-focus
-              labelText={t("folder.manual.label")}
-              helperText={noChooser ? t("folder.manual.noChooser") : t("folder.manual.hint")}
-              placeholder="/home/you/Videos"
-              value={manualPath}
-              invalid={manualPath.length > 0 && !manualValid}
-              invalidText={t("folder.manual.invalid")}
-              onKeyDown={(e) => submitOnEnter(e, acceptManualPath)}
-              onChange={(e) => setManualPath(e.target.value)}
-            />
-          </Modal>,
+          <div className={FOLDER_DIALOG_CLASS} onBlur={stop} onFocus={stop} onMouseDown={stop}>
+            <Modal
+              open
+              modalHeading={t("folder.manual.title")}
+              primaryButtonText={t("folder.manual.use")}
+              secondaryButtonText={t("discard.cancel")}
+              primaryButtonDisabled={!manualValid}
+              onRequestClose={() => setManualOpen(false)}
+              onRequestSubmit={acceptManualPath}
+              size="sm"
+            >
+              <TextInput
+                id="manual-folder-path"
+                data-modal-primary-focus
+                labelText={t("folder.manual.label")}
+                helperText={noChooser ? t("folder.manual.noChooser") : t("folder.manual.hint")}
+                placeholder="/home/you/Videos"
+                value={manualPath}
+                invalid={manualPath.length > 0 && !manualValid}
+                invalidText={t("folder.manual.invalid")}
+                onKeyDown={(e) => submitOnEnter(e, acceptManualPath)}
+                onChange={(e) => setManualPath(e.target.value)}
+              />
+            </Modal>
+          </div>,
           document.body,
         )}
     </>

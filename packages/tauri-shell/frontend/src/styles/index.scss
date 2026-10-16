@@ -156,19 +156,19 @@ body {
   padding-top: 1.5rem; // align with the TextArea below its label
 }
 
-// Narrow: Add moves under the field so the helper text keeps the full width (UI-7).
+// Narrow: the 90-character helper wrapped to four lines in the column the Add button
+// leaves, so it stays available to screen readers but no longer takes room (UI-7).
 @include below($ph-bp-md) {
   .ph-urlbar {
-    grid-template-columns: minmax(0, 1fr);
     padding: $spacing-04;
-  }
 
-  .ph-urlbar__actions {
-    padding-top: 0;
-
-    .cds--btn {
-      flex: 1 1 auto;
-      max-inline-size: none;
+    .cds--form__helper-text {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
   }
 }
@@ -504,6 +504,58 @@ body {
 
   @include below($ph-bp-md) {
     min-width: 8rem;
+  }
+}
+
+// Compact sheet: each item becomes a card (title on top, quality and size below) so no column
+// sits past the sheet edge (UI-6).
+@include below($ph-bp-md) {
+  .ph-probe {
+    .cds--data-table,
+    .cds--data-table thead,
+    .cds--data-table tbody {
+      display: block;
+      width: 100%;
+    }
+
+    .cds--data-table thead {
+      display: none;
+    }
+
+    .cds--data-table tbody tr {
+      display: grid;
+      grid-template-columns: 2.5rem minmax(0, 1fr) auto;
+      grid-template-areas:
+        "select title title"
+        "select quality size";
+      align-items: center;
+      height: auto;
+      padding-bottom: $spacing-03;
+    }
+
+    .cds--data-table tbody td {
+      height: auto;
+      min-width: 0;
+      border: 0;
+    }
+
+    .ph-probe__col--select {
+      grid-area: select;
+      align-self: start;
+    }
+
+    .ph-probe__col--title {
+      grid-area: title;
+    }
+
+    .ph-probe__col--quality {
+      grid-area: quality;
+    }
+
+    .ph-probe__col--size {
+      grid-area: size;
+      white-space: nowrap;
+    }
   }
 }
 
