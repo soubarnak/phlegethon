@@ -921,6 +921,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "fs2",
+ "libc",
  "md-5",
  "quick-xml 0.42.0",
  "regex",

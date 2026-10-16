@@ -588,9 +588,10 @@ enum UnlockedTransferOutcome {
     Extracted {
         job_id: String,
         dest: PathBuf,
-        media_extras: MediaExtrasOptions,
-        stop: Arc<AtomicBool>,
         result: Result<ExtractorDownloadOutcome, String>,
+        /// Remux result, computed outside the Core lock; `Some` only for a completed download.
+        post: Option<PostprocessOutcome>,
+        stop: Arc<AtomicBool>,
     },
     /// The transfer code panicked; the job is failed so it cannot stay active.
     Panicked { job_id: String, message: String },
@@ -797,7 +798,8 @@ impl UnlockedTransferPlan {
                 total_for_progress,
                 referer,
             } => {
-                let result = run_extractor_fetch(ExtractorFetchParams {
+                let ffmpeg_dir = extractor.ffmpeg_dir().map(Path::to_path_buf);
+                let mut result = run_extractor_fetch(ExtractorFetchParams {
                     extractor,
                     url,
                     format,
@@ -813,13 +815,26 @@ impl UnlockedTransferPlan {
                     total_for_progress,
                     referer,
                 });
+                // Remux runs here, without the Core mutex, and ends with the job's stop flag.
+                let post = match &result {
+                    Ok(ExtractorDownloadOutcome::Completed(path)) => Some(apply_remux_postprocess(
+                        path,
+                        &media_extras,
+                        ffmpeg_dir.as_deref(),
+                        stop.as_ref(),
+                    )),
+                    _ => None,
+                };
+                if matches!(post, Some(PostprocessOutcome::Stopped)) {
+                    result = Ok(ExtractorDownloadOutcome::Stopped);
+                }
                 transfer_active.store(false, Ordering::Release);
                 UnlockedTransferOutcome::Extracted {
                     job_id,
                     dest,
-                    media_extras,
-                    stop,
                     result,
+                    post,
+                    stop,
                 }
             }
         }
@@ -3384,9 +3399,9 @@ impl Core {
             }
             UnlockedTransferOutcome::Extracted {
                 dest,
-                media_extras,
                 stop,
                 result,
+                post,
                 ..
             } => {
                 let live_bytes = self.jobs[job_index].live_downloaded();
@@ -3394,19 +3409,17 @@ impl Core {
                 match result {
                     Ok(ExtractorDownloadOutcome::Completed(path)) => {
                         Self::cleanup_extractor_temp_artifacts(&dest, &path);
-                        let ffmpeg_dir = self.extractor.ffmpeg_dir();
-                        let post = apply_remux_postprocess(
-                            &path,
-                            &media_extras,
-                            ffmpeg_dir,
-                            stop.as_ref(),
-                        );
+                        let post = post.unwrap_or(PostprocessOutcome::Unchanged(path));
                         let (final_path, bytes) = match post {
                             PostprocessOutcome::Unchanged(p) | PostprocessOutcome::Remuxed(p) => {
                                 let file_bytes =
                                     std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
                                 let bytes = Self::destination_byte_total(&dest).max(file_bytes);
                                 (p, bytes)
+                            }
+                            PostprocessOutcome::Stopped => {
+                                self.finalize_stop_after_transfer(job_id)?;
+                                return Ok(false);
                             }
                             PostprocessOutcome::Failed {
                                 error,
