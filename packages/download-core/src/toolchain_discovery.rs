@@ -368,12 +368,17 @@ pub struct PlatformInfo {
 }
 
 impl PlatformInfo {
+    /// The host platform. Detected once: the libc check can run `ldd --version`, and
+    /// every Toolchain status asks for this.
     pub fn current() -> Self {
-        Self {
-            os: std::env::consts::OS.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
-            libc: detect_libc(),
-        }
+        static CURRENT: std::sync::OnceLock<PlatformInfo> = std::sync::OnceLock::new();
+        CURRENT
+            .get_or_init(|| Self {
+                os: std::env::consts::OS.to_string(),
+                arch: std::env::consts::ARCH.to_string(),
+                libc: detect_libc(),
+            })
+            .clone()
     }
 }
 

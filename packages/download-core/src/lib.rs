@@ -104,12 +104,25 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use transfer::{
     execute_segment_fetch, execute_single_fetch, SegmentError, SegmentFetchParams,
     SingleFetchParams,
 };
+
+/// Lock the shared Core, recovering from poisoning (L-49).
+///
+/// A panic while the lock is held poisons the mutex for good. Every later `lock()`
+/// would fail and the app would stay broken until restart, so take the guard anyway.
+/// Core keeps its state consistent between steps (the queue is persisted before it
+/// is acted on), so continuing is better than refusing every command.
+pub fn lock_core(core: &Mutex<Core>) -> MutexGuard<'_, Core> {
+    core.lock().unwrap_or_else(|poisoned| {
+        eprintln!("phlegethon: the Core mutex was poisoned by a panic; continuing with its state");
+        poisoned.into_inner()
+    })
+}
 
 /// Serializable job row for platform shells.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1743,7 +1756,7 @@ impl Core {
     /// [`Self::discard_job`] with the Job Destination deleted after the lock is released.
     pub fn discard_job_outside_lock(core: Arc<Mutex<Self>>, job_id: &str) -> Result<(), String> {
         let cleanup = {
-            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            let mut guard = lock_core(&core);
             guard.discard_job_detached(job_id)?
         };
         if let Some(destination) = cleanup {
@@ -2171,7 +2184,7 @@ impl Core {
         core: Arc<Mutex<Self>>,
     ) -> Result<SidecarUpdateCheckResult, String> {
         let (root, settings, source) = {
-            let guard = core.lock().map_err(|e| e.to_string())?;
+            let guard = lock_core(&core);
             (
                 guard.require_sidecar_root()?.to_path_buf(),
                 guard.sidecar_update_settings.clone(),
@@ -2189,7 +2202,7 @@ impl Core {
     /// active; `NothingToApply` when the installed version is current.
     pub fn install_toolchain_latest(core: Arc<Mutex<Self>>) -> Result<SidecarApplyResult, String> {
         let (root, settings, source) = {
-            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            let mut guard = lock_core(&core);
             if guard.transfers_active() {
                 // Remember the request so the idle poller applies it later (L-26).
                 guard.defer_sidecar_apply()?;
@@ -2213,7 +2226,7 @@ impl Core {
                 applied: Vec::new(),
             });
         }
-        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        let mut guard = lock_core(&core);
         guard.apply_sidecar_updates()
     }
 
@@ -2243,7 +2256,7 @@ impl Core {
         core: Arc<Mutex<Self>>,
     ) -> Result<SidecarApplyResult, String> {
         {
-            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            let mut guard = lock_core(&core);
             let state = &guard.sidecar_runtime_state;
             if !state.deferred_apply && !guard.sidecar_update_settings.check_on_launch {
                 return Ok(SidecarApplyResult {
@@ -2268,7 +2281,7 @@ impl Core {
         core: Arc<Mutex<Self>>,
     ) -> Result<SidecarApplyResult, String> {
         {
-            let guard = core.lock().map_err(|e| e.to_string())?;
+            let guard = lock_core(&core);
             if !guard.sidecar_runtime_state.deferred_apply {
                 return Ok(SidecarApplyResult {
                     outcome: SidecarApplyOutcome::NothingToApply,
@@ -2285,12 +2298,30 @@ impl Core {
         Self::download_then_apply(core)
     }
 
+    /// Manual "apply updates": download the pending toolchain release without the Core
+    /// lock (H-9), then swap it in under the lock, which re-checks for running work.
+    pub fn apply_sidecar_updates_outside_lock(
+        core: Arc<Mutex<Self>>,
+    ) -> Result<SidecarApplyResult, String> {
+        let (root, settings, source) = {
+            let guard = lock_core(&core);
+            (
+                guard.require_sidecar_root()?.to_path_buf(),
+                guard.sidecar_update_settings.clone(),
+                Arc::clone(&guard.sidecar_update_source),
+            )
+        };
+        sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref())?;
+        let mut guard = lock_core(&core);
+        guard.apply_sidecar_updates()
+    }
+
     /// Fetch the pending toolchain release without the lock, then swap it in.
     /// A failure drops the deferred flag so a broken source is not retried on
     /// every poll; the next launch or manual check tries again.
     fn download_then_apply(core: Arc<Mutex<Self>>) -> Result<SidecarApplyResult, String> {
         let (root, settings, source) = {
-            let guard = core.lock().map_err(|e| e.to_string())?;
+            let guard = lock_core(&core);
             (
                 guard.require_sidecar_root()?.to_path_buf(),
                 guard.sidecar_update_settings.clone(),
@@ -2299,11 +2330,11 @@ impl Core {
         };
         let outcome = sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref())
             .and_then(|_| {
-                let mut guard = core.lock().map_err(|e| e.to_string())?;
+                let mut guard = lock_core(&core);
                 // Re-checks for running work: a transfer may have started meanwhile.
                 guard.apply_sidecar_updates()
             });
-        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        let mut guard = lock_core(&core);
         match outcome {
             Ok(mut result) => {
                 if result.outcome == SidecarApplyOutcome::BlockedMidTransfer {
@@ -2328,12 +2359,20 @@ impl Core {
         core: &Arc<Mutex<Self>>,
     ) -> Result<ToolchainStatus, String> {
         let (extractor, sidecar_root) = {
-            let guard = core.lock().map_err(|e| e.to_string())?;
+            let guard = lock_core(core);
             (Arc::clone(&guard.extractor), guard.sidecar_root.clone())
         };
         let mut status = extractor.toolchain_status();
         status.sidecar_root = sidecar_root.map(|p| p.display().to_string());
         Ok(status)
+    }
+
+    /// Publish a toolchain discovery that ran without the lock (M-55): the shell runs
+    /// [`YtDlpConfig::discover`] on a background thread, then hands the result here.
+    /// Only the extractor handle is cloned under the lock.
+    pub fn apply_discovered_config_outside_lock(core: &Arc<Mutex<Self>>, config: YtDlpConfig) {
+        let extractor = Arc::clone(&lock_core(core).extractor);
+        extractor.apply_discovered_config(config);
     }
 
     /// Whether anything is using the sidecar yt-dlp: a body-writing job, a
@@ -2629,11 +2668,11 @@ impl Core {
     /// Probe with the Core mutex released during the network work.
     pub fn probe_outside_lock(core: Arc<Mutex<Self>>, url: &str) -> Result<ProbeResult, String> {
         let plan = {
-            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            let mut guard = lock_core(&core);
             guard.plan_probe(url)?
         };
         let outcome = plan.run();
-        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        let mut guard = lock_core(&core);
         guard.finish_probe(&plan, outcome)
     }
 
@@ -2756,11 +2795,11 @@ impl Core {
         item_id: &str,
     ) -> Result<Vec<Quality>, String> {
         let plan = {
-            let guard = core.lock().map_err(|e| e.to_string())?;
+            let guard = lock_core(&core);
             guard.plan_enrich(probe_url, item_id)?
         };
         let qualities = plan.run()?;
-        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        let mut guard = lock_core(&core);
         Ok(guard.finish_enrich(&plan, qualities))
     }
 
@@ -3035,7 +3074,7 @@ impl Core {
     /// Start pending transfers up to the Active Job Limit without blocking.
     pub fn dispatch_pending(core: Arc<Mutex<Self>>) -> Result<(), String> {
         let (global_bucket, job_ids) = {
-            let mut core = core.lock().map_err(|e| e.to_string())?;
+            let mut core = lock_core(&core);
             core.persist_segment_progress()?;
             let slots = core
                 .active_job_limit
@@ -3086,7 +3125,7 @@ impl Core {
         job_id: &str,
         error: String,
     ) -> Result<(), String> {
-        let mut core = core.lock().map_err(|e| e.to_string())?;
+        let mut core = lock_core(&core);
         let Some(i) = core.jobs.iter().position(|j| j.id() == job_id) else {
             return Ok(());
         };
@@ -3108,7 +3147,7 @@ impl Core {
         loop {
             let head = Self::fetch_head_unlocked(&core, &job_id)?;
             let plan = {
-                let mut core = core.lock().map_err(|e| e.to_string())?;
+                let mut core = lock_core(&core);
                 core.plan_unlocked_transfer(&job_id, &global_bucket, true, head.as_ref())?
             };
             let Some(plan) = plan else {
@@ -3118,7 +3157,7 @@ impl Core {
             let outcome = plan.run();
 
             let retry = {
-                let mut core = core.lock().map_err(|e| e.to_string())?;
+                let mut core = lock_core(&core);
                 let retry = core.finish_unlocked_transfer(outcome)?;
                 if retry {
                     // Keep the slot across the failover replan.
@@ -3144,7 +3183,7 @@ impl Core {
         job_id: &str,
     ) -> Result<Option<PlanningHead>, String> {
         let (http, url, fresh) = {
-            let core = core.lock().map_err(|e| e.to_string())?;
+            let core = lock_core(core);
             let Some(i) = core.job_index(job_id) else {
                 return Ok(None);
             };

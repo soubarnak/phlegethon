@@ -23,7 +23,7 @@ use download_core::{
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -46,6 +46,9 @@ struct AppState {
     /// Companion and second-launch intents waiting for the webview (M-69).
     intents: intents::IntentInbox<companion::CompanionIntentEvent>,
     toolchain_status_cache: Mutex<Option<(Instant, ToolchainStatus)>>,
+    /// Set once the startup toolchain discovery has been published to Core (M-55).
+    /// A status read earlier would describe the placeholder config, so it is not cached.
+    discovery_ready: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -61,21 +64,18 @@ impl AppState {
             Ok(_) => {}
             Err(err) => log::warn!("could not install bundled extractor plugins: {err}"),
         }
-        // Sidecar manifest → YTDLP_PATH → PATH → python3 -m yt_dlp, plus JS runtime.
-        let config = download_core::YtDlpConfig::discover(Some(&sidecar_root));
+        // Discovery runs subprocesses (`python3 -c "import yt_dlp"`, JS runtime
+        // `--version`, `ldd --version`), so it starts later on a background thread
+        // (M-55). Until it publishes, the toolchain uses the bare `yt-dlp` name.
+        let config = download_core::YtDlpConfig::default().with_sidecar_plugins(&sidecar_root);
         let extractor = Box::new(download_core::YtDlpExtractorToolchain::new(config));
         let job_signals = Arc::new(JobSignals::default());
-        let (mut core, rx) = Core::new_with_clock_and_signals(
+        let (core, rx) = Core::new_with_clock_and_signals(
             http,
             extractor,
             Arc::new(download_core::SystemClock::new()),
             job_signals.clone(),
         );
-        // Toolchain releases come from GitHub; plugin versions from the local catalog.
-        core.set_sidecar_update_source(Arc::new(GitHubReleaseUpdateSource::new(
-            core.http_backend(),
-            PlatformInfo::current(),
-        )));
 
         Self {
             core: Arc::new(Mutex::new(core)),
@@ -85,8 +85,39 @@ impl AppState {
             process_pending_busy: Arc::new(AtomicBool::new(false)),
             intents: intents::IntentInbox::default(),
             toolchain_status_cache: Mutex::new(None),
+            discovery_ready: Arc::new(AtomicBool::new(false)),
         }
     }
+}
+
+/// What the startup discovery found: yt-dlp, the JS runtime and the host platform.
+struct StartupDiscovery {
+    config: download_core::YtDlpConfig,
+    platform: PlatformInfo,
+}
+
+/// Probe the host for the Extractor Toolchain. Runs subprocesses (M-55): call it on a
+/// background thread without holding the Core mutex.
+fn discover_toolchain(sidecar_root: &Path) -> StartupDiscovery {
+    StartupDiscovery {
+        // Sidecar manifest → YTDLP_PATH → PATH → python3 -m yt_dlp, plus JS runtime.
+        config: download_core::YtDlpConfig::discover(Some(sidecar_root)),
+        platform: PlatformInfo::current(),
+    }
+}
+
+/// Run `discover` with the Core mutex free, then publish the result to Core.
+///
+/// Toolchain releases come from GitHub, so the update source is built from the
+/// discovered platform. The Core lock is held only to swap that source in.
+fn run_startup_discovery(core: &Arc<Mutex<Core>>, discover: impl FnOnce() -> StartupDiscovery) {
+    let StartupDiscovery { config, platform } = discover();
+    {
+        let mut guard = lock_or_recover(core);
+        let source = GitHubReleaseUpdateSource::new(guard.http_backend(), platform);
+        guard.set_sidecar_update_source(Arc::new(source));
+    }
+    Core::apply_discovered_config_outside_lock(core, config);
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +306,18 @@ fn start_event_drain(app: tauri::AppHandle, rx: crossbeam_channel::Receiver<Core
     });
 }
 
+/// Lock a shell mutex, taking the guard even when a panic poisoned it (L-49).
+///
+/// A poisoned lock stays poisoned, so propagating the error would fail every later
+/// command until the app restarts. The state behind these locks (Core, the Library
+/// Root, the status cache) stays valid between steps, so continue and log it.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        log::error!("a lock was poisoned by a panic; continuing with its state");
+        poisoned.into_inner()
+    })
+}
+
 fn core_handle(app: &tauri::AppHandle) -> Result<Arc<Mutex<Core>>, String> {
     let state = app
         .try_state::<AppState>()
@@ -323,14 +366,14 @@ fn check_root_change_allowed(active_transfers: usize) -> Result<(), String> {
 }
 
 fn ensure_library_root(state: &AppState) -> Result<PathBuf, String> {
-    let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
+    let mut stored = lock_or_recover(&state.library_root);
     if let Some(ref root) = *stored {
         return Ok(root.clone());
     }
     // The saved preference first: falling back to the default root would silently
     // move the user to another queue when the saved one failed to load.
     let root = load_library_root_preference().unwrap_or_else(default_library_root);
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     adopt_library_root(&mut core, &mut stored, root.clone())?;
     Ok(root)
 }
@@ -344,7 +387,7 @@ async fn enqueue_url(
 ) -> Result<EnqueueResult, String> {
     ensure_library_root(&state)?;
     let dest = parse_optional_destination(destination);
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     let outcome = core.enqueue_with_options(
         &url,
         dest,
@@ -374,7 +417,7 @@ async fn probe_url(
 
 #[tauri::command]
 async fn cancel_probe(state: State<'_, AppState>, url: String) -> Result<bool, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.cancel_probe(&url))
 }
 
@@ -385,7 +428,7 @@ async fn clear_pending_probe(
     url: String,
 ) -> Result<(), String> {
     {
-        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        let mut core = lock_or_recover(&state.core);
         core.clear_pending_probe(&url)?;
     }
     companion::release_pending_probe(&app, &url);
@@ -409,7 +452,7 @@ async fn enrich_probe_item_qualities(
 
 #[tauri::command]
 async fn get_probe_tier_settings(state: State<'_, AppState>) -> Result<ProbeTierSettings, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.probe_tier_settings())
 }
 
@@ -418,7 +461,7 @@ async fn set_probe_tier_settings(
     state: State<'_, AppState>,
     settings: ProbeTierSettings,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_probe_tier_settings(settings)
 }
 
@@ -434,28 +477,36 @@ async fn get_toolchain_status(
         }
     }
     let core = core_handle(&app)?;
+    // A status computed before the startup discovery lands describes the placeholder
+    // config, so it is returned but not cached; the discovery thread caches the real one.
+    let discovered = discovery_ready(&app);
     // `--version` probes run subprocesses: Core snapshots the extractor handle and
     // releases the lock before running them (H-9).
     let status =
         tauri::async_runtime::spawn_blocking(move || Core::toolchain_status_outside_lock(&core))
             .await
             .map_err(|e| format!("toolchain status task failed: {e}"))??;
-    store_toolchain_status(&app, Some(status.clone()));
+    if discovered {
+        store_toolchain_status(&app, Some(status.clone()));
+    }
     Ok(status)
+}
+
+fn discovery_ready(app: &tauri::AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .is_some_and(|state| state.discovery_ready.load(Ordering::Acquire))
 }
 
 fn cached_toolchain_status(app: &tauri::AppHandle) -> Option<ToolchainStatus> {
     let state = app.try_state::<AppState>()?;
-    let cache = state.toolchain_status_cache.lock().ok()?;
+    let cache = lock_or_recover(&state.toolchain_status_cache);
     let (at, status) = cache.as_ref()?;
     (at.elapsed() < TOOLCHAIN_STATUS_TTL).then(|| status.clone())
 }
 
 fn store_toolchain_status(app: &tauri::AppHandle, status: Option<ToolchainStatus>) {
     if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(mut cache) = state.toolchain_status_cache.lock() {
-            *cache = status.map(|s| (Instant::now(), s));
-        }
+        *lock_or_recover(&state.toolchain_status_cache) = status.map(|s| (Instant::now(), s));
     }
 }
 
@@ -476,7 +527,7 @@ async fn install_toolchain_latest(
 async fn get_default_quality_policy(
     state: State<'_, AppState>,
 ) -> Result<download_core::DefaultQualityPolicy, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.default_quality_policy())
 }
 
@@ -485,13 +536,13 @@ async fn set_default_quality_policy(
     state: State<'_, AppState>,
     policy: download_core::DefaultQualityPolicy,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_default_quality_policy(policy)
 }
 
 #[tauri::command]
 async fn get_global_bandwidth_cap(state: State<'_, AppState>) -> Result<Option<u64>, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.global_bandwidth_cap())
 }
 
@@ -501,7 +552,7 @@ async fn set_global_bandwidth_cap(
     state: State<'_, AppState>,
     cap: Option<u64>,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     match cap.filter(|c| *c > 0) {
         Some(cap) => core.set_global_bandwidth_cap(cap),
         None => core.remove_global_bandwidth_cap(),
@@ -514,7 +565,7 @@ async fn set_job_bandwidth_cap(
     job_id: String,
     cap: Option<u64>,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     match cap.filter(|c| *c > 0) {
         Some(cap) => core.set_job_bandwidth_cap(&job_id, cap),
         None => core.remove_job_bandwidth_cap(&job_id),
@@ -526,7 +577,7 @@ async fn get_job_bandwidth_cap(
     state: State<'_, AppState>,
     job_id: String,
 ) -> Result<Option<u64>, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     core.job_bandwidth_cap(&job_id)
 }
 
@@ -536,13 +587,13 @@ async fn add_job_mirror(
     job_id: String,
     url: String,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.add_job_mirror(&job_id, url)
 }
 
 #[tauri::command]
 async fn job_mirrors(state: State<'_, AppState>, job_id: String) -> Result<Vec<String>, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     core.job_mirrors(&job_id)
 }
 
@@ -553,7 +604,7 @@ async fn set_job_expected_hash(
     algorithm: String,
     digest: String,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_job_expected_hash(&job_id, &algorithm, &digest)
 }
 
@@ -586,7 +637,7 @@ async fn confirm_probe_selection(
     ensure_library_root(&state)?;
     let dest = parse_optional_destination(destination);
     let job_ids = {
-        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        let mut core = lock_or_recover(&state.core);
         core.confirm_probe_selection(&selection, dest)?
     };
     // The confirmed jobs carry the cookie session now; the pending-probe claim is done.
@@ -602,13 +653,13 @@ async fn preview_probe_destination(
 ) -> Result<ProbeDestinationPreview, String> {
     ensure_library_root(&state)?;
     let dest = parse_optional_destination(destination);
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     core.preview_probe_destination(&selection, dest)
 }
 
 #[tauri::command]
 async fn get_library_root(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.library_root().map(|p| p.display().to_string()))
 }
 
@@ -622,8 +673,8 @@ async fn set_library_root(state: State<'_, AppState>, path: String) -> Result<St
         ));
     }
     {
-        let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
-        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        let mut stored = lock_or_recover(&state.library_root);
+        let mut core = lock_or_recover(&state.core);
         if core.library_root() == Some(root.as_path()) {
             return Ok(root.display().to_string());
         }
@@ -842,7 +893,7 @@ async fn process_pending(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn list_jobs(state: State<'_, AppState>) -> Result<Vec<download_core::JobSnapshot>, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.list_job_snapshots())
 }
 
@@ -861,7 +912,7 @@ async fn find_active_job_for_url(
     state: State<'_, AppState>,
     url: String,
 ) -> Result<Option<download_core::ActiveJobMatch>, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.find_active_job_for_url(&url))
 }
 
@@ -869,7 +920,7 @@ async fn find_active_job_for_url(
 async fn pause_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
     // Validate + signal stop without blocking on process_pending's Core mutex.
     {
-        let core = state.core.lock().map_err(|e| e.to_string())?;
+        let core = lock_or_recover(&state.core);
         core.can_pause_job(&job_id)?;
     }
 
@@ -881,19 +932,19 @@ async fn pause_job(state: State<'_, AppState>, job_id: String) -> Result<(), Str
         return Ok(());
     }
 
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.finish_pause_if_idle(&job_id)
 }
 
 #[tauri::command]
 async fn resume_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.resume_job(&job_id)
 }
 
 #[tauri::command]
 async fn retry_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.retry_job(&job_id)
 }
 
@@ -913,13 +964,13 @@ async fn discard_job(state: State<'_, AppState>, job_id: String) -> Result<(), S
 
 #[tauri::command]
 async fn get_active_job_limit(state: State<'_, AppState>) -> Result<u32, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.active_job_limit())
 }
 
 #[tauri::command]
 async fn set_active_job_limit(state: State<'_, AppState>, limit: u32) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_active_job_limit(limit)
 }
 
@@ -929,19 +980,19 @@ async fn reorder_job(
     from_index: usize,
     to_index: usize,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.reorder_job(from_index, to_index)
 }
 
 #[tauri::command]
 async fn get_audio_only_mode(state: State<'_, AppState>) -> Result<bool, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.audio_only_mode())
 }
 
 #[tauri::command]
 async fn set_audio_only_mode(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_audio_only_mode(enabled)
 }
 
@@ -960,7 +1011,7 @@ async fn select_default_quality(
     state: State<'_, AppState>,
     qualities: Vec<QualityInput>,
 ) -> Result<Option<String>, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     let qualities: Vec<download_core::Quality> = qualities
         .into_iter()
         .map(|q| download_core::Quality {
@@ -977,7 +1028,7 @@ async fn select_default_quality(
 async fn get_default_media_extras(
     state: State<'_, AppState>,
 ) -> Result<download_core::MediaExtrasOptions, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.default_media_extras())
 }
 
@@ -986,7 +1037,7 @@ async fn set_default_media_extras(
     state: State<'_, AppState>,
     options: download_core::MediaExtrasOptions,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_default_media_extras(options)
 }
 
@@ -994,7 +1045,7 @@ async fn set_default_media_extras(
 async fn get_media_extras_capabilities(
     state: State<'_, AppState>,
 ) -> Result<download_core::MediaExtrasCapabilities, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.media_extras_capabilities())
 }
 
@@ -1002,7 +1053,7 @@ async fn get_media_extras_capabilities(
 async fn get_cookie_channel(
     state: State<'_, AppState>,
 ) -> Result<download_core::CookieChannel, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.cookie_channel())
 }
 
@@ -1011,7 +1062,7 @@ async fn set_cookie_channel(
     state: State<'_, AppState>,
     channel: download_core::CookieChannel,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_cookie_channel(channel)
 }
 
@@ -1019,7 +1070,7 @@ async fn set_cookie_channel(
 async fn get_proxy_settings(
     state: State<'_, AppState>,
 ) -> Result<download_core::ProxySettings, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.proxy_settings())
 }
 
@@ -1028,7 +1079,7 @@ async fn set_proxy_settings(
     state: State<'_, AppState>,
     settings: download_core::ProxySettings,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_proxy_settings(settings)
 }
 
@@ -1036,7 +1087,7 @@ async fn set_proxy_settings(
 async fn get_sidecar_update_settings(
     state: State<'_, AppState>,
 ) -> Result<download_core::SidecarUpdateSettings, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.sidecar_update_settings())
 }
 
@@ -1045,7 +1096,7 @@ async fn set_sidecar_update_settings(
     state: State<'_, AppState>,
     settings: download_core::SidecarUpdateSettings,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_sidecar_update_settings(settings)
 }
 
@@ -1065,13 +1116,10 @@ async fn apply_sidecar_updates(
     state: State<'_, AppState>,
 ) -> Result<download_core::SidecarApplyResult, String> {
     let core = Arc::clone(&state.core);
-    // Copies files and may hit the network: not on an async worker, and not inline.
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut core = core.lock().map_err(|e| e.to_string())?;
-        core.apply_sidecar_updates()
-    })
-    .await
-    .map_err(|e| format!("apply task failed: {e}"))?
+    // The download runs without the Core lock (H-9); the swap runs on a blocking worker.
+    tauri::async_runtime::spawn_blocking(move || Core::apply_sidecar_updates_outside_lock(core))
+        .await
+        .map_err(|e| format!("apply task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1080,7 +1128,7 @@ async fn pin_sidecar_version(
     component: download_core::SidecarComponent,
     version: String,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.pin_sidecar_version(component, version)
 }
 
@@ -1089,7 +1137,7 @@ async fn unpin_sidecar_version(
     state: State<'_, AppState>,
     component: download_core::SidecarComponent,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.unpin_sidecar_version(component)
 }
 
@@ -1098,19 +1146,19 @@ async fn rollback_sidecar(
     state: State<'_, AppState>,
     component: download_core::SidecarComponent,
 ) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.rollback_sidecar(component)
 }
 
 #[tauri::command]
 async fn get_filename_template(state: State<'_, AppState>) -> Result<String, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.filename_template().to_string())
 }
 
 #[tauri::command]
 async fn set_filename_template(state: State<'_, AppState>, template: String) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.set_filename_template(template)
 }
 
@@ -1151,7 +1199,7 @@ async fn checked_output_path(app: &tauri::AppHandle, path: &str) -> Result<PathB
     let path = PathBuf::from(path);
     tauri::async_runtime::spawn_blocking(move || {
         let roots = {
-            let core = core.lock().map_err(|e| e.to_string())?;
+            let core = lock_or_recover(&core);
             output_roots(&core)
         };
         if !path.exists() {
@@ -1297,13 +1345,8 @@ fn handle_second_launch(app: &tauri::AppHandle, argv: Vec<String>) {
             let Some(state) = app.try_state::<AppState>() else {
                 return;
             };
-            let outcome = ensure_library_root(&state).and_then(|_| {
-                state
-                    .core
-                    .lock()
-                    .map_err(|e| e.to_string())
-                    .and_then(|mut core| core.enqueue(&url, None))
-            });
+            let outcome = ensure_library_root(&state)
+                .and_then(|_| lock_or_recover(&state.core).enqueue(&url, None));
             match outcome {
                 Ok(outcome) => deliver_companion_intent(
                     &app,
@@ -1330,7 +1373,7 @@ fn handle_second_launch(app: &tauri::AppHandle, argv: Vec<String>) {
 
 #[tauri::command]
 async fn list_history(state: State<'_, AppState>) -> Result<Vec<ArchiveEntry>, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.list_history())
 }
 
@@ -1341,11 +1384,11 @@ async fn list_history_by_outcome(
 ) -> Result<Vec<ArchiveEntry>, String> {
     match outcome.as_str() {
         "Completed" => {
-            let core = state.core.lock().map_err(|e| e.to_string())?;
+            let core = lock_or_recover(&state.core);
             Ok(core.list_history_by_outcome(ArchiveOutcome::Completed))
         }
         "Failed" => {
-            let core = state.core.lock().map_err(|e| e.to_string())?;
+            let core = lock_or_recover(&state.core);
             Ok(core.list_history_by_outcome(ArchiveOutcome::Failed))
         }
         _ => Err(format!(
@@ -1356,7 +1399,7 @@ async fn list_history_by_outcome(
 
 #[tauri::command]
 async fn remove_history_entry(state: State<'_, AppState>, media_id: String) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     match core.remove_history_entry(&media_id) {
         Ok(_) => Ok(()),
         Err(err) => Err(err),
@@ -1365,7 +1408,7 @@ async fn remove_history_entry(state: State<'_, AppState>, media_id: String) -> R
 
 #[tauri::command]
 async fn history_len(state: State<'_, AppState>) -> Result<usize, String> {
-    let core = state.core.lock().map_err(|e| e.to_string())?;
+    let core = lock_or_recover(&state.core);
     Ok(core.history_len())
 }
 
@@ -1385,7 +1428,7 @@ async fn clear_history(
             ))
         }
     };
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
+    let mut core = lock_or_recover(&state.core);
     core.clear_history(filter)
 }
 
@@ -1492,8 +1535,8 @@ pub fn run() {
             let root = load_library_root_preference().unwrap_or_else(default_library_root);
             let sidecar_root = dirs_data_dir();
             {
-                let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
-                let mut core = state.core.lock().map_err(|e| e.to_string())?;
+                let mut stored = lock_or_recover(&state.library_root);
+                let mut core = lock_or_recover(&state.core);
                 if let Err(err) = core.set_sidecar_root(sidecar_root) {
                     log::warn!("sidecar root: {err}");
                 }
@@ -1507,16 +1550,35 @@ pub fn run() {
             }
 
             // Push Core events to the webview instead of making it poll.
-            if let Some(rx) = state.event_rx.lock().map_err(|e| e.to_string())?.take() {
+            if let Some(rx) = lock_or_recover(&state.event_rx).take() {
                 start_event_drain(app.handle().clone(), rx);
             }
 
-            // On-launch and deferred sidecar updates hit the network, so they run on their
-            // own thread and release the Core lock during the download. When a transfer is
-            // running the update waits; the loop below applies it once the app is idle.
+            // Toolchain discovery and the sidecar updates run on their own thread: the
+            // first starts subprocesses and the second hits the network, and neither may
+            // hold the Core lock meanwhile. Discovery goes first because the update source
+            // is built from the discovered platform. When a transfer is running the update
+            // waits; the loop below applies it once the app is idle.
             {
                 let core = Arc::clone(&state.core);
+                let ready = Arc::clone(&state.discovery_ready);
+                let app_handle = app.handle().clone();
+                let discovery_root = dirs_data_dir();
                 std::thread::spawn(move || {
+                    run_startup_discovery(&core, || discover_toolchain(&discovery_root));
+                    ready.store(true, Ordering::Release);
+                    // Cache the first real status so the Toolchain panel opens warm. Its
+                    // `--version` probes can take seconds, so they get their own thread.
+                    {
+                        let core = Arc::clone(&core);
+                        let app = app_handle.clone();
+                        std::thread::spawn(move || {
+                            match Core::toolchain_status_outside_lock(&core) {
+                                Ok(status) => store_toolchain_status(&app, Some(status)),
+                                Err(err) => log::warn!("toolchain status after discovery: {err}"),
+                            }
+                        });
+                    }
                     match Core::apply_sidecar_updates_on_launch_outside_lock(Arc::clone(&core)) {
                         Ok(result) => log::info!("sidecar update on launch: {:?}", result.outcome),
                         Err(err) => log::warn!("sidecar update on launch: {err}"),
@@ -1707,6 +1769,80 @@ mod tests {
             Box::new(download_core::FakeExtractorToolchain::new()),
         )
         .0
+    }
+
+    fn poison<T: Send + 'static>(mutex: &Arc<Mutex<T>>) {
+        let held = Arc::clone(mutex);
+        let crashed = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("a command panicked under the lock");
+        })
+        .join();
+        assert!(crashed.is_err());
+        assert!(mutex.lock().is_err(), "the mutex should be poisoned");
+    }
+
+    #[test]
+    fn lock_or_recover_survives_a_poisoned_core_mutex() {
+        let core = Arc::new(Mutex::new(test_core()));
+        poison(&core);
+        // `lock().map_err(..)?` used to fail every command from here on (L-49).
+        assert_eq!(lock_or_recover(&core).history_len(), 0);
+        // Still usable for a second command.
+        assert_eq!(lock_or_recover(&core).history_len(), 0);
+    }
+
+    #[test]
+    fn lock_or_recover_survives_a_poisoned_shell_mutex() {
+        let root = Arc::new(Mutex::new(Some(PathBuf::from("/lib"))));
+        poison(&root);
+        assert_eq!(
+            lock_or_recover(&root).as_deref(),
+            Some(Path::new("/lib")),
+            "the stored Library Root survives the poisoning"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_discovery_runs_without_the_core_lock_and_reaches_toolchain_status() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let ytdlp = tmp.path().join("yt-dlp");
+        std::fs::write(&ytdlp, "#!/bin/sh\necho 2099.01.01\n").unwrap();
+        std::fs::set_permissions(&ytdlp, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let core = Arc::new(Mutex::new(
+            Core::new(
+                Box::new(NoHttp),
+                Box::new(download_core::YtDlpExtractorToolchain::new(
+                    download_core::YtDlpConfig::default(),
+                )),
+            )
+            .0,
+        ));
+        run_startup_discovery(&core, || {
+            // The subprocess probes of `YtDlpConfig::discover` run here (M-55): a
+            // command must be able to take the Core lock meanwhile.
+            assert!(
+                core.try_lock().is_ok(),
+                "Core mutex held during toolchain discovery"
+            );
+            StartupDiscovery {
+                config: download_core::YtDlpConfig {
+                    binary_path: ytdlp.clone(),
+                    ..download_core::YtDlpConfig::default()
+                },
+                platform: PlatformInfo::current(),
+            }
+        });
+
+        let status = Core::toolchain_status_outside_lock(&core).unwrap();
+        assert_eq!(
+            status.ytdlp.and_then(|tool| tool.version).as_deref(),
+            Some("2099.01.01"),
+            "the discovered yt-dlp should drive the Toolchain status"
+        );
     }
 
     #[test]

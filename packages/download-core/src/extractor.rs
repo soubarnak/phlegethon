@@ -310,6 +310,12 @@ pub trait ExtractorToolchain: Send + Sync {
     /// `yt-dlp-plugins/` under `root`. Fakes ignore this.
     fn apply_sidecar_root(&self, _root: &std::path::Path) {}
 
+    /// Publish a toolchain discovery that ran off-thread (M-55).
+    ///
+    /// Production extractors swap in the discovered yt-dlp launcher and JS runtime.
+    /// Fakes ignore this.
+    fn apply_discovered_config(&self, _config: crate::ytdlp_extractor::YtDlpConfig) {}
+
     /// [`Self::download`] with an optional page `Referer` for CDN checks.
     ///
     /// Default ignores the referer. Production passes it to yt-dlp.

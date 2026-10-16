@@ -186,6 +186,18 @@ pub struct YtDlpExtractorToolchain {
     impersonation_available: Mutex<Option<Cached<bool>>>,
     /// JS runtime found on PATH when the startup config had none.
     detected_js_runtime: Mutex<Option<JsRuntime>>,
+    /// Result of a background discovery (M-55). It replaces the startup config's
+    /// yt-dlp launcher and JS runtime once published.
+    discovered: Mutex<Option<Discovered>>,
+}
+
+/// The parts of [`YtDlpConfig`] that discovery fills in by running subprocesses.
+#[derive(Debug, Clone)]
+struct Discovered {
+    launcher: Option<YtDlpLauncher>,
+    launcher_source: Option<YtDlpSource>,
+    binary_path: PathBuf,
+    js_runtime: Option<JsRuntime>,
 }
 
 /// Identity of the yt-dlp launcher a cached probe answer belongs to.
@@ -231,7 +243,33 @@ impl YtDlpExtractorToolchain {
             supported_flags: Mutex::new(None),
             impersonation_available: Mutex::new(None),
             detected_js_runtime: Mutex::new(None),
+            discovered: Mutex::new(None),
         }
+    }
+
+    /// Publish the outcome of [`YtDlpConfig::discover`] that ran on another thread.
+    ///
+    /// Discovery runs `python3 -c "import yt_dlp"` and `--version` probes, so a shell
+    /// starts with [`YtDlpConfig::default`] and calls this once the probes finish. Only
+    /// the launcher and the JS runtime are taken from `config`; the plugin dirs and
+    /// the other options stay as the toolchain was built with.
+    pub fn apply_discovered_config(&self, config: YtDlpConfig) {
+        if let Ok(mut slot) = self.discovered.lock() {
+            *slot = Some(Discovered {
+                launcher: config.launcher,
+                launcher_source: config.launcher_source,
+                binary_path: config.binary_path,
+                js_runtime: config.js_runtime,
+            });
+        }
+        if let Ok(mut detected) = self.detected_js_runtime.lock() {
+            *detected = None;
+        }
+        self.clear_capability_caches();
+    }
+
+    fn discovered(&self) -> Option<Discovered> {
+        self.discovered.lock().ok().and_then(|g| g.clone())
     }
 
     /// Effective yt-dlp binary path (sidecar override, then config).
@@ -258,10 +296,16 @@ impl YtDlpExtractorToolchain {
         {
             return YtDlpLauncher::binary(path);
         }
-        self.config
-            .launcher
-            .clone()
-            .unwrap_or_else(|| YtDlpLauncher::binary(self.config.binary_path.clone()))
+        match self.discovered() {
+            Some(found) => found
+                .launcher
+                .unwrap_or_else(|| YtDlpLauncher::binary(found.binary_path)),
+            None => self
+                .config
+                .launcher
+                .clone()
+                .unwrap_or_else(|| YtDlpLauncher::binary(self.config.binary_path.clone())),
+        }
     }
 
     /// Flags the active yt-dlp lists in `--help`.
@@ -394,6 +438,9 @@ impl YtDlpExtractorToolchain {
         if let Some(runtime) = &self.config.js_runtime {
             return Some(runtime.clone());
         }
+        if let Some(runtime) = self.discovered().and_then(|found| found.js_runtime) {
+            return Some(runtime);
+        }
         if let Some(runtime) = self.detected_js_runtime.lock().ok().and_then(|g| g.clone()) {
             return Some(runtime);
         }
@@ -489,7 +536,9 @@ impl YtDlpExtractorToolchain {
         };
         ToolchainStatus {
             ytdlp_source: if ytdlp.is_some() {
-                self.config.launcher_source.or(Some(YtDlpSource::Path))
+                self.discovered()
+                    .map_or(self.config.launcher_source, |found| found.launcher_source)
+                    .or(Some(YtDlpSource::Path))
             } else {
                 None
             },
@@ -1080,6 +1129,10 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
 
     fn apply_sidecar_root(&self, root: &Path) {
         self.bind_sidecar_root(root);
+    }
+
+    fn apply_discovered_config(&self, config: YtDlpConfig) {
+        YtDlpExtractorToolchain::apply_discovered_config(self, config);
     }
 
     /// Resume runs yt-dlp again in the same Job Destination with the same format and
@@ -4085,6 +4138,82 @@ esac
 
         toolchain.clear_capability_caches();
         assert!(toolchain.supports_flag("--js-runtimes"));
+    }
+
+    /// M-55: the shell starts with the default config and publishes the discovery later.
+    #[test]
+    fn apply_discovered_config_replaces_launcher_and_js_runtime() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        assert_eq!(
+            extractor.effective_binary_path(),
+            PathBuf::from("yt-dlp"),
+            "before discovery the bare yt-dlp name is used"
+        );
+
+        let runtime = JsRuntime {
+            kind: crate::toolchain_discovery::JsRuntimeKind::Deno,
+            path: PathBuf::from("/opt/deno"),
+            version: Some("2.1.0".into()),
+            supported: true,
+        };
+        extractor.apply_discovered_config(YtDlpConfig {
+            launcher: Some(YtDlpLauncher::PythonModule {
+                python: PathBuf::from("/usr/bin/python3"),
+            }),
+            launcher_source: Some(YtDlpSource::PythonModule),
+            js_runtime: Some(runtime.clone()),
+            ..YtDlpConfig::default()
+        });
+
+        assert_eq!(
+            extractor.effective_binary_path(),
+            PathBuf::from("/usr/bin/python3")
+        );
+        assert_eq!(extractor.js_runtime(), Some(runtime));
+    }
+
+    #[test]
+    fn apply_discovered_config_keeps_the_startup_plugin_dirs_and_options() {
+        let config = YtDlpConfig {
+            plugin_dirs: vec![PathBuf::from("/data/yt-dlp-plugins")],
+            probe_timeout_secs: 77,
+            ..YtDlpConfig::default()
+        };
+        let extractor = YtDlpExtractorToolchain::new(config);
+        extractor.apply_discovered_config(YtDlpConfig {
+            binary_path: PathBuf::from("/usr/local/bin/yt-dlp"),
+            plugin_dirs: vec![PathBuf::from("/elsewhere")],
+            probe_timeout_secs: 5,
+            ..YtDlpConfig::default()
+        });
+        assert_eq!(
+            extractor.effective_binary_path(),
+            PathBuf::from("/usr/local/bin/yt-dlp")
+        );
+        assert_eq!(
+            extractor.effective_plugin_dirs(),
+            vec![PathBuf::from("/data/yt-dlp-plugins")]
+        );
+    }
+
+    /// An installed sidecar binary still wins over what discovery found.
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_binary_beats_a_discovered_launcher() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let manifest = crate::sidecar_updates::ToolchainManifest::stub("9.9.9");
+        crate::sidecar_updates::write_toolchain_manifest(root, &manifest).unwrap();
+        let binary = crate::sidecar_updates::toolchain_binary_path(root, &manifest);
+        write_executable(&binary, "#!/bin/sh\n");
+
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        extractor.bind_sidecar_root(root);
+        extractor.apply_discovered_config(YtDlpConfig {
+            binary_path: PathBuf::from("/usr/local/bin/yt-dlp"),
+            ..YtDlpConfig::default()
+        });
+        assert_eq!(extractor.effective_binary_path(), binary);
     }
 
     /// `bind_sidecar_root` used to leave the caches of the previous binary in place.

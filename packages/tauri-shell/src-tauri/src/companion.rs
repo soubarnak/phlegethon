@@ -92,10 +92,11 @@ fn handle_companion_intent(app: &AppHandle, request: CompanionRequest) -> Compan
         },
         None => None,
     };
-    let outcome = match state.core.lock() {
-        Ok(mut core) => enqueue_for_companion(&mut core, &url, cookie_file.clone()),
-        Err(err) => Err(err.to_string()),
-    };
+    let outcome = enqueue_for_companion(
+        &mut crate::lock_or_recover(&state.core),
+        &url,
+        cookie_file.clone(),
+    );
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(err) => {
@@ -180,9 +181,7 @@ pub fn sweep_cookie_files(app: &AppHandle) {
     let mut live = tracker.pending_files();
 
     let state = app.state::<AppState>();
-    let Ok(core) = state.core.lock() else {
-        return;
-    };
+    let core = crate::lock_or_recover(&state.core);
     for job in core.list_job_snapshots() {
         if job.status == "completed" {
             continue;
