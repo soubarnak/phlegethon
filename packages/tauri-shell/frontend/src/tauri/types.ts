@@ -230,6 +230,7 @@ export type CoreEvent =
   | { type: "JobResumed"; job_id: string }
   | { type: "JobRetried"; job_id: string }
   | { type: "JobDiscarded"; job_id: string }
+  | { type: "JobsReordered"; from_index: number; to_index: number }
   | { type: "JobMirrorFailover"; job_id: string; previous_url: string; next_url: string; error: string };
 
 /** What the shell did with a Chrome Companion hand-off (`CompanionResult` in companion-protocol). */

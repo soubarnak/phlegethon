@@ -49,11 +49,11 @@ Settings-backed rule for pre-selecting probe qualities (default: best ≤ 1080p,
 _Avoid_: forcing best-available with no height cap as the only option, hiding overrides, remembering-per-host as a substitute for an explicit default
 
 **Download Archive**:
-A Library Root–scoped record of completed media identities used to detect “already downloaded” items during probe and to back History. Probe marks archived items; confirm skips them by default unless the user re-selects for re-download.
+A Library Root–scoped record of completed media identities used to detect “already downloaded” items during probe and to back History. Probe marks archived items; confirm skips them by default unless the user re-selects for re-download. A failed retry never replaces a Completed entry for the same media id.
 _Avoid_: filename-only matching as the primary detector, a separate History store that disagrees with the archive
 
 **Filename Template**:
-A settings-backed naming pattern for extractor job outputs using a small yt-dlp-like variable set (title, id, uploader, upload_date, ext). Plain HTTP jobs keep URL-derived names unless overridden. Collisions get a numeric suffix; completed files are never overwritten silently.
+A settings-backed naming pattern for extractor job outputs using a small yt-dlp-like variable set (title, id, uploader, upload_date, ext). Plain HTTP jobs keep URL-derived names unless overridden. The template names one file inside the Job Destination: path separators, absolute paths and `.`/`..` are rejected, and names are capped below the 255-byte filesystem limit. Collisions get a numeric suffix; completed files are never overwritten silently.
 _Avoid_: arbitrary full yt-dlp template passthrough as the only mode, fixed non-configurable names only
 
 **Library Root**:
@@ -65,7 +65,7 @@ The folder where a specific download job writes its files — always a job-owned
 _Avoid_: scattering batch items across unrelated folders by default, writing single-item overrides into a shared folder verbatim, requiring every job to stay under Library Root
 
 **Discard**:
-User action that removes a job from the queue; for in-flight, Paused, or Failed jobs it also stops the transfer and deletes that job’s files under its Job Destination (including partials); for Completed jobs it removes the queue row only and leaves files on disk.
+User action that removes a job from the queue; for in-flight, Paused, or Failed jobs it also stops the transfer and deletes that job’s files under its Job Destination (including partials); for Completed jobs it removes the queue row only and leaves files on disk. If the files cannot be deleted, the job stays in the queue so Discard can be retried. A Discard that arrives as a transfer finishes is honoured with the Completed-job behaviour (row removed, file kept).
 _Avoid_: Cancel (as the product name for this action), Pause, deleting Completed outputs, leaving orphaned partials after removing an unfinished job
 
 **Resumable Transfer**:
