@@ -220,7 +220,7 @@
   "settings.cookies.file": "Cookie file",
   "settings.cookies.fileHint": "Netscape format, absolute path. Optional.",
   "settings.proxy": "Proxy",
-  "settings.proxy.hint": "http, https, socks4 or socks5 URL used for page fetches, downloads and yt-dlp. Leave empty for a direct connection.",
+  "settings.proxy.hint": "http, socks4 or socks5 URL used for page fetches, downloads and yt-dlp. Leave empty for a direct connection.",
   "settings.tiers": "Any-link fallback",
   "settings.tiers.hint": "For sites outside the built-in list: try yt-dlp's generic extractor, then scan the page for media, then treat the link as a file.",
   "settings.tiers.generic": "yt-dlp generic extractor",
