@@ -1558,6 +1558,50 @@ impl Core {
         self.finalize_discard(job_id, completed, &destination)
     }
 
+    /// [`Self::discard_job`] without deleting files: the queue row goes first (event and
+    /// persist included) and the caller removes the returned Job Destination off the
+    /// lock. A failed Discard of an HLS job with thousands of fragments then no longer
+    /// freezes every command for the length of the delete.
+    ///
+    /// Returns `None` when an in-flight transfer will finalize the Discard itself, or
+    /// when there is nothing to delete (Completed job, missing directory).
+    pub fn discard_job_detached(&mut self, job_id: &str) -> Result<Option<PathBuf>, String> {
+        let pos = self
+            .jobs
+            .iter()
+            .position(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        let completed = self.jobs[pos].is_completed();
+        let destination = self.jobs[pos].destination().to_path_buf();
+
+        if self.job_signals.signal_discard_stop(job_id) {
+            return Ok(None);
+        }
+
+        self.jobs.remove(pos);
+        self.job_signals.unregister(job_id);
+        self.event_tx
+            .send(CoreEvent::JobDiscarded {
+                job_id: job_id.to_string(),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+        self.persist_queue_now()?;
+        Ok((!completed && destination.exists()).then_some(destination))
+    }
+
+    /// [`Self::discard_job`] with the Job Destination deleted after the lock is released.
+    pub fn discard_job_outside_lock(core: Arc<Mutex<Self>>, job_id: &str) -> Result<(), String> {
+        let cleanup = {
+            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            guard.discard_job_detached(job_id)?
+        };
+        if let Some(destination) = cleanup {
+            std::fs::remove_dir_all(&destination)
+                .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))?;
+        }
+        Ok(())
+    }
+
     fn finalize_discard(
         &mut self,
         job_id: &str,
@@ -1968,6 +2012,48 @@ impl Core {
         }
         let mut guard = core.lock().map_err(|e| e.to_string())?;
         guard.apply_sidecar_updates()
+    }
+
+    /// [`Self::apply_sidecar_updates_on_launch`] with the Core mutex released during
+    /// the release lookup and asset download (same pattern as
+    /// [`Self::install_toolchain_latest`]).
+    ///
+    /// Paths that do no network work (transfers active, nothing deferred, check on
+    /// launch off) run under the lock as before.
+    pub fn apply_sidecar_updates_on_launch_outside_lock(
+        core: Arc<Mutex<Self>>,
+    ) -> Result<SidecarApplyResult, String> {
+        let (root, settings, source) = {
+            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            let wants_check = guard.sidecar_runtime_state.deferred_apply
+                || guard.sidecar_update_settings.check_on_launch;
+            if guard.transfers_active() || !wants_check {
+                return guard.apply_sidecar_updates_on_launch();
+            }
+            (
+                guard.require_sidecar_root()?.to_path_buf(),
+                guard.sidecar_update_settings.clone(),
+                Arc::clone(&guard.sidecar_update_source),
+            )
+        };
+        // A failed prefetch is not fatal here: apply re-checks and reports the error.
+        let _ = sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref());
+        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        guard.apply_sidecar_updates_on_launch()
+    }
+
+    /// [`Self::toolchain_status`] without holding the Core mutex while the
+    /// `--version` probes run subprocesses.
+    pub fn toolchain_status_outside_lock(
+        core: &Arc<Mutex<Self>>,
+    ) -> Result<ToolchainStatus, String> {
+        let (extractor, sidecar_root) = {
+            let guard = core.lock().map_err(|e| e.to_string())?;
+            (Arc::clone(&guard.extractor), guard.sidecar_root.clone())
+        };
+        let mut status = extractor.toolchain_status();
+        status.sidecar_root = sidecar_root.map(|p| p.display().to_string());
+        Ok(status)
     }
 
     fn transfers_active(&self) -> bool {

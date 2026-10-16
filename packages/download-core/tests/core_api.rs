@@ -9152,3 +9152,172 @@ fn segmented_part_is_preallocated_on_disk() {
         meta.blocks()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Slow sidecar work must not hold the Core mutex (WS7 H-9)
+// ---------------------------------------------------------------------------
+
+/// Extractor whose `toolchain_status` blocks until the test releases it.
+struct BlockingStatusExtractor {
+    entered: crossbeam_channel::Sender<()>,
+    release: crossbeam_channel::Receiver<()>,
+}
+
+impl ExtractorToolchain for BlockingStatusExtractor {
+    fn probe(
+        &self,
+        _url: &str,
+        _cookies: &CookieChannel,
+        _proxy: &ProxySettings,
+    ) -> Result<ProbeResult, String> {
+        Err("not used".to_string())
+    }
+
+    fn toolchain_status(&self) -> ToolchainStatus {
+        self.entered.send(()).unwrap();
+        self.release.recv().unwrap();
+        ToolchainStatus::unavailable()
+    }
+}
+
+#[test]
+fn toolchain_status_outside_lock_leaves_the_core_mutex_free() {
+    let (entered_tx, entered_rx) = crossbeam_channel::unbounded();
+    let (release_tx, release_rx) = crossbeam_channel::unbounded();
+    let extractor = BlockingStatusExtractor {
+        entered: entered_tx,
+        release: release_rx,
+    };
+    let (core, _rx) = Core::new(Box::new(fake_http()), Box::new(extractor));
+    let core = Arc::new(Mutex::new(core));
+
+    let worker = {
+        let core = Arc::clone(&core);
+        std::thread::spawn(move || Core::toolchain_status_outside_lock(&core))
+    };
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("status probe started");
+    assert!(
+        core.try_lock().is_ok(),
+        "Core mutex was held during the --version probes"
+    );
+    release_tx.send(()).unwrap();
+    worker.join().unwrap().unwrap();
+}
+
+/// Update source that blocks in `materialize`, standing in for a slow download.
+struct BlockingSource {
+    inner: Arc<dyn SidecarUpdateSource>,
+    entered: crossbeam_channel::Sender<()>,
+    release: crossbeam_channel::Receiver<()>,
+}
+
+impl SidecarUpdateSource for BlockingSource {
+    fn load_catalog(&self, sidecar_root: &std::path::Path) -> Result<UpdateCatalog, String> {
+        self.inner.load_catalog(sidecar_root)
+    }
+
+    fn materialize(
+        &self,
+        sidecar_root: &std::path::Path,
+        component: SidecarComponent,
+        version: &str,
+        entry: &CatalogVersionEntry,
+    ) -> Result<PathBuf, String> {
+        let _ = self.entered.send(());
+        let _ = self.release.recv();
+        self.inner
+            .materialize(sidecar_root, component, version, entry)
+    }
+}
+
+#[test]
+fn on_launch_apply_outside_lock_downloads_without_holding_the_core_mutex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    core.set_sidecar_update_settings(SidecarUpdateSettings {
+        check_on_launch: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let (entered_tx, entered_rx) = crossbeam_channel::unbounded();
+    let (release_tx, release_rx) = crossbeam_channel::unbounded();
+    core.set_sidecar_update_source(Arc::new(BlockingSource {
+        inner: source,
+        entered: entered_tx,
+        release: release_rx,
+    }));
+    let core = Arc::new(Mutex::new(core));
+
+    let worker = {
+        let core = Arc::clone(&core);
+        std::thread::spawn(move || Core::apply_sidecar_updates_on_launch_outside_lock(core))
+    };
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("download started");
+    assert!(
+        core.try_lock().is_ok(),
+        "Core mutex was held during the sidecar download"
+    );
+    // Both the prefetch and the apply under the lock materialize the asset.
+    drop(release_tx);
+    let result = worker.join().unwrap().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::Applied);
+}
+
+#[test]
+fn on_launch_apply_outside_lock_does_nothing_when_check_on_launch_is_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    let core = Arc::new(Mutex::new(core));
+    let result = Core::apply_sidecar_updates_on_launch_outside_lock(core).unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::NothingToApply);
+}
+
+#[test]
+fn discard_detached_removes_the_row_before_the_files_go() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/big.zip");
+    let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
+    std::fs::create_dir_all(&job_dir).unwrap();
+    std::fs::write(job_dir.join("big.zip.part"), b"bytes").unwrap();
+    core.pause_job(&job_id).unwrap();
+
+    let cleanup = core.discard_job_detached(&job_id).unwrap();
+
+    assert_eq!(cleanup.as_deref(), Some(job_dir.as_path()));
+    assert!(
+        job_dir.exists(),
+        "detached Discard must leave deletion to the caller"
+    );
+    assert!(core.list_job_snapshots().iter().all(|j| j.job_id != job_id));
+    assert!(collect_events(&rx)
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobDiscarded { job_id: id } if id == &job_id)));
+}
+
+#[test]
+fn discard_outside_lock_deletes_the_destination_after_releasing_the_mutex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/big.zip");
+    let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
+    std::fs::create_dir_all(&job_dir).unwrap();
+    core.pause_job(&job_id).unwrap();
+    let core = Arc::new(Mutex::new(core));
+
+    Core::discard_job_outside_lock(Arc::clone(&core), &job_id).unwrap();
+
+    assert!(!job_dir.exists());
+    assert!(core.try_lock().is_ok());
+    assert!(core.lock().unwrap().list_job_snapshots().is_empty());
+}
