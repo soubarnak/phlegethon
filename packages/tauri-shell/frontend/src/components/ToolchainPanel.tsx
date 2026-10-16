@@ -63,6 +63,9 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
     toolchain_pin: null,
     plugin_pin: null,
   });
+  // False until get_sidecar_update_settings succeeds. Saving or pinning from the
+  // placeholder defaults would clear the user's pins (M-59).
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [toolchainPin, setToolchainPin] = useState("");
   const [pluginPin, setPluginPin] = useState("");
 
@@ -83,17 +86,30 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
     [onStatus, toasts],
   );
 
-  useEffect(() => {
-    void load();
+  const loadSettings = useCallback(() => {
     api
       .getSidecarUpdateSettings()
       .then((s) => {
         setSettings(s);
         setToolchainPin(s.toolchain_pin ?? "");
         setPluginPin(s.plugin_pin ?? "");
+        setSettingsLoaded(true);
       })
-      .catch(() => undefined);
+      .catch((err) => {
+        setSettingsLoaded(false);
+        toasts.error(t("toolchain.settingsFailed"), err);
+      });
+  }, [toasts]);
+
+  useEffect(() => {
+    void load();
   }, [load]);
+
+  useEffect(() => {
+    loadSettings();
+    // Load once; a retry is explicit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const saveSettings = async (next: SidecarUpdateSettings) => {
     try {
@@ -276,11 +292,26 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
       )}
 
       <div style={{ marginTop: "1.5rem", display: "grid", gap: "1rem", maxWidth: "40rem" }}>
+        {!settingsLoaded && (
+          <div data-testid="toolchain-settings-failed">
+            <InlineNotification
+              kind="warning"
+              lowContrast
+              hideCloseButton
+              title={t("toolchain.settingsFailed")}
+              subtitle={t("toolchain.settingsFailed.detail")}
+            />
+            <Button kind="ghost" size="sm" onClick={loadSettings}>
+              {t("settings.retryLoad")}
+            </Button>
+          </div>
+        )}
         <Toggle
           id="check-on-launch"
           labelText={t("toolchain.checkOnLaunch")}
           labelA={t("common.off")}
           labelB={t("common.on")}
+          disabled={!settingsLoaded}
           toggled={settings.check_on_launch}
           onToggle={(checked) => void saveSettings({ ...settings, check_on_launch: checked })}
         />
@@ -293,7 +324,7 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
             value={toolchainPin}
             onChange={(e) => setToolchainPin(e.target.value)}
           />
-          <Button kind="tertiary" size="md" onClick={() => void pin("toolchain", toolchainPin)}>
+          <Button kind="tertiary" size="md" disabled={!settingsLoaded} onClick={() => void pin("toolchain", toolchainPin)}>
             {toolchainPin.trim() ? t("toolchain.pin") : t("toolchain.unpin")}
           </Button>
           <Button kind="danger--tertiary" size="md" onClick={() => void rollback("toolchain")}>
@@ -309,7 +340,7 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
             value={pluginPin}
             onChange={(e) => setPluginPin(e.target.value)}
           />
-          <Button kind="tertiary" size="md" onClick={() => void pin("plugin", pluginPin)}>
+          <Button kind="tertiary" size="md" disabled={!settingsLoaded} onClick={() => void pin("plugin", pluginPin)}>
             {pluginPin.trim() ? t("toolchain.pin") : t("toolchain.unpin")}
           </Button>
           <Button kind="danger--tertiary" size="md" onClick={() => void rollback("plugin")}>

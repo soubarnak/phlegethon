@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { UrlBar } from "./UrlBar";
-import { installFakeIpc } from "@/test/mockApi";
+import { installFakeIpc, splitUrlsLikeCore } from "@/test/mockApi";
 
 function setup(over: Partial<React.ComponentProps<typeof UrlBar>> = {}) {
   const props = {
@@ -13,7 +13,7 @@ function setup(over: Partial<React.ComponentProps<typeof UrlBar>> = {}) {
     onClipboardWatchChange: vi.fn(),
     ...over,
   };
-  installFakeIpc({ pick_folder: () => ({ path: "/home/u/Videos", method: "portal" }), split_urls_cmd: (a) => String(a.text).split(/\s+/).filter(Boolean) });
+  installFakeIpc({ pick_folder: () => ({ path: "/home/u/Videos", method: "portal" }), split_urls_cmd: (a) => splitUrlsLikeCore(String(a.text)) });
   render(<UrlBar {...props} />);
   return props;
 }
@@ -29,6 +29,17 @@ describe("UrlBar", () => {
     await user.click(add);
     expect(p.onSubmit).toHaveBeenCalledWith("https://example.com/a.zip");
     await waitFor(() => expect(screen.getByLabelText("URLs")).toHaveValue(""));
+  });
+
+  it("Enter that confirms an IME composition does not submit (L-56)", () => {
+    const p = setup();
+    const box = screen.getByLabelText("URLs");
+    fireEvent.change(box, { target: { value: "https://example.com/a" } });
+    fireEvent.keyDown(box, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(box, { key: "Process", keyCode: 229 });
+    expect(p.onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(p.onSubmit).toHaveBeenCalledTimes(1);
   });
 
   it("Enter submits, Shift+Enter inserts a newline", async () => {

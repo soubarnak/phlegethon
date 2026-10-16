@@ -9,7 +9,7 @@ Chrome Companion (MV3)
         │  chrome.runtime.sendNativeMessage
         ▼
 phlegethon-nmh  (native messaging host, stdio)
-        │  local socket / named pipe: phlegethon-companion
+        │  filesystem socket: $XDG_RUNTIME_DIR/phlegethon/companion.sock
         ▼
 Platform Shell + Download Core
 ```
@@ -85,7 +85,7 @@ Launch Sites still use **Probe-then-Confirm** — the companion never auto-confi
 
 | Platform | Receiver | Socket / pipe |
 | --- | --- | --- |
-| Tauri shell | Background thread in `companion.rs` | `phlegethon-companion` (interprocess local socket) |
+| Tauri shell | Background thread in `companion.rs` | `$XDG_RUNTIME_DIR/phlegethon/companion.sock` (see ADR 0005) |
 
 Both call the same Download Core enqueue path as paste/drop. Optional cookies are applied via `set_cookie_channel` before enqueue.
 
@@ -100,6 +100,7 @@ Both call the same Download Core enqueue path as paste/drop. Optional cookies ar
 
 ## Security notes
 
-- Session material travels only over native messaging + local socket — never custom URI schemes.
+- Session material travels only over native messaging + a private local socket (directory 0700, socket 0600, owner checked by the host) — never custom URI schemes. See ADR 0005.
+- The host rejects callers whose `chrome-extension://` origin is not in an installed manifest, so re-run `scripts/install-nmh-linux.sh` after changing the extension id.
 - Cookie export requires an explicit per-send user gesture.
 - Download Core classifies all URLs; Launch Sites cannot skip Probe-then-Confirm.
