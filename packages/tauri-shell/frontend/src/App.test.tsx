@@ -1,8 +1,19 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { installFakeIpc, job, mediaItem, probeResult, quality, toolchainStatus } from "@/test/mockApi";
+
+const notifier = vi.hoisted(() => ({ sent: [] as Array<{ title: string; body: string }> }));
+
+vi.mock("@/tauri/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/tauri/platform")>()),
+  notificationPort: async () => ({
+    isPermissionGranted: async () => true,
+    requestPermission: async () => "granted",
+    sendNotification: (options: { title: string; body: string }) => void notifier.sent.push(options),
+  }),
+}));
 
 const extras = { write_subs: false, embed_subs: false, write_chapters: false, embed_chapters: false, write_thumbnail: false, embed_thumbnail: false, write_metadata: false, embed_metadata: false, remux: false };
 
@@ -21,12 +32,14 @@ function baseHandlers(extra: Record<string, (a: Record<string, unknown>) => unkn
     clear_pending_probe: () => undefined,
     cancel_probe: () => true,
     list_history: () => [],
+    is_main_window_focused: () => false,
     ...extra,
   };
   return { handlers, setJobs: (j: typeof jobs) => (jobs = j) };
 }
 
 beforeEach(() => {
+  notifier.sent.length = 0;
   document.documentElement.removeAttribute("data-theme");
 });
 
@@ -146,6 +159,28 @@ describe("App", () => {
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Clear history" }));
     await waitFor(() => expect(ipc.callsTo("clear_history")).toEqual([{ outcome: null }]));
+  });
+
+  it("shows an error, not the empty-queue tile, when the queue cannot be loaded", async () => {
+    installFakeIpc(baseHandlers({ list_jobs: () => Promise.reject("core unavailable") }).handlers);
+    render(<App />);
+    expect(await screen.findByTestId("queue-error")).toHaveTextContent("core unavailable");
+    expect(screen.queryByTestId("queue-empty")).not.toBeInTheDocument();
+  });
+
+  it("notifies for every job that finishes in the same burst of events", async () => {
+    const { handlers } = baseHandlers();
+    handlers.list_jobs = () => [job({ job_id: "n1", title: "One" }), job({ job_id: "n2", title: "Two", queue_index: 1 })];
+    const ipc = installFakeIpc(handlers);
+    render(<App />);
+    await screen.findByTestId("queue-row-n1");
+    await settle();
+
+    await ipc.emit("core-event", { type: "JobCompleted", job_id: "n1", bytes_written: 1, path: "/n1" });
+    await ipc.emit("core-event", { type: "JobFailed", job_id: "n2", error: "boom" });
+
+    await waitFor(() => expect(notifier.sent).toHaveLength(2));
+    expect(notifier.sent.map((n) => n.body)).toEqual(["One", "Two: boom"]);
   });
 
   describe("Chrome Companion hand-off", () => {

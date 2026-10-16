@@ -14,6 +14,8 @@
   "queue.sort.title": "Title",
   "queue.sort.status": "Status",
   "queue.sort.size": "Size",
+  "queue.loading": "Loading downloads…",
+  "queue.loadFailed": "Could not load the queue",
   "queue.empty": "No downloads yet",
   "queue.emptyWithHint": "No downloads yet. Paste a URL above or drag one in.",
   "queue.emptyFiltered": "No matching downloads",

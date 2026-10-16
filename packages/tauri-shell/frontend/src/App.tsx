@@ -5,6 +5,8 @@ import {
   HeaderGlobalAction,
   HeaderGlobalBar,
   HeaderName,
+  InlineLoading,
+  InlineNotification,
   Tab,
   TabList,
   TabPanel,
@@ -51,7 +53,7 @@ export default function App() {
 function Shell() {
   const toasts = useToasts();
   const [theme, toggleTheme] = useTheme();
-  const { jobs, refresh, kick, lastEvent } = useJobs();
+  const { jobs, loading, error: jobsError, refresh, kick, events, dismissEvents } = useJobs();
   const [tab, setTab] = useState(TAB_QUEUE);
   const [destination, setDestination] = useState<string | null>(null);
   const [clipboardWatch, setClipboardWatch] = useBooleanPreference("phlegethon-clipboard-watcher", false);
@@ -74,24 +76,27 @@ function Shell() {
   }, []);
 
   // ---- history reloads and notifications on terminal events
+  // Every queued event is handled exactly once; toggling notifications re-runs the
+  // effect but finds the queue already dismissed (M-65).
   useEffect(() => {
-    if (!lastEvent) return;
-    if (lastEvent.type === "JobCompleted" || lastEvent.type === "JobFailed") {
-      setHistoryKey((k) => k + 1);
-      const job = jobsRef.current.find((j) => j.job_id === lastEvent.job_id);
-      const title = job?.title ?? lastEvent.job_id;
+    if (events.length === 0) return;
+    setHistoryKey((k) => k + 1);
+    for (const { event } of events) {
+      const job = jobsRef.current.find((j) => j.job_id === event.job_id);
+      const title = job?.title ?? event.job_id;
       void (async () => {
         const port = await notificationPort();
         await maybeNotify({
           port,
           isMainWindowFocused: () => api.isMainWindowFocused(),
           settingsEnabled: notificationsEnabled,
-          headline: lastEvent.type === "JobCompleted" ? t("notify.completed") : t("notify.failed"),
-          body: lastEvent.type === "JobCompleted" ? title : `${title}: ${lastEvent.error}`,
+          headline: event.type === "JobCompleted" ? t("notify.completed") : t("notify.failed"),
+          body: event.type === "JobCompleted" ? title : `${title}: ${event.error}`,
         });
       })();
     }
-  }, [lastEvent, notificationsEnabled]);
+    dismissEvents(events[events.length - 1].id);
+  }, [events, dismissEvents, notificationsEnabled]);
 
   // ---- enqueue flow
   const queueProbe = useCallback((url: string) => {
@@ -378,7 +383,23 @@ function Shell() {
             <TabPanels>
               <TabPanel>
                 <div className="ph-panel">
-                  <QueueTable jobs={jobs} actions={actions} hasAnyJobs={jobs.length > 0} />
+                  {jobsError && (
+                    <InlineNotification
+                      kind="error"
+                      lowContrast
+                      hideCloseButton
+                      title={t("queue.loadFailed")}
+                      subtitle={jobsError}
+                      data-testid="queue-error"
+                    />
+                  )}
+                  {loading && jobs.length === 0 ? (
+                    <InlineLoading description={t("queue.loading")} data-testid="queue-loading" />
+                  ) : (
+                    !(jobsError && jobs.length === 0) && (
+                      <QueueTable jobs={jobs} actions={actions} hasAnyJobs={jobs.length > 0} />
+                    )
+                  )}
                 </div>
               </TabPanel>
               <TabPanel>
