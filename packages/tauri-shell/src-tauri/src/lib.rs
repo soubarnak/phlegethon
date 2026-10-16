@@ -179,7 +179,9 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
         CoreEvent::JobDiscarded { job_id } => Some(EventSummary::JobDiscarded {
             job_id: job_id.clone(),
         }),
-        CoreEvent::ProbeResult { .. } | CoreEvent::ProbeFailed { .. } => None,
+        CoreEvent::ProbeResult { .. }
+        | CoreEvent::ProbeFailed { .. }
+        | CoreEvent::JobsReordered { .. } => None,
         CoreEvent::JobMirrorFailover {
             job_id,
             previous_url,

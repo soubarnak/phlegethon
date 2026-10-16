@@ -49,11 +49,11 @@ Settings-backed rule for pre-selecting probe qualities (default: best ≤ 1080p,
 _Avoid_: forcing best-available with no height cap as the only option, hiding overrides, remembering-per-host as a substitute for an explicit default
 
 **Download Archive**:
-A Library Root–scoped record of completed media identities used to detect “already downloaded” items during probe and to back History. Probe marks archived items; confirm skips them by default unless the user re-selects for re-download.
+A Library Root–scoped record of completed media identities used to detect “already downloaded” items during probe and to back History. Probe marks archived items; confirm skips them by default unless the user re-selects for re-download. A failed retry never replaces a Completed entry for the same media id.
 _Avoid_: filename-only matching as the primary detector, a separate History store that disagrees with the archive
 
 **Filename Template**:
-A settings-backed naming pattern for extractor job outputs using a small yt-dlp-like variable set (title, id, uploader, upload_date, ext). Plain HTTP jobs keep URL-derived names unless overridden. Collisions get a numeric suffix; completed files are never overwritten silently.
+A settings-backed naming pattern for extractor job outputs using a small yt-dlp-like variable set (title, id, uploader, upload_date, ext). Plain HTTP jobs keep URL-derived names unless overridden. The template names one file inside the Job Destination: path separators, absolute paths and `.`/`..` are rejected, and names are capped below the 255-byte filesystem limit. Collisions get a numeric suffix; completed files are never overwritten silently.
 _Avoid_: arbitrary full yt-dlp template passthrough as the only mode, fixed non-configurable names only
 
 **Library Root**:

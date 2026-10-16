@@ -7891,7 +7891,7 @@ fn cancel_probe_aborts_between_tiers() {
     assert!(core.cancel_probe(url), "in-flight probe is cancellable");
     let err = plan.run().unwrap_err();
     assert!(err.contains("cancelled"), "got: {err}");
-    let err = core.finish_probe(plan.url(), Err(err)).unwrap_err();
+    let err = core.finish_probe(&plan, Err(err)).unwrap_err();
     assert!(err.contains("cancelled"));
     assert!(!core.cancel_probe(url), "finished probes are forgotten");
 }

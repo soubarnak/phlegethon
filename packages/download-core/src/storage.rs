@@ -336,7 +336,16 @@ pub fn load_queue(library_root: &Path) -> Result<LoadedQueue, String> {
     };
     loaded.proxy_settings = queue.proxy_settings.normalized();
     loaded.sidecar_update_settings = queue.sidecar_update_settings;
-    loaded.filename_template = queue.filename_template;
+    loaded.filename_template =
+        match crate::filename_template::validate_filename_template(&queue.filename_template) {
+            Ok(()) => queue.filename_template.trim().to_string(),
+            Err(reason) => {
+                loaded.warnings.push(format!(
+                    "Stored Filename Template was reset to the default: {reason}."
+                ));
+                DEFAULT_FILENAME_TEMPLATE.to_string()
+            }
+        };
     loaded.probe_tier_settings = queue.probe_tier_settings;
 
     let mut seen_ids = std::collections::HashSet::new();

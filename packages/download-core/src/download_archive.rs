@@ -4,7 +4,7 @@
 //! items; History (P3) reads the same store.  No second History DB.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,10 +47,20 @@ struct PersistedArchive {
     entries: HashMap<String, ArchiveEntry>,
 }
 
+/// Filename of the lock that serializes writers of `archive.json`.
+const ARCHIVE_LOCK_FILENAME: &str = "archive.lock";
+
 /// In-memory Download Archive backed by `archive.json` under the Library Root.
+///
+/// Changes since the last load or save are journaled in `pending_upserts` and
+/// `pending_removals`. [`Self::save`] replays that journal onto whatever is on
+/// disk at that moment, so two writers (for example two app instances on one
+/// Library Root) do not overwrite each other's entries.
 #[derive(Debug, Clone, Default)]
 pub struct DownloadArchive {
     entries: HashMap<String, ArchiveEntry>,
+    pending_upserts: HashMap<String, ArchiveEntry>,
+    pending_removals: HashSet<String>,
 }
 
 impl DownloadArchive {
@@ -74,6 +84,7 @@ impl DownloadArchive {
 
         Ok(Self {
             entries: persisted.entries,
+            ..Self::default()
         })
     }
 
@@ -107,19 +118,61 @@ impl DownloadArchive {
         }
     }
 
-    pub fn save(&self, library_root: &Path) -> Result<(), String> {
+    /// Write the archive under the Library Root.
+    ///
+    /// Takes an exclusive lock on `archive.lock`, re-reads `archive.json`,
+    /// replays this archive's journaled changes onto it and writes the result
+    /// atomically, so concurrent writers never lose each other's updates. This
+    /// archive then adopts the merged contents.
+    pub fn save(&mut self, library_root: &Path) -> Result<(), String> {
+        use fs2::FileExt;
+
         let dir = library_root.join(PHLEGETHON_DIR);
         fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
+        let lock_path = dir.join(ARCHIVE_LOCK_FILENAME);
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("open {}: {e}", lock_path.display()))?;
+        lock.lock_exclusive()
+            .map_err(|e| format!("lock {}: {e}", lock_path.display()))?;
+
         let path = dir.join(ARCHIVE_FILENAME);
+        let mut merged = match Self::load(library_root) {
+            Ok(on_disk) => on_disk.entries,
+            Err(reason) => {
+                // Unreadable on disk: keep a copy for inspection and fall back
+                // to what this process knows.
+                if path.exists() {
+                    let _ = crate::fsutil::copy_aside_corrupt(&path);
+                }
+                eprintln!("phlegethon: Download Archive on disk was replaced: {reason}");
+                self.entries.clone()
+            }
+        };
+        for media_id in &self.pending_removals {
+            merged.remove(media_id);
+        }
+        for entry in self.pending_upserts.values() {
+            insert_entry(&mut merged, entry.clone());
+        }
+
         let persisted = PersistedArchive {
             version: ARCHIVE_VERSION,
-            entries: self.entries.clone(),
+            entries: merged,
         };
         let raw = serde_json::to_string_pretty(&persisted)
             .map_err(|e| format!("serialize archive: {e}"))?;
         crate::fsutil::write_atomic(&path, raw.as_bytes())
             .map_err(|e| format!("write {}: {e}", path.display()))?;
+
+        self.entries = persisted.entries;
+        self.pending_upserts.clear();
+        self.pending_removals.clear();
+        drop(lock);
         Ok(())
     }
 
@@ -134,21 +187,44 @@ impl DownloadArchive {
             .is_some_and(|e| e.outcome == ArchiveOutcome::Completed)
     }
 
-    pub fn record(&mut self, entry: ArchiveEntry) {
-        self.entries.insert(entry.media_id.clone(), entry);
+    /// Record an entry. A Failed entry never replaces a Completed one for the
+    /// same media id, so a failed retry cannot hide a download that exists.
+    /// Returns whether the entry was stored.
+    pub fn record(&mut self, entry: ArchiveEntry) -> bool {
+        let media_id = entry.media_id.clone();
+        if !insert_entry(&mut self.entries, entry) {
+            return false;
+        }
+        self.pending_removals.remove(&media_id);
+        if let Some(stored) = self.entries.get(&media_id) {
+            self.pending_upserts.insert(media_id, stored.clone());
+        }
+        true
     }
 
     /// Remove an entry from the archive by media_id.
     /// Returns the removed entry if it existed.
     pub fn remove(&mut self, media_id: &str) -> Option<ArchiveEntry> {
-        self.entries.remove(media_id)
+        let removed = self.entries.remove(media_id);
+        if removed.is_some() {
+            self.pending_upserts.remove(media_id);
+            self.pending_removals.insert(media_id.to_string());
+        }
+        removed
     }
 
     /// Remove entries matching `pred`; returns how many were removed.
     pub fn remove_where(&mut self, pred: impl Fn(&ArchiveEntry) -> bool) -> usize {
-        let before = self.entries.len();
-        self.entries.retain(|_, entry| !pred(entry));
-        before - self.entries.len()
+        let doomed: Vec<String> = self
+            .entries
+            .values()
+            .filter(|entry| pred(entry))
+            .map(|entry| entry.media_id.clone())
+            .collect();
+        for media_id in &doomed {
+            self.remove(media_id);
+        }
+        doomed.len()
     }
 
     /// Return all archive entries sorted by completion time (most recent first).
@@ -177,6 +253,20 @@ impl DownloadArchive {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// Insert `entry`, unless it is Failed and a Completed entry already holds the
+/// media id. Returns whether it was inserted.
+fn insert_entry(entries: &mut HashMap<String, ArchiveEntry>, entry: ArchiveEntry) -> bool {
+    let keeps_completed = entry.outcome == ArchiveOutcome::Failed
+        && entries
+            .get(&entry.media_id)
+            .is_some_and(|existing| existing.outcome == ArchiveOutcome::Completed);
+    if keeps_completed {
+        return false;
+    }
+    entries.insert(entry.media_id.clone(), entry);
+    true
 }
 
 /// Path to the archive index file under a Library Root.
