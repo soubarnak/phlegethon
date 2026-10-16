@@ -104,7 +104,9 @@ describe("QueueTable", () => {
     expect(a.discard).toHaveBeenCalledWith(expect.arrayContaining(["dl", "pa", "fa", "ok", "gx"]));
   });
 
-  it("batch discard leaves out selected rows the filter has hidden (M-68)", async () => {
+  // Carbon 1.118 already drops a hidden row from `selectedRows`, so this passes without the explicit
+// visible-selection filter in QueueTable too. It pins the behaviour in case a Carbon upgrade changes it.
+it("batch discard leaves out selected rows the filter has hidden (M-68)", async () => {
     const a = actions();
     render(<QueueTable jobs={jobs} actions={a} hasAnyJobs />);
     const user = userEvent.setup();

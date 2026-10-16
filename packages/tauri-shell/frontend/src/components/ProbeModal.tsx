@@ -123,6 +123,7 @@ export function ProbeModal({
   useEffect(() => {
     if (!url) return;
     let cancelled = false;
+    probeInFlight.current = null;
     setPhase({ kind: "probing" });
     setItems([]);
     setSelected(new Set());
