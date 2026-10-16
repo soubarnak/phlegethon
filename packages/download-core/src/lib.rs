@@ -77,7 +77,7 @@ pub use page_sniffer::{
     FakePageSniffer, HtmlPageSniffer, PageSniffer, SniffOutcome, SniffSource, SniffedKind,
     SniffedMedia,
 };
-pub use proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
+pub use proxy_settings::ProxySettings;
 pub use quality_policy::{select_default_quality, DefaultQualityPolicy, DEFAULT_MAX_HEIGHT};
 pub use sidecar_updates::{
     apply_sidecar_updates, apply_sidecar_updates_on_launch, check_sidecar_updates,
