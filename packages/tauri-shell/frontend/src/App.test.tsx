@@ -1,8 +1,19 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { installFakeIpc, job, mediaItem, probeResult, quality, toolchainStatus } from "@/test/mockApi";
+import { findActiveJobLikeCore, installFakeIpc, job, mediaItem, probeResult, quality, splitUrlsLikeCore, toolchainStatus } from "@/test/mockApi";
+
+const notifier = vi.hoisted(() => ({ sent: [] as Array<{ title: string; body: string }> }));
+
+vi.mock("@/tauri/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/tauri/platform")>()),
+  notificationPort: async () => ({
+    isPermissionGranted: async () => true,
+    requestPermission: async () => "granted",
+    sendNotification: (options: { title: string; body: string }) => void notifier.sent.push(options),
+  }),
+}));
 
 const extras = { write_subs: false, embed_subs: false, write_chapters: false, embed_chapters: false, write_thumbnail: false, embed_thumbnail: false, write_metadata: false, embed_metadata: false, remux: false };
 
@@ -12,8 +23,8 @@ function baseHandlers(extra: Record<string, (a: Record<string, unknown>) => unkn
     list_jobs: () => jobs,
     process_pending: () => undefined,
     get_toolchain_status: () => toolchainStatus(),
-    split_urls_cmd: (a: Record<string, unknown>) => String(a.text).split(/\s+/).filter(Boolean),
-    find_active_job_for_url: () => null,
+    split_urls_cmd: (a: Record<string, unknown>) => splitUrlsLikeCore(String(a.text)),
+    find_active_job_for_url: (a: Record<string, unknown>) => findActiveJobLikeCore(jobs, String(a.url)),
     get_default_media_extras: () => extras,
     get_media_extras_capabilities: () => ({ ffmpeg_available: true, embed_disabled_reason: null }),
     select_default_quality: (a: Record<string, unknown>) => (a.qualities as Array<{ id: string }>)[0]?.id ?? null,
@@ -21,12 +32,14 @@ function baseHandlers(extra: Record<string, (a: Record<string, unknown>) => unkn
     clear_pending_probe: () => undefined,
     cancel_probe: () => true,
     list_history: () => [],
+    is_main_window_focused: () => false,
     ...extra,
   };
   return { handlers, setJobs: (j: typeof jobs) => (jobs = j) };
 }
 
 beforeEach(() => {
+  notifier.sent.length = 0;
   document.documentElement.removeAttribute("data-theme");
 });
 
@@ -146,6 +159,136 @@ describe("App", () => {
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Clear history" }));
     await waitFor(() => expect(ipc.callsTo("clear_history")).toEqual([{ outcome: null }]));
+  });
+
+  it("shows an error, not the empty-queue tile, when the queue cannot be loaded", async () => {
+    installFakeIpc(baseHandlers({ list_jobs: () => Promise.reject("core unavailable") }).handlers);
+    render(<App />);
+    expect(await screen.findByTestId("queue-error")).toHaveTextContent("core unavailable");
+    expect(screen.queryByTestId("queue-empty")).not.toBeInTheDocument();
+  });
+
+  it("notifies for every job that finishes in the same burst of events", async () => {
+    const { handlers } = baseHandlers();
+    handlers.list_jobs = () => [job({ job_id: "n1", title: "One" }), job({ job_id: "n2", title: "Two", queue_index: 1 })];
+    const ipc = installFakeIpc(handlers);
+    render(<App />);
+    await screen.findByTestId("queue-row-n1");
+    await settle();
+
+    await ipc.emit("core-event", { type: "JobCompleted", job_id: "n1", bytes_written: 1, path: "/n1" });
+    await ipc.emit("core-event", { type: "JobFailed", job_id: "n2", error: "boom" });
+
+    await waitFor(() => expect(notifier.sent).toHaveLength(2));
+    expect(notifier.sent.map((n) => n.body)).toEqual(["One", "Two: boom"]);
+  });
+
+  describe("URL submission", () => {
+    const queued = (id: string, url: string) => job({ job_id: id, url, title: id, status: "pending" });
+
+    it("asks before queueing a URL that already has an active job, and Cancel leaves it alone", async () => {
+      const { handlers, setJobs } = baseHandlers();
+      setJobs([queued("e1", "https://example.com/file.zip")]);
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      const user = userEvent.setup();
+      await user.type(await screen.findByLabelText("URLs"), "https://example.com/file.zip{Enter}");
+      const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveTextContent("already in the queue");
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      expect(ipc.callsTo("enqueue_url")).toHaveLength(0);
+    });
+
+    it("splits on commas and semicolons like the Core does", async () => {
+      const { handlers } = baseHandlers({ enqueue_url: (a) => ({ type: "EnqueueDirect", job_id: String(a.url), destination: "/d" }) });
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      const user = userEvent.setup();
+      await user.type(await screen.findByLabelText("URLs"), "https://a.example/1,https://b.example/2;https://c.example/3{Enter}");
+      await waitFor(() => expect(ipc.callsTo("enqueue_url")).toHaveLength(3));
+    });
+
+    it("a second submission waits for the open duplicate prompt instead of replacing it (M-64)", async () => {
+      const { handlers, setJobs } = baseHandlers();
+      setJobs([queued("e1", "https://a.example/one"), queued("e2", "https://b.example/two")]);
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      await screen.findByTestId("queue-row-e1");
+      const paste = (text: string) => {
+        const event = new Event("paste", { bubbles: true, cancelable: true }) as Event & { clipboardData: unknown };
+        event.clipboardData = { getData: () => text };
+        act(() => void document.body.dispatchEvent(event));
+      };
+      paste("https://a.example/one");
+      const first = await screen.findByRole("dialog");
+      expect(first).toHaveTextContent("https://a.example/one");
+      paste("https://b.example/two");
+
+      await userEvent.setup().click(within(first).getByRole("button", { name: "Cancel" }));
+      const second = await screen.findByRole("dialog");
+      expect(second).toHaveTextContent("https://b.example/two");
+      await userEvent.setup().click(within(second).getByRole("button", { name: "Add anyway" }));
+      await waitFor(() => expect(ipc.callsTo("enqueue_url")).toEqual([expect.objectContaining({ url: "https://b.example/two" })]));
+    });
+
+    it("one failing link does not stop the rest, and the toast says how many failed (M-67)", async () => {
+      const { handlers } = baseHandlers({
+        enqueue_url: (a) => {
+          if (a.url === "https://b.example/2") throw "disk full";
+          return { type: "EnqueueDirect", job_id: String(a.url), destination: "/d" };
+        },
+      });
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      await userEvent.setup().type(await screen.findByLabelText("URLs"), "https://a.example/1 https://b.example/2 https://c.example/3{Enter}");
+      await waitFor(() => expect(ipc.callsTo("enqueue_url")).toHaveLength(3));
+      expect(await screen.findByText("1 of 3 links could not be added")).toBeInTheDocument();
+      expect(screen.getByText(/https:\/\/b\.example\/2: disk full/)).toBeInTheDocument();
+    });
+  });
+
+  describe("probe queue", () => {
+    it("Cancel is disabled while confirming, so the next URL in the queue is not skipped (M-63)", async () => {
+      const urlA = "https://a.example/watch?v=1";
+      const urlB = "https://b.example/watch?v=2";
+      let release: (ids: string[]) => void = () => undefined;
+      const { handlers } = baseHandlers({
+        enqueue_url: (a) => ({ type: "ProbeThenConfirm", url: String(a.url) }),
+        probe_url: (a) => probeResult([mediaItem({ id: `m-${a.url}`, qualities: [quality("720p")] })], { url: String(a.url) }),
+        confirm_probe_selection: () => new Promise<string[]>((resolve) => (release = resolve)),
+      });
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      const user = userEvent.setup();
+      await user.type(await screen.findByLabelText("URLs"), `${urlA} ${urlB}{Enter}`);
+      await user.click(await screen.findByTestId("probe-confirm"));
+      const cancel = screen.getByRole("button", { name: "Cancel" });
+      expect(cancel).toBeDisabled();
+      await user.click(cancel);
+      expect(ipc.callsTo("clear_pending_probe")).toHaveLength(0);
+
+      release(["job-a"]);
+      await waitFor(() => expect(ipc.callsTo("probe_url").map((c) => c.url)).toEqual([urlA, urlB]));
+      expect(await screen.findByTestId("probe-confirm")).toBeInTheDocument();
+    });
+  });
+
+  it("the discard dialog follows the job: no file-deletion warning once it has completed (L-60)", async () => {
+    let jobs = [job({ job_id: "d1", title: "Racing", status: "downloading", destination: "/lib/jobs/d1" })];
+    const { handlers } = baseHandlers({ discard_job: () => undefined });
+    handlers.list_jobs = () => jobs;
+    const ipc = installFakeIpc(handlers);
+    render(<App />);
+    const user = userEvent.setup();
+    const row = await screen.findByTestId("queue-row-d1");
+    await user.click(within(row).getByRole("button", { name: /actions for racing/i }));
+    await user.click(within(document.body.querySelector<HTMLElement>("[role=menu]")!).getByText("Discard"));
+    expect(await screen.findByRole("dialog")).toHaveTextContent("Files under the Job Destination will be deleted");
+
+    jobs = [job({ job_id: "d1", title: "Racing", status: "completed", destination: "/lib/jobs/d1" })];
+    await ipc.emit("core-event", { type: "JobCompleted", job_id: "d1", bytes_written: 1, path: "/lib/jobs/d1/f" });
+    await waitFor(() => expect(screen.getByRole("dialog")).toHaveTextContent("Files on disk will not be deleted"));
   });
 
   describe("Chrome Companion hand-off", () => {

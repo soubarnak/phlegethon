@@ -7,6 +7,18 @@ use crate::cookies::CompanionSession;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const NATIVE_HOST_NAME: &str = "com.phlegethon.bridge";
 
+/// Longest error text a reply carries. Errors may echo a URL that is nearly the 1 MiB frame
+/// cap; an uncapped echo would push the reply past the native-messaging limit (L-46).
+const MAX_ERROR_CHARS: usize = 1000;
+
+fn truncate_error(mut text: String) -> String {
+    if let Some((cut, _)) = text.char_indices().nth(MAX_ERROR_CHARS) {
+        text.truncate(cut);
+        text.push('…');
+    }
+    text
+}
+
 /// Intent hint from the extension; Download Core still classifies the final path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,7 +114,7 @@ impl CompanionResponse {
             v: PROTOCOL_VERSION,
             request_id: request_id.into(),
             ok: false,
-            error: Some(error.into()),
+            error: Some(truncate_error(error.into())),
             result: None,
         }
     }
@@ -151,6 +163,25 @@ mod tests {
             session: None,
         };
         assert_eq!(req.effective_url(), "https://cdn.example.com/video.mp4");
+    }
+
+    #[test]
+    fn error_reply_echoing_huge_url_fits_native_message_cap() {
+        let req = CompanionRequest {
+            v: PROTOCOL_VERSION,
+            op: "enqueue".to_string(),
+            request_id: "r".to_string(),
+            page_url: format!("ftp://{}", "a".repeat(1_048_500)),
+            media_url: None,
+            intent: CompanionIntent::default(),
+            referrer: None,
+            session: None,
+        };
+        let response = CompanionResponse::err("r", req.validate().unwrap_err());
+        let mut buf = Vec::new();
+        crate::wire::write_native_message(&mut buf, &response)
+            .expect("error reply must fit the native-messaging cap");
+        assert!(buf.len() < 4096);
     }
 
     #[test]
