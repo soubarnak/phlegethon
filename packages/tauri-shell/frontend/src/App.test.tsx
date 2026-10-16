@@ -22,6 +22,7 @@ function baseHandlers(extra: Record<string, (a: Record<string, unknown>) => unkn
   const handlers = {
     list_jobs: () => jobs,
     process_pending: () => undefined,
+    take_pending_intents: () => [],
     get_toolchain_status: () => toolchainStatus(),
     split_urls_cmd: (a: Record<string, unknown>) => splitUrlsLikeCore(String(a.text)),
     find_active_job_for_url: (a: Record<string, unknown>) => findActiveJobLikeCore(jobs, String(a.url)),
@@ -311,6 +312,20 @@ describe("App", () => {
       expect(ipc.callsTo("enqueue_url")).toHaveLength(0);
       expect(ipc.callsTo("find_active_job_for_url")).toHaveLength(0);
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("a hand-off that arrived before the webview mounted is delivered on mount", async () => {
+      const url = "https://www.youtube.com/watch?v=early";
+      const { handlers } = baseHandlers({
+        take_pending_intents: () => [{ url, result: { type: "probe_then_confirm", url } }],
+        probe_url: () => probeResult([mediaItem({ id: "yt-e", title: "Early bird", qualities: [quality("720p")] })], { url }),
+      });
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+
+      expect(await screen.findByTestId("probe-confirm")).toBeInTheDocument();
+      expect(ipc.callsTo("take_pending_intents")).toHaveLength(1);
+      expect(ipc.callsTo("probe_url")).toEqual([expect.objectContaining({ url })]);
     });
 
     it("a page hand-off opens the probe sheet instead of enqueueing", async () => {

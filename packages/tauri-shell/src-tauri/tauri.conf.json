@@ -27,18 +27,20 @@
     "security": {
       "csp": {
         "default-src": "'self'",
+        "base-uri": "'self'",
         "script-src": "'self'",
         "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self' data:",
-        "img-src": "'self' data: asset: http://asset.localhost",
+        "img-src": "'self' data:",
         "connect-src": "ipc: http://ipc.localhost"
       },
       "devCsp": {
         "default-src": "'self'",
+        "base-uri": "'self'",
         "script-src": "'self' 'unsafe-inline' 'unsafe-eval'",
         "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self' data:",
-        "img-src": "'self' data: asset: http://asset.localhost",
+        "img-src": "'self' data:",
         "connect-src": "ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420"
       }
     }

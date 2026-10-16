@@ -35,6 +35,21 @@ pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Whether `name` is one ordinary path component: not empty, not `.` or `..`,
+/// no separator, no NUL. Use it before joining a name that came from the network
+/// or from a file on disk into a path that is later deleted or written.
+pub(crate) fn is_single_component(name: &str) -> bool {
+    use std::path::Component;
+    if name.is_empty() || name.contains(['/', '\\', '\0']) {
+        return false;
+    }
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
+}
+
 fn write_synced(tmp: &Path, data: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(tmp)?;
     file.write_all(data)?;
@@ -125,6 +140,23 @@ mod tests {
         let got = fs::read(&*path).unwrap();
         assert!(payloads.contains(&got), "result is not one full payload");
         assert_eq!(names(dir.path()), vec!["archive.json"]);
+    }
+
+    #[test]
+    fn single_component_accepts_only_plain_names() {
+        for ok in [
+            "2026.10.01",
+            "yt-dlp_linux",
+            "phlegethon-launch-sites",
+            ".hidden",
+        ] {
+            assert!(is_single_component(ok), "{ok}");
+        }
+        for bad in [
+            "", ".", "..", "../x", "a/b", "/abs", "a\\b", "x\0y", "..\\..", "a/", "/",
+        ] {
+            assert!(!is_single_component(bad), "{bad:?}");
+        }
     }
 
     #[test]

@@ -78,4 +78,37 @@ describe("FolderPicker", () => {
     expect(screen.getByRole("button", { name: "Save to…" })).toBeEnabled();
     expect(onError).toHaveBeenCalled();
   });
+
+  it("renders the typed-path dialog on <body>, outside any transformed ancestor (UI-8)", async () => {
+    installFakeIpc({ pick_folder: () => ({ path: "/x", method: "portal" }) });
+    render(
+      <div className="ph-probe" data-testid="sheet" style={{ transform: "translate(0, 0)" }}>
+        <FolderPicker onPicked={vi.fn()} />
+      </div>,
+    );
+    await userEvent.setup().click(screen.getByTestId("folder-picker-manual"));
+    const dialog = await screen.findByRole("dialog");
+    expect(screen.getByTestId("sheet")).not.toContainElement(dialog);
+    expect(document.body).toContainElement(dialog);
+  });
+
+  it("focuses the field, accepts Enter and gives focus back to the button (UI-9, UI-10)", async () => {
+    const { onPicked, user } = setup(() => ({ path: "/x", method: "portal" }));
+    const opener = screen.getByTestId("folder-picker-manual");
+    await user.click(opener);
+    const field = await screen.findByLabelText("Absolute folder path");
+    expect(field).toHaveFocus();
+    await user.type(field, "/mnt/media{Enter}");
+    expect(onPicked).toHaveBeenCalledWith("/mnt/media");
+    await waitFor(() => expect(screen.queryByLabelText("Absolute folder path")).toBeNull());
+    expect(opener).toHaveFocus();
+  });
+
+  it("Enter with a relative path does not submit", async () => {
+    const { onPicked, user } = setup(() => ({ path: "/x", method: "portal" }));
+    await user.click(screen.getByTestId("folder-picker-manual"));
+    await user.type(await screen.findByLabelText("Absolute folder path"), "relative{Enter}");
+    expect(onPicked).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Absolute folder path")).toBeInTheDocument();
+  });
 });

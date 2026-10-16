@@ -2034,6 +2034,8 @@ impl Core {
                 Arc::clone(&guard.sidecar_update_source),
             )
         };
+        // A manual Check must see upstream now, not a lookup cached up to an hour ago.
+        source.invalidate_cache();
         check_sidecar_updates(&root, &settings, source.as_ref())
     }
 

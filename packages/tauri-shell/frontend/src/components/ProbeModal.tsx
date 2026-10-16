@@ -44,7 +44,8 @@ import {
   totalSelectedBytes,
   type QualityByItem,
 } from "@/lib/probeSelection";
-import { FolderPicker } from "./FolderPicker";
+import { useReturnFocus } from "@/state/useReturnFocus";
+import { FOLDER_DIALOG_CLASS, FolderPicker } from "./FolderPicker";
 
 interface ProbeModalProps {
   /** URL to probe; `null` closes the modal. */
@@ -114,11 +115,15 @@ export function ProbeModal({
   const itemsRef = useRef<MediaItem[]>([]);
   itemsRef.current = items;
   const previewSeq = useRef(0);
+  // The in-flight `probe_url` call, so closing can wait for it to settle (M-62).
+  const probeInFlight = useRef<Promise<unknown> | null>(null);
+  useReturnFocus(url != null);
 
   // ---- run the probe when a URL is given
   useEffect(() => {
     if (!url) return;
     let cancelled = false;
+    probeInFlight.current = null;
     setPhase({ kind: "probing" });
     setItems([]);
     setSelected(new Set());
@@ -136,7 +141,9 @@ export function ProbeModal({
       setExtras(defaults);
       setCaps(capabilities);
       try {
-        const result = await api.probeUrl(url);
+        const probing = api.probeUrl(url);
+        probeInFlight.current = probing;
+        const result = await probing;
         if (cancelled) return;
         // Pre-pick a quality per item using the Default Quality Policy.
         const picks = await Promise.all(
@@ -193,8 +200,13 @@ export function ProbeModal({
     // Closing mid-confirm would drop the sheet while its jobs are still being created (M-63).
     if (confirming) return;
     if (url) {
+      const clear = () => void api.clearPendingProbe(url).catch(() => undefined);
+      const inFlight = phase.kind === "probing" ? probeInFlight.current : null;
       if (phase.kind === "probing") void api.cancelProbe(url).catch(() => undefined);
-      void api.clearPendingProbe(url).catch(() => undefined);
+      // Core stores a probe result when the probe settles, even a cancelled one. Clearing
+      // before that leaves a pending probe that blocks the URL until restart (M-62).
+      if (inFlight) void inFlight.then(clear, clear);
+      else clear();
     }
     onClose();
   }, [url, phase.kind, confirming, onClose]);
@@ -260,7 +272,14 @@ export function ProbeModal({
   if (url == null) return null;
 
   return (
-    <ComposedModal open size="lg" className="ph-probe" onClose={close} preventCloseOnClickOutside>
+    <ComposedModal
+      open
+      size="lg"
+      className="ph-probe"
+      onClose={close}
+      preventCloseOnClickOutside
+      selectorsFloatingMenus={[`.${FOLDER_DIALOG_CLASS}`]}
+    >
       <ModalHeader title={heading} label={t("probe.title")} closeModal={close} />
       <ModalBody hasScrollingContent={phase.kind === "results"}>
         {phase.kind === "probing" && (
@@ -339,6 +358,7 @@ export function ProbeModal({
               {qualityOptions.length > 1 && (
                 <Dropdown
                   id="probe-apply-quality"
+                  autoAlign
                   size="sm"
                   titleText={t("probe.applyQualityAll")}
                   hideLabel
@@ -357,7 +377,7 @@ export function ProbeModal({
             <Table size="md" aria-label={t("probe.results")}>
               <TableHead>
                 <TableRow>
-                  <TableHeader style={{ width: "3rem" }}>
+                  <TableHeader className="ph-probe__col ph-probe__col--select" style={{ width: "3rem" }}>
                     <Checkbox
                       id="probe-select-all"
                       labelText={t("probe.selectAll")}
@@ -367,9 +387,9 @@ export function ProbeModal({
                       onChange={(_, { checked }) => setSelected(checked ? new Set(items.map((i) => i.id)) : new Set())}
                     />
                   </TableHeader>
-                  <TableHeader>{t("queue.col.title")}</TableHeader>
-                  <TableHeader>{t("probe.quality")}</TableHeader>
-                  <TableHeader>{t("queue.col.size")}</TableHeader>
+                  <TableHeader className="ph-probe__col ph-probe__col--title">{t("queue.col.title")}</TableHeader>
+                  <TableHeader className="ph-probe__col ph-probe__col--quality">{t("probe.quality")}</TableHeader>
+                  <TableHeader className="ph-probe__col ph-probe__col--size">{t("queue.col.size")}</TableHeader>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -379,7 +399,7 @@ export function ProbeModal({
                   const meta = [item.uploader, item.upload_date ? formatUploadDate(item.upload_date) : null].filter(Boolean).join(" · ");
                   return (
                     <TableRow key={item.id} data-testid={`probe-row-${item.id}`}>
-                      <TableCell>
+                      <TableCell className="ph-probe__col ph-probe__col--select">
                         <Checkbox
                           id={`probe-pick-${item.id}`}
                           labelText={t("probe.selectItem", { title: item.title })}
@@ -388,7 +408,7 @@ export function ProbeModal({
                           onChange={(_, { checked }) => toggleItem(item.id, checked)}
                         />
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="ph-probe__col ph-probe__col--title">
                         <div className="ph-probe__item-title" title={item.title}>
                           {item.title}
                         </div>
@@ -401,7 +421,7 @@ export function ProbeModal({
                           {meta}
                         </div>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="ph-probe__col ph-probe__col--quality">
                         <div
                           className="ph-probe__quality"
                           onFocusCapture={() => void ensureEnriched(item.id)}
@@ -412,6 +432,7 @@ export function ProbeModal({
                           ) : (
                             <Dropdown
                               id={`probe-quality-${item.id}`}
+                              autoAlign
                               size="sm"
                               hideLabel
                               titleText={t("probe.qualityFor", { title: item.title })}
@@ -429,7 +450,7 @@ export function ProbeModal({
                           )}
                         </div>
                       </TableCell>
-                      <TableCell>{q?.size_bytes ? formatBytes(q.size_bytes) : "—"}</TableCell>
+                      <TableCell className="ph-probe__col ph-probe__col--size">{q?.size_bytes ? formatBytes(q.size_bytes) : "—"}</TableCell>
                     </TableRow>
                   );
                 })}
