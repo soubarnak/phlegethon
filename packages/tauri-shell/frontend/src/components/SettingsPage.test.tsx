@@ -1,11 +1,11 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { SettingsPage } from "./SettingsPage";
 import { ToastProvider } from "@/state/useToasts";
-import { installFakeIpc, toolchainStatus } from "@/test/mockApi";
+import { installFakeIpc, toolchainStatus, type CommandHandler } from "@/test/mockApi";
 
-function setup() {
+function setup(overrides: Record<string, CommandHandler> = {}) {
   const extras = { write_subs: false, embed_subs: false, write_chapters: false, embed_chapters: false, write_thumbnail: false, embed_thumbnail: false, write_metadata: false, embed_metadata: false, remux: false };
   const ipc = installFakeIpc({
     get_library_root: () => "/home/u/lib",
@@ -42,6 +42,7 @@ function setup() {
     unpin_sidecar_version: () => undefined,
     rollback_sidecar: () => undefined,
     pick_folder: () => ({ path: "/home/u/Videos", method: "portal" }),
+    ...overrides,
   });
   const onNotifications = (() => {
     const calls: boolean[] = [];
@@ -172,5 +173,99 @@ describe("SettingsPage: no dead buttons", () => {
     );
     expect(await screen.findByText("Browser impersonation")).toBeInTheDocument();
     expect(screen.queryByText(/Needs curl_cffi/) !== null).toBe(hintShown);
+  });
+
+  describe("load failures", () => {
+    it("a setting that failed to load keeps its Apply disabled while the others stay usable (M-60)", async () => {
+      const { ipc } = setup({ get_cookie_channel: () => Promise.reject("cookie store unreadable") });
+      const user = userEvent.setup();
+      await screen.findByTestId("template-preview");
+      expect(await screen.findByTestId("load-failed-cookies")).toBeInTheDocument();
+
+      const cookiesSection = document.getElementById("settings-cookies")!;
+      expect(within(cookiesSection).getByRole("button", { name: "Apply" })).toBeDisabled();
+
+      const proxySection = screen.getByLabelText("Proxy").closest("section")!;
+      const proxyApply = within(proxySection).getByRole("button", { name: "Apply" });
+      expect(proxyApply).toBeEnabled();
+      await user.click(proxyApply);
+      await waitFor(() => expect(ipc.callsTo("set_proxy_settings")).toHaveLength(1));
+      expect(ipc.callsTo("set_cookie_channel")).toHaveLength(0);
+    });
+
+    it("Retry reloads the failed setting and re-enables Apply", async () => {
+      let fail = true;
+      setup({
+        get_cookie_channel: () =>
+          fail ? Promise.reject("busy") : { cookies_from_browser: "firefox", cookie_file: null },
+      });
+      const user = userEvent.setup();
+      await screen.findByTestId("load-failed-cookies");
+      fail = false;
+      await user.click(within(screen.getByTestId("load-failed-cookies")).getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(screen.queryByTestId("load-failed-cookies")).not.toBeInTheDocument());
+      expect(within(document.getElementById("settings-cookies")!).getByRole("button", { name: "Apply" })).toBeEnabled();
+    });
+
+    it("an older template preview reply cannot overwrite a newer one (L-57)", async () => {
+      const replies = new Map<string, (value: string) => void>();
+      setup({
+        preview_filename_template: (args) =>
+          new Promise<string>((resolve) => {
+            replies.set(String(args.template), resolve);
+          }),
+      });
+      const user = userEvent.setup();
+      const input = await screen.findByLabelText("Filename template");
+      await waitFor(() => expect(replies.size).toBe(1)); // preview of the loaded template
+      await user.type(input, "A");
+      await waitFor(() => expect(replies.size).toBe(2));
+      await user.type(input, "B");
+      await waitFor(() => expect(replies.size).toBe(3));
+      const [, older, newer] = [...replies.values()];
+      newer("newer preview");
+      expect(await screen.findByTestId("template-preview")).toHaveTextContent("newer preview");
+      older("older preview");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(screen.getByTestId("template-preview")).toHaveTextContent("newer preview");
+    });
+
+    it("the audio-only switch reverts when saving fails (L-58)", async () => {
+      setup({ set_audio_only_mode: () => Promise.reject("disk full") });
+      const user = userEvent.setup();
+      await screen.findByTestId("template-preview");
+      const toggle = screen.getByRole("switch", { name: /audio only/i });
+      await user.click(toggle);
+      await waitFor(() => expect(screen.getByRole("switch", { name: /audio only/i })).not.toBeChecked());
+    });
+  });
+
+  describe("Toolchain panel", () => {
+    it("does not write default pins back when the update settings failed to load (M-59)", async () => {
+      const { ipc } = setup({ get_sidecar_update_settings: () => Promise.reject("settings.json unreadable") });
+      const user = userEvent.setup();
+      expect(await screen.findByTestId("toolchain-settings-failed")).toBeInTheDocument();
+      await screen.findByText("2026.08.19");
+
+      const toggle = screen.getByRole("switch", { name: /check for updates on launch/i });
+      expect(toggle).toBeDisabled();
+      await user.click(toggle);
+      for (const pin of screen.getAllByRole("button", { name: "Unpin" })) expect(pin).toBeDisabled();
+      expect(ipc.callsTo("set_sidecar_update_settings")).toHaveLength(0);
+      expect(ipc.callsTo("unpin_sidecar_version")).toHaveLength(0);
+    });
+
+    it("Retry loads the settings and enables saving", async () => {
+      let fail = true;
+      setup({
+        get_sidecar_update_settings: () =>
+          fail ? Promise.reject("busy") : { check_on_launch: true, toolchain_pin: "2026.01.01", plugin_pin: null },
+      });
+      const user = userEvent.setup();
+      await user.click(await within(await screen.findByTestId("toolchain-settings-failed")).findByRole("button", { name: "Retry" }).then((b) => { fail = false; return b; }));
+      await waitFor(() => expect(screen.queryByTestId("toolchain-settings-failed")).not.toBeInTheDocument());
+      expect(screen.getByRole("switch", { name: /check for updates on launch/i })).toBeEnabled();
+      expect(screen.getByLabelText("Pin yt-dlp version")).toHaveValue("2026.01.01");
+    });
   });
 });

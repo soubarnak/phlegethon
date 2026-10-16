@@ -53,4 +53,29 @@ describe("FolderPicker", () => {
     await user.click(screen.getByTestId("folder-picker-manual"));
     expect(await screen.findByLabelText("Absolute folder path")).toBeInTheDocument();
   });
+
+  it("Cancel frees the button and ignores a chooser reply that arrives later (L-61)", async () => {
+    let reply: (value: unknown) => void = () => undefined;
+    const onPicked = vi.fn();
+    installFakeIpc({ pick_folder: () => new Promise((resolve) => (reply = resolve)) });
+    render(<FolderPicker onPicked={onPicked} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Save to…" }));
+    expect(screen.getByRole("button", { name: "Save to…" })).toBeDisabled();
+    await user.click(await screen.findByTestId("folder-picker-cancel"));
+    expect(screen.getByRole("button", { name: "Save to…" })).toBeEnabled();
+    reply({ path: "/late", method: "portal" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(onPicked).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a typed path when the chooser never answers (L-61)", async () => {
+    const onError = vi.fn();
+    installFakeIpc({ pick_folder: () => new Promise(() => undefined) });
+    render(<FolderPicker onPicked={vi.fn()} onError={onError} timeoutMs={30} />);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Save to…" }));
+    expect(await screen.findByLabelText("Absolute folder path")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save to…" })).toBeEnabled();
+    expect(onError).toHaveBeenCalled();
+  });
 });

@@ -34,8 +34,39 @@ describe("processUrlInput", () => {
       },
       "ignored",
     );
-    expect(result).toEqual({ enqueued: 2, total: 3, skipped: ["https://b"] });
+    expect(result).toEqual({ enqueued: 2, total: 3, skipped: ["https://b"], failed: [] });
     expect(enqueueOne.mock.calls.map((c) => c[0])).toEqual(["https://a", "https://c"]);
+  });
+  it("keeps going when one URL fails and reports which ones did (M-67)", async () => {
+    const enqueueOne = vi.fn(async (url: string) => {
+      if (url === "https://bad") throw new Error("no library root");
+    });
+    const result = await processUrlInput(
+      {
+        splitUrls: async () => ["https://a", "https://bad", "https://c"],
+        resolveDuplicate: async () => "enqueue",
+        enqueueOne,
+      },
+      "ignored",
+    );
+    expect(result.enqueued).toBe(2);
+    expect(result.failed).toEqual([{ url: "https://bad", error: new Error("no library root") }]);
+    expect(enqueueOne.mock.calls.map((c) => c[0])).toEqual(["https://a", "https://bad", "https://c"]);
+  });
+  it("counts a failing duplicate check as that URL failing, not the batch", async () => {
+    const result = await processUrlInput(
+      {
+        splitUrls: async () => ["https://a", "https://b"],
+        resolveDuplicate: async (u) => {
+          if (u === "https://a") throw "lookup failed";
+          return "enqueue";
+        },
+        enqueueOne: async () => undefined,
+      },
+      "ignored",
+    );
+    expect(result).toMatchObject({ enqueued: 1, total: 2 });
+    expect(result.failed.map((f) => f.url)).toEqual(["https://a"]);
   });
   it("reports nothing for text without links", async () => {
     const result = await processUrlInput(

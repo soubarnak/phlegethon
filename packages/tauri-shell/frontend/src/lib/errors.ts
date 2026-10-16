@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 /**
  * Core error strings may carry a machine-readable `[code]` prefix
  * (see download-core toolchain_discovery::tag_error).
@@ -9,6 +11,15 @@ export type ErrorCode =
   | "unsupported_url"
   | "geo_blocked"
   | "not_found";
+
+const ERROR_CODES: readonly ErrorCode[] = [
+  "needs_browser_cookies",
+  "needs_js_runtime",
+  "timeout",
+  "unsupported_url",
+  "geo_blocked",
+  "not_found",
+];
 
 export interface ParsedError {
   code: ErrorCode | null;
@@ -38,20 +49,5 @@ export function errorToString(raw: unknown): string {
 
 /** Short, action-oriented hint for a known code (mirrors Core's error_code_hint). */
 export function errorHint(code: ErrorCode | null): string | null {
-  switch (code) {
-    case "needs_browser_cookies":
-      return "The site blocked the request (login wall, bot check or Cloudflare challenge). Open the page in your browser once, then set Cookies → from browser in Settings and retry. A yt-dlp with browser impersonation (curl_cffi, see the Toolchain panel) gets past many Cloudflare checks without cookies.";
-    case "needs_js_runtime":
-      return "yt-dlp needs a JavaScript runtime for this site. Install deno (≥ 2.3) or node (≥ 22) and check the Toolchain panel.";
-    case "timeout":
-      return "The probe took too long. Check the network, or raise the probe timeout in Settings.";
-    case "geo_blocked":
-      return "The site reports this media is not available in your region. A proxy in Settings may help.";
-    case "not_found":
-      return "The media could not be found; it may have been removed.";
-    case "unsupported_url":
-      return "yt-dlp does not support this URL and the page sniffer found no media.";
-    default:
-      return null;
-  }
+  return code && ERROR_CODES.includes(code) ? t(`error.hint.${code}`) : null;
 }
