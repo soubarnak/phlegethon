@@ -2,6 +2,7 @@ import { Button, ComposedModal, ModalBody, ModalFooter, ModalHeader, Tag } from 
 import type { ActiveJobMatch } from "@/tauri/types";
 import type { DuplicateResolution } from "@/lib/urlInput";
 import { t } from "@/lib/i18n";
+import { useReturnFocus } from "@/state/useReturnFocus";
 
 const STATUS_KEYS: Record<string, string> = {
   pending: "queue.status.queued",
@@ -24,6 +25,7 @@ interface DuplicateUrlModalProps {
 }
 
 export function DuplicateUrlModal({ match, onResolve }: DuplicateUrlModalProps) {
+  useReturnFocus(match != null);
   if (!match) return null;
   return (
     <ComposedModal open size="sm" onClose={() => onResolve("cancel")}>

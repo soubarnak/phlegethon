@@ -37,6 +37,15 @@ $ph-bp-lg: 1050px;
   color-scheme: dark;
 }
 
+// Until the theme script and useTheme set `data-theme`, follow the system so a dark
+// desktop never paints a light frame first (UI-11).
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    @include theme.theme(themes.$g100);
+    color-scheme: dark;
+  }
+}
+
 html,
 body,
 #root {
@@ -61,8 +70,6 @@ body {
 }
 
 .ph-main {
-  // Carbon's Header is fixed at 3rem.
-  padding-top: 3rem;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -149,6 +156,23 @@ body {
   padding-top: 1.5rem; // align with the TextArea below its label
 }
 
+// Narrow: Add moves under the field so the helper text keeps the full width (UI-7).
+@include below($ph-bp-md) {
+  .ph-urlbar {
+    grid-template-columns: minmax(0, 1fr);
+    padding: $spacing-04;
+  }
+
+  .ph-urlbar__actions {
+    padding-top: 0;
+
+    .cds--btn {
+      flex: 1 1 auto;
+      max-inline-size: none;
+    }
+  }
+}
+
 .ph-urlbar__meta {
   grid-column: 1 / -1;
   display: flex;
@@ -164,6 +188,15 @@ body {
   // Carbon stacks the toggle label above the switch; keep the row compact.
   .cds--toggle__label-text {
     margin-bottom: 0;
+  }
+}
+
+// A long clipboard URL has no break points, so let it wrap inside the notification (UI-18).
+.ph-urlbar__meta .cds--actionable-notification {
+  max-inline-size: 100%;
+
+  .cds--actionable-notification__subtitle {
+    overflow-wrap: anywhere;
   }
 }
 
@@ -453,13 +486,12 @@ body {
   }
 }
 
+// Titles wrap instead of pushing the quality picker out of the sheet (UI-6).
 .ph-probe__item-title {
   @include type-style("body-compact-01");
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 28rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .ph-probe__item-sub {
@@ -469,6 +501,10 @@ body {
 
 .ph-probe__quality {
   min-width: 11rem;
+
+  @include below($ph-bp-md) {
+    min-width: 8rem;
+  }
 }
 
 .ph-probe__section {
@@ -652,15 +688,17 @@ body {
 // Toasts
 // ---------------------------------------------------------------------------
 
+// Top right, under the header, and below Carbon's modals (z-index 9000): at the bottom the
+// stack covered the row actions and the probe sheet's confirm button (UI-3).
 .ph-toasts {
   position: fixed;
+  top: 3.5rem;
   right: $spacing-05;
-  bottom: $spacing-05;
   display: flex;
   flex-direction: column;
   gap: $spacing-03;
-  z-index: 9000;
-  max-width: 28rem;
+  z-index: 8500;
+  max-width: calc(100vw - #{$spacing-07});
 
   .cds--toast-notification {
     margin: 0;

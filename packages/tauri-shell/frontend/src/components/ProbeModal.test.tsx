@@ -126,20 +126,60 @@ describe("ProbeModal", () => {
     expect(p.onOpenSettings).toHaveBeenCalled();
   });
 
-  it("cancelling while probing aborts the probe and clears the pending result", async () => {
+  it("cancelling while probing aborts the probe and clears the pending result only after the probe settles (M-62)", async () => {
+    let settle!: (v: ProbeResult) => void;
     const ipc = installFakeIpc({
       get_default_media_extras: () => ({}),
       get_media_extras_capabilities: () => ({ ffmpeg_available: true, embed_disabled_reason: null }),
-      probe_url: () => new Promise(() => undefined),
+      probe_url: () => new Promise<ProbeResult>((resolve) => (settle = resolve)),
+      select_default_quality: () => null,
       cancel_probe: () => true,
       clear_pending_probe: () => undefined,
     });
     const p = props();
     render(<ProbeModal {...p} />);
     await screen.findByTestId("probe-loading");
+    await waitFor(() => expect(ipc.callsTo("probe_url")).toHaveLength(1));
     await userEvent.setup().click(screen.getByRole("button", { name: "Cancel" }));
     expect(p.onClose).toHaveBeenCalled();
     await waitFor(() => expect(ipc.callsTo("cancel_probe")).toHaveLength(1));
-    expect(ipc.callsTo("clear_pending_probe")).toHaveLength(1);
+
+    // Core has not finished the probe yet: clearing now would leave its late result stored.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ipc.callsTo("clear_pending_probe")).toHaveLength(0);
+
+    settle(probeResult(items));
+    await waitFor(() => expect(ipc.callsTo("clear_pending_probe")).toHaveLength(1));
+    expect(ipc.calls.map((c) => c.cmd).indexOf("clear_pending_probe")).toBeGreaterThan(
+      ipc.calls.map((c) => c.cmd).indexOf("cancel_probe"),
+    );
+  });
+
+  it("clears the pending result after a cancelled probe fails", async () => {
+    let fail!: (e: string) => void;
+    const ipc = installFakeIpc({
+      get_default_media_extras: () => ({}),
+      get_media_extras_capabilities: () => ({ ffmpeg_available: true, embed_disabled_reason: null }),
+      probe_url: () => new Promise((_, reject) => (fail = reject)),
+      cancel_probe: () => true,
+      clear_pending_probe: () => undefined,
+    });
+    render(<ProbeModal {...props()} />);
+    await waitFor(() => expect(ipc.callsTo("probe_url")).toHaveLength(1));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Cancel" }));
+    expect(ipc.callsTo("clear_pending_probe")).toHaveLength(0);
+    fail("cancelled");
+    await waitFor(() => expect(ipc.callsTo("clear_pending_probe")).toHaveLength(1));
+  });
+
+  it("clears the pending result at once when the probe already finished", async () => {
+    const ipc = baseIpc(probeResult(items));
+    const p = props();
+    render(<ProbeModal {...p} />);
+    await screen.findByTestId("probe-row-yt-a");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Cancel" }));
+    expect(ipc.callsTo("cancel_probe")).toHaveLength(0);
+    await waitFor(() => expect(ipc.callsTo("clear_pending_probe")).toHaveLength(1));
+    expect(p.onClose).toHaveBeenCalled();
   });
 });

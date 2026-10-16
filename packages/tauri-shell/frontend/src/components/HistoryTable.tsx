@@ -125,7 +125,9 @@ export function HistoryTable({ refreshKey, onRedownload }: HistoryTableProps) {
                 <TableHeader className="ph-history__col ph-history__col--title">{t("queue.col.title")}</TableHeader>
                 <TableHeader className="ph-history__col ph-history__col--status">{t("queue.col.status")}</TableHeader>
                 <TableHeader className="ph-history__col ph-history__col--when">{t("history.col.when")}</TableHeader>
-                <TableHeader className="ph-history__col ph-history__col--actions" />
+                <TableHeader className="ph-history__col ph-history__col--actions">
+                  <span className="cds--visually-hidden">{t("queue.col.actions")}</span>
+                </TableHeader>
               </TableRow>
             </TableHead>
             <TableBody>

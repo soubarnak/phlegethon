@@ -44,6 +44,7 @@ import {
   totalSelectedBytes,
   type QualityByItem,
 } from "@/lib/probeSelection";
+import { useReturnFocus } from "@/state/useReturnFocus";
 import { FolderPicker } from "./FolderPicker";
 
 interface ProbeModalProps {
@@ -114,6 +115,9 @@ export function ProbeModal({
   const itemsRef = useRef<MediaItem[]>([]);
   itemsRef.current = items;
   const previewSeq = useRef(0);
+  // The in-flight `probe_url` call, so closing can wait for it to settle (M-62).
+  const probeInFlight = useRef<Promise<unknown> | null>(null);
+  useReturnFocus(url != null);
 
   // ---- run the probe when a URL is given
   useEffect(() => {
@@ -136,7 +140,9 @@ export function ProbeModal({
       setExtras(defaults);
       setCaps(capabilities);
       try {
-        const result = await api.probeUrl(url);
+        const probing = api.probeUrl(url);
+        probeInFlight.current = probing;
+        const result = await probing;
         if (cancelled) return;
         // Pre-pick a quality per item using the Default Quality Policy.
         const picks = await Promise.all(
@@ -193,8 +199,13 @@ export function ProbeModal({
     // Closing mid-confirm would drop the sheet while its jobs are still being created (M-63).
     if (confirming) return;
     if (url) {
+      const clear = () => void api.clearPendingProbe(url).catch(() => undefined);
+      const inFlight = phase.kind === "probing" ? probeInFlight.current : null;
       if (phase.kind === "probing") void api.cancelProbe(url).catch(() => undefined);
-      void api.clearPendingProbe(url).catch(() => undefined);
+      // Core stores a probe result when the probe settles, even a cancelled one. Clearing
+      // before that leaves a pending probe that blocks the URL until restart (M-62).
+      if (inFlight) void inFlight.then(clear, clear);
+      else clear();
     }
     onClose();
   }, [url, phase.kind, confirming, onClose]);
@@ -339,6 +350,7 @@ export function ProbeModal({
               {qualityOptions.length > 1 && (
                 <Dropdown
                   id="probe-apply-quality"
+                  autoAlign
                   size="sm"
                   titleText={t("probe.applyQualityAll")}
                   hideLabel
@@ -412,6 +424,7 @@ export function ProbeModal({
                           ) : (
                             <Dropdown
                               id={`probe-quality-${item.id}`}
+                              autoAlign
                               size="sm"
                               hideLabel
                               titleText={t("probe.qualityFor", { title: item.title })}

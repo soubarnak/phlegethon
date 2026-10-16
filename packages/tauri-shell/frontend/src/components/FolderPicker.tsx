@@ -1,8 +1,11 @@
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Button, Modal, TextInput } from "@carbon/react";
 import { FolderAdd } from "@carbon/icons-react";
 import { pickFolder } from "@/tauri/platform";
 import { t } from "@/lib/i18n";
+import { submitOnEnter } from "@/lib/submitOnEnter";
+import { useReturnFocus } from "@/state/useReturnFocus";
 
 interface FolderPickerProps {
   /** Button label (defaults to "Save to…"). */
@@ -40,6 +43,7 @@ export function FolderPicker({
 
   // Each chooser run gets a token; cancel and timeout bump it so a late reply is ignored (L-61).
   const pickToken = useRef(0);
+  useReturnFocus(manualOpen);
 
   const abandon = () => {
     pickToken.current += 1;
@@ -79,6 +83,11 @@ export function FolderPicker({
   };
 
   const manualValid = manualPath.trim().startsWith("/");
+  const acceptManualPath = () => {
+    if (!manualValid) return;
+    onPicked(manualPath.trim());
+    setManualOpen(false);
+  };
 
   return (
     <>
@@ -108,33 +117,35 @@ export function FolderPicker({
       >
         {t("folder.manual.open")}
       </Button>
-      {manualOpen && (
-      <Modal
-        open
-        modalHeading={t("folder.manual.title")}
-        primaryButtonText={t("folder.manual.use")}
-        secondaryButtonText={t("discard.cancel")}
-        primaryButtonDisabled={!manualValid}
-        onRequestClose={() => setManualOpen(false)}
-        onRequestSubmit={() => {
-          if (!manualValid) return;
-          onPicked(manualPath.trim());
-          setManualOpen(false);
-        }}
-        size="sm"
-      >
-        <TextInput
-          id="manual-folder-path"
-          labelText={t("folder.manual.label")}
-          helperText={noChooser ? t("folder.manual.noChooser") : t("folder.manual.hint")}
-          placeholder="/home/you/Videos"
-          value={manualPath}
-          invalid={manualPath.length > 0 && !manualValid}
-          invalidText={t("folder.manual.invalid")}
-          onChange={(e) => setManualPath(e.target.value)}
-        />
-      </Modal>
-      )}
+      {manualOpen &&
+        // Portaled to <body>: inside the probe sheet the open modal's transform makes it the containing
+        // block for `position: fixed`, so the dialog and its backdrop were sized to the sheet (UI-8).
+        createPortal(
+          <Modal
+            open
+            modalHeading={t("folder.manual.title")}
+            primaryButtonText={t("folder.manual.use")}
+            secondaryButtonText={t("discard.cancel")}
+            primaryButtonDisabled={!manualValid}
+            onRequestClose={() => setManualOpen(false)}
+            onRequestSubmit={acceptManualPath}
+            size="sm"
+          >
+            <TextInput
+              id="manual-folder-path"
+              data-modal-primary-focus
+              labelText={t("folder.manual.label")}
+              helperText={noChooser ? t("folder.manual.noChooser") : t("folder.manual.hint")}
+              placeholder="/home/you/Videos"
+              value={manualPath}
+              invalid={manualPath.length > 0 && !manualValid}
+              invalidText={t("folder.manual.invalid")}
+              onKeyDown={(e) => submitOnEnter(e, acceptManualPath)}
+              onChange={(e) => setManualPath(e.target.value)}
+            />
+          </Modal>,
+          document.body,
+        )}
     </>
   );
 }

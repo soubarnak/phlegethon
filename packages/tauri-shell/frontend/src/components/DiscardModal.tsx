@@ -1,5 +1,6 @@
 import { Modal } from "@carbon/react";
 import type { DiscardConfirmCopy } from "@/lib/discardConfirm";
+import { useReturnFocus } from "@/state/useReturnFocus";
 
 interface DiscardModalProps {
   copy: DiscardConfirmCopy | null;
@@ -9,6 +10,7 @@ interface DiscardModalProps {
 
 /** Always-confirm Discard. Danger styling when files will be deleted. */
 export function DiscardModal({ copy, onConfirm, onCancel }: DiscardModalProps) {
+  useReturnFocus(copy != null);
   if (!copy) return null;
   return (
     <Modal
