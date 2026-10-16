@@ -312,7 +312,9 @@ mod tests {
         fn file_size(&self, url: &str) -> Result<u64, String> {
             Ok(self.bodies.get(url).map(|b| b.len() as u64).unwrap_or(0))
         }
-        fn apply_proxy_settings(&self, _proxy: &ProxySettings) {}
+        fn apply_proxy_settings(&self, _proxy: &ProxySettings) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn glibc_x86() -> PlatformInfo {

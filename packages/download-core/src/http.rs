@@ -1,6 +1,6 @@
 //! HTTP backend trait — primary test seam for the Core.
 
-use crate::proxy_settings::ProxySettings;
+use crate::proxy_settings::{NoProxy, ProxySettings};
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::sync::RwLock;
@@ -161,8 +161,12 @@ pub trait HttpBackend: Send + Sync {
 
     /// Apply global proxy settings to this backend when supported.
     ///
-    /// Test fakes ignore this; production HTTP honors proxy changes.
-    fn apply_proxy_settings(&self, _proxy: &ProxySettings) {}
+    /// Test fakes ignore this; production HTTP honors proxy changes. An error means the
+    /// settings cannot be used; the production backend then refuses requests rather
+    /// than bypassing the proxy.
+    fn apply_proxy_settings(&self, _proxy: &ProxySettings) -> Result<(), String> {
+        Ok(())
+    }
 
     /// HEAD metadata used by the page sniffer to tell files from pages.
     ///
@@ -205,49 +209,81 @@ const PAGE_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.3
 /// - `supports_range`: sends HEAD and inspects `Accept-Ranges`.
 /// - `file_size`: sends HEAD and reads `Content-Length`.
 pub struct ProdHttpBackend {
-    client: RwLock<ureq::Agent>,
+    routing: RwLock<Result<Routing, String>>,
 }
 
-fn build_ureq_agent(proxy: &ProxySettings) -> Result<ureq::Agent, String> {
-    let mut builder = ureq::AgentBuilder::new()
+/// The agents a backend chooses between, and the settings they were built from.
+struct Routing {
+    settings: ProxySettings,
+    /// Used for every host when a proxy is configured, otherwise for hosts that
+    /// are not listed in `NO_PROXY` (it then follows the environment proxy).
+    proxied: ureq::Agent,
+    /// Never uses a proxy.
+    direct: ureq::Agent,
+    /// Hosts that bypass the environment proxy. Not consulted when a proxy is configured.
+    no_proxy: NoProxy,
+}
+
+impl Routing {
+    fn agent_for(&self, url: &str) -> ureq::Agent {
+        if !self.settings.is_configured() && self.no_proxy.matches_url(url) {
+            self.direct.clone()
+        } else {
+            self.proxied.clone()
+        }
+    }
+}
+
+fn base_agent_builder() -> ureq::AgentBuilder {
+    ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout_read(std::time::Duration::from_secs(30));
-    if let Some(url) = proxy
-        .url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let proxy_cfg = ureq::Proxy::new(url).map_err(|e| format!("proxy {url}: {e}"))?;
-        builder = builder.proxy(proxy_cfg);
-    } else {
+        .timeout_read(std::time::Duration::from_secs(30))
+}
+
+fn build_routing(proxy: &ProxySettings) -> Result<Routing, String> {
+    let proxy = proxy.normalized();
+    proxy.validate()?;
+    let proxied = match proxy.url.as_deref() {
+        Some(url) => {
+            let proxy_cfg = ureq::Proxy::new(url).map_err(|e| format!("proxy {url}: {e}"))?;
+            base_agent_builder().proxy(proxy_cfg).build()
+        }
         // No proxy configured in the app: honour HTTPS_PROXY / HTTP_PROXY / ALL_PROXY like
         // yt-dlp, curl and browsers do. Without this, plain downloads and the page sniffer
         // fail on machines that only reach the internet through an environment proxy.
-        builder = builder.try_proxy_from_env(true);
-    }
-    Ok(builder.build())
+        None => base_agent_builder().try_proxy_from_env(true).build(),
+    };
+    Ok(Routing {
+        settings: proxy,
+        proxied,
+        direct: base_agent_builder().build(),
+        no_proxy: NoProxy::from_env(),
+    })
 }
 
 impl ProdHttpBackend {
     pub fn new() -> Self {
-        Self::with_proxy(&ProxySettings::default())
-    }
-
-    pub fn with_proxy(proxy: &ProxySettings) -> Self {
         Self {
-            client: RwLock::new(build_ureq_agent(proxy).unwrap_or_else(|_| {
-                ureq::AgentBuilder::new()
-                    .try_proxy_from_env(true)
-                    .timeout_connect(std::time::Duration::from_secs(10))
-                    .timeout_read(std::time::Duration::from_secs(30))
-                    .build()
-            })),
+            routing: RwLock::new(build_routing(&ProxySettings::default())),
         }
     }
 
-    fn client(&self) -> std::sync::RwLockReadGuard<'_, ureq::Agent> {
-        self.client.read().unwrap_or_else(|e| e.into_inner())
+    /// Build a backend that uses `proxy`. Fails when the HTTP client cannot use it.
+    pub fn with_proxy(proxy: &ProxySettings) -> Result<Self, String> {
+        Ok(Self {
+            routing: RwLock::new(Ok(build_routing(proxy)?)),
+        })
+    }
+
+    /// Agent for a request to `url`: direct when `NO_PROXY` lists the host.
+    ///
+    /// Fails closed. After a rejected proxy setting every request errors instead of
+    /// going out direct or through an environment proxy.
+    fn client(&self, url: &str) -> Result<ureq::Agent, String> {
+        match &*self.routing.read().unwrap_or_else(|e| e.into_inner()) {
+            Ok(routing) => Ok(routing.agent_for(url)),
+            Err(e) => Err(format!("proxy settings rejected: {e}")),
+        }
     }
 }
 
@@ -258,10 +294,23 @@ impl Default for ProdHttpBackend {
 }
 
 impl HttpBackend for ProdHttpBackend {
-    fn apply_proxy_settings(&self, proxy: &ProxySettings) {
-        if let Ok(mut guard) = self.client.write() {
-            if let Ok(agent) = build_ureq_agent(proxy) {
-                *guard = agent;
+    fn apply_proxy_settings(&self, proxy: &ProxySettings) -> Result<(), String> {
+        let mut guard = self.routing.write().unwrap_or_else(|e| e.into_inner());
+        if let Ok(current) = &*guard {
+            if current.settings == proxy.normalized() {
+                // Keep the connection pool when nothing changed (the page sniffer
+                // applies the settings on every call).
+                return Ok(());
+            }
+        }
+        match build_routing(proxy) {
+            Ok(routing) => {
+                *guard = Ok(routing);
+                Ok(())
+            }
+            Err(e) => {
+                *guard = Err(e.clone());
+                Err(e)
             }
         }
     }
@@ -282,7 +331,7 @@ impl HttpBackend for ProdHttpBackend {
         if_range: Option<&str>,
         sink: &mut dyn Write,
     ) -> Result<FetchResult, String> {
-        let mut req = self.client().get(url);
+        let mut req = self.client(url)?.get(url);
         if let Some(r) = &range {
             req = req.set("Range", &range_header_value(r));
             if let Some(validator) = if_range {
@@ -348,7 +397,7 @@ impl HttpBackend for ProdHttpBackend {
 
     fn supports_range(&self, url: &str) -> Result<bool, String> {
         let resp = self
-            .client()
+            .client(url)?
             .head(url)
             .call()
             .map_err(|e| format!("HEAD {url}: {e}"))?;
@@ -361,7 +410,7 @@ impl HttpBackend for ProdHttpBackend {
 
     fn file_size(&self, url: &str) -> Result<u64, String> {
         let resp = self
-            .client()
+            .client(url)?
             .head(url)
             .call()
             .map_err(|e| format!("HEAD {url}: {e}"))?;
@@ -372,7 +421,7 @@ impl HttpBackend for ProdHttpBackend {
     }
 
     fn head_info(&self, url: &str) -> Result<HeadInfo, String> {
-        let client = self.client();
+        let client = self.client(url)?;
         let head = client.head(url).set("User-Agent", PAGE_USER_AGENT).call();
         let resp = match head {
             Ok(resp) => resp,
@@ -410,7 +459,7 @@ impl HttpBackend for ProdHttpBackend {
         max_bytes: u64,
     ) -> Result<(Vec<u8>, Option<String>, String), String> {
         let resp = self
-            .client()
+            .client(url)?
             .get(url)
             .set("User-Agent", PAGE_USER_AGENT)
             .set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
@@ -560,5 +609,104 @@ mod tests {
         assert_eq!(sink, b"0123456789");
         assert_eq!(result.bytes_written, 10);
         assert_eq!(result.total_length, 10);
+    }
+
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn settings(url: &str) -> ProxySettings {
+        ProxySettings {
+            url: Some(url.to_string()),
+        }
+    }
+
+    /// Accepts connections, counts them, answers 200 with a one-byte body.
+    fn counting_server() -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut stream = stream;
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+                );
+            }
+        });
+        (format!("127.0.0.1:{}", addr.port()), hits)
+    }
+
+    #[test]
+    fn with_proxy_rejects_schemes_ureq_cannot_use() {
+        // H-16: these used to be swallowed and replaced by an environment-proxy agent.
+        for url in ["https://corp-proxy:8443", "socks5h://proxy:1080"] {
+            let err = ProdHttpBackend::with_proxy(&settings(url)).err().unwrap();
+            assert!(err.contains("scheme"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejected_proxy_settings_fail_closed() {
+        let (origin, origin_hits) = counting_server();
+        let backend = ProdHttpBackend::new();
+        let err = backend
+            .apply_proxy_settings(&settings("https://corp-proxy:8443"))
+            .unwrap_err();
+        assert!(err.contains("scheme"), "got: {err}");
+        let err = backend
+            .supports_range(&format!("http://{origin}/f"))
+            .unwrap_err();
+        assert!(err.contains("proxy settings rejected"), "got: {err}");
+        assert_eq!(
+            origin_hits.load(Ordering::SeqCst),
+            0,
+            "request went out direct"
+        );
+
+        backend
+            .apply_proxy_settings(&ProxySettings::default())
+            .unwrap();
+        backend.file_size(&format!("http://{origin}/f")).unwrap();
+    }
+
+    #[test]
+    fn configured_proxy_receives_the_request() {
+        let (proxy, proxy_hits) = counting_server();
+        let backend = ProdHttpBackend::with_proxy(&settings(&format!("http://{proxy}"))).unwrap();
+        backend.file_size("http://origin.invalid/f").unwrap();
+        assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn no_proxy_host_uses_direct_agent() {
+        let (proxy, proxy_hits) = counting_server();
+        let (origin, origin_hits) = counting_server();
+        let proxied = base_agent_builder()
+            .proxy(ureq::Proxy::new(format!("http://{proxy}")).unwrap())
+            .build();
+        let routing = Routing {
+            settings: ProxySettings::default(),
+            proxied,
+            direct: base_agent_builder().build(),
+            no_proxy: NoProxy::parse("127.0.0.1"),
+        };
+        let backend = ProdHttpBackend {
+            routing: RwLock::new(Ok(routing)),
+        };
+        backend.file_size(&format!("http://{origin}/f")).unwrap();
+        assert_eq!(origin_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            proxy_hits.load(Ordering::SeqCst),
+            0,
+            "NO_PROXY host used the proxy"
+        );
+
+        backend.file_size("http://other.invalid/f").unwrap();
+        assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
     }
 }

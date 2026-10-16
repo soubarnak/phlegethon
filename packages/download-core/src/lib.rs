@@ -1151,7 +1151,12 @@ impl Core {
         self.default_media_extras = media_settings.defaults;
         self.cookie_channel = storage::load_cookie_channel(&root)?;
         self.proxy_settings = storage::load_proxy_settings(&root)?;
-        self.http.apply_proxy_settings(&self.proxy_settings);
+        // A persisted setting the HTTP client rejects (for example an `https://` proxy saved
+        // by an older release) must not stop the library from opening; the backend refuses
+        // requests until the user fixes the setting.
+        if let Err(e) = self.http.apply_proxy_settings(&self.proxy_settings) {
+            eprintln!("saved proxy setting rejected: {e}");
+        }
         self.sidecar_update_settings = storage::load_sidecar_update_settings(&root)?;
         self.filename_template = storage::load_filename_template(&root)?;
         self.probe_tier_settings = storage::load_probe_tier_settings(&root)?;
@@ -1875,8 +1880,8 @@ impl Core {
     pub fn set_proxy_settings(&mut self, settings: ProxySettings) -> Result<(), String> {
         let settings = settings.normalized();
         settings.validate()?;
-        self.proxy_settings = settings.clone();
-        self.http.apply_proxy_settings(&settings);
+        self.http.apply_proxy_settings(&settings)?;
+        self.proxy_settings = settings;
         self.persist_queue_now()
     }
 
