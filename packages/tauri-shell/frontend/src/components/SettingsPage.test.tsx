@@ -19,7 +19,7 @@ function setup(overrides: Record<string, CommandHandler> = {}) {
     get_proxy_settings: () => ({ url: null }),
     get_global_bandwidth_cap: () => null,
     get_probe_tier_settings: () => ({ allow_generic: true, allow_page_sniff: true, allow_direct_fallback: true, probe_timeout_secs: 45 }),
-    get_sidecar_update_settings: () => ({ check_on_launch: false, toolchain_pin: null, plugin_pin: null }),
+    get_sidecar_update_settings: () => ({ check_on_launch: false, channel: "stable", toolchain_pin: null, plugin_pin: null }),
     get_toolchain_status: () => toolchainStatus(),
     preview_filename_template: () => "Example Video Title [dQw4w9WgXcQ].mp4",
     set_library_root: (a) => a.path,
@@ -138,7 +138,7 @@ describe("SettingsPage: no dead buttons", () => {
       get_cookie_channel: () => ({ cookies_from_browser: null, cookie_file: null }), get_proxy_settings: () => ({ url: null }),
       get_global_bandwidth_cap: () => null,
       get_probe_tier_settings: () => ({ allow_generic: true, allow_page_sniff: true, allow_direct_fallback: true, probe_timeout_secs: 45 }),
-      get_sidecar_update_settings: () => ({ check_on_launch: false, toolchain_pin: null, plugin_pin: null }),
+      get_sidecar_update_settings: () => ({ check_on_launch: false, channel: "stable", toolchain_pin: null, plugin_pin: null }),
       preview_filename_template: () => "x",
       get_toolchain_status: () => toolchainStatus({ ytdlp: null, ytdlp_source: null, js_runtime: null, issues: ["yt-dlp was not found. Install the `yt-dlp` package."] }),
     });
@@ -162,7 +162,7 @@ describe("SettingsPage: no dead buttons", () => {
       get_cookie_channel: () => ({ cookies_from_browser: null, cookie_file: null }), get_proxy_settings: () => ({ url: null }),
       get_global_bandwidth_cap: () => null,
       get_probe_tier_settings: () => ({ allow_generic: true, allow_page_sniff: true, allow_direct_fallback: true, probe_timeout_secs: 45 }),
-      get_sidecar_update_settings: () => ({ check_on_launch: false, toolchain_pin: null, plugin_pin: null }),
+      get_sidecar_update_settings: () => ({ check_on_launch: false, channel: "stable", toolchain_pin: null, plugin_pin: null }),
       preview_filename_template: () => "x",
       get_toolchain_status: () => toolchainStatus({ impersonation_available: available }),
     });

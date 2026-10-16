@@ -25,8 +25,8 @@
 use crate::fsutil::is_single_component;
 use crate::http::HttpBackend;
 use crate::sidecar_updates::{
-    CatalogVersionEntry, FileSidecarUpdateSource, SidecarComponent, SidecarUpdateSource,
-    UpdateCatalog,
+    CatalogVersionEntry, FileSidecarUpdateSource, SidecarChannel, SidecarComponent,
+    SidecarUpdateSettings, SidecarUpdateSource, UpdateCatalog,
 };
 use crate::toolchain_discovery::{find_in_path, path_dirs_from_env, Libc, PlatformInfo};
 use sha2::{Digest, Sha256};
@@ -214,8 +214,16 @@ fn is_transient(err: &str) -> bool {
 }
 
 struct LookupCache {
+    /// Repository and pinned tag the cached entries answer for.
+    key: Option<(String, Option<String>)>,
     ok: Option<(Instant, UpdateCatalog)>,
     failed: Option<(Instant, String)>,
+}
+
+/// What the next lookup asks GitHub for.
+struct Selection {
+    channel: SidecarChannel,
+    pin: Option<String>,
 }
 
 /// yt-dlp releases on GitHub (toolchain) + local catalog (plugins).
@@ -226,6 +234,7 @@ pub struct GitHubReleaseUpdateSource {
     python_available: bool,
     retry_delay: Duration,
     cache: Mutex<LookupCache>,
+    selection: Mutex<Selection>,
     plugins: FileSidecarUpdateSource,
 }
 
@@ -241,7 +250,12 @@ impl GitHubReleaseUpdateSource {
             platform,
             python_available: find_in_path("python3", &path_dirs_from_env()).is_some(),
             retry_delay: Duration::from_secs(1),
+            selection: Mutex::new(Selection {
+                channel: SidecarChannel::Stable,
+                pin: None,
+            }),
             cache: Mutex::new(LookupCache {
+                key: None,
                 ok: None,
                 failed: None,
             }),
@@ -266,8 +280,29 @@ impl GitHubReleaseUpdateSource {
         select_asset(&self.platform)
     }
 
-    fn latest_url(&self) -> String {
-        format!("https://api.github.com/repos/{}/releases/latest", self.repo)
+    /// Repository and optional pinned tag the next lookup targets.
+    fn target(&self) -> (String, Option<String>) {
+        let selection = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = match selection.channel {
+            SidecarChannel::Stable => self.repo.clone(),
+            SidecarChannel::Nightly => NIGHTLY_REPO.to_string(),
+        };
+        (repo, selection.pin.clone())
+    }
+
+    /// A pin names one release (M-31); otherwise ask for the latest.
+    fn release_url(repo: &str, pin: Option<&str>) -> Result<String, String> {
+        match pin {
+            None => Ok(format!(
+                "https://api.github.com/repos/{repo}/releases/latest"
+            )),
+            Some(tag) if is_single_component(tag) => Ok(format!(
+                "https://api.github.com/repos/{repo}/releases/tags/{tag}"
+            )),
+            Some(tag) => Err(format!(
+                "pinned version {tag:?} is not a usable version name"
+            )),
+        }
     }
 
     /// GET with one retry for errors that are not a 4xx answer.
@@ -280,9 +315,10 @@ impl GitHubReleaseUpdateSource {
         result.map(|(body, _, _)| body)
     }
 
-    fn lookup_release(&self) -> Result<UpdateCatalog, String> {
+    fn lookup_release(&self, repo: &str, pin: Option<&str>) -> Result<UpdateCatalog, String> {
+        let url = Self::release_url(repo, pin)?;
         let body = self
-            .fetch_metadata(&self.latest_url())
+            .fetch_metadata(&url)
             .map_err(|e| describe_lookup_error(&e))?;
         let json = String::from_utf8_lossy(&body);
         let release: ReleaseJson =
@@ -309,7 +345,16 @@ impl GitHubReleaseUpdateSource {
     }
 
     fn fetch_toolchain_catalog(&self) -> Result<UpdateCatalog, String> {
-        if let Ok(guard) = self.cache.lock() {
+        let key = self.target();
+        if let Ok(mut guard) = self.cache.lock() {
+            // Another channel or pin makes the cached answer irrelevant.
+            if guard.key.as_ref() != Some(&key) {
+                *guard = LookupCache {
+                    key: Some(key.clone()),
+                    ok: None,
+                    failed: None,
+                };
+            }
             if let Some((at, catalog)) = guard.ok.as_ref() {
                 if at.elapsed() < CATALOG_CACHE_TTL {
                     return Ok(catalog.clone());
@@ -321,8 +366,11 @@ impl GitHubReleaseUpdateSource {
                 }
             }
         }
-        let outcome = self.lookup_release();
+        let outcome = self.lookup_release(&key.0, key.1.as_deref());
         if let Ok(mut guard) = self.cache.lock() {
+            if guard.key.as_ref() != Some(&key) {
+                return outcome;
+            }
             match &outcome {
                 Ok(catalog) => {
                     guard.ok = Some((Instant::now(), catalog.clone()));
@@ -358,6 +406,12 @@ impl SidecarUpdateSource for GitHubReleaseUpdateSource {
             }
         }
         Ok(catalog)
+    }
+
+    fn configure(&self, settings: &SidecarUpdateSettings) {
+        let mut selection = self.selection.lock().unwrap_or_else(|e| e.into_inner());
+        selection.channel = settings.channel;
+        selection.pin = settings.toolchain_pin.clone();
     }
 
     fn invalidate_cache(&self) {
@@ -658,6 +712,86 @@ mod tests {
         src.invalidate_cache();
         src.load_catalog(tmp.path()).unwrap();
         assert_eq!(http.count(LATEST_URL), 2);
+    }
+
+    #[test]
+    fn a_pin_is_resolved_from_its_own_release() {
+        // M-31: only the latest tag was ever in the catalog, so older pins could not install.
+        let tmp = tempfile::tempdir().unwrap();
+        let http = http_with(b"old build", None);
+        http.set_body(
+            "https://api.github.com/repos/yt-dlp/yt-dlp/releases/tags/2026.01.01",
+            release_json_for("2026.01.01", "yt-dlp_linux").as_bytes(),
+        );
+        let src = source_over(&http);
+        src.configure(&SidecarUpdateSettings {
+            toolchain_pin: Some("2026.01.01".to_string()),
+            ..Default::default()
+        });
+        let catalog = src.load_catalog(tmp.path()).unwrap();
+        assert_eq!(catalog.toolchain_latest.as_deref(), Some("2026.01.01"));
+        assert!(catalog.toolchain_versions.contains_key("2026.01.01"));
+        assert_eq!(http.count(LATEST_URL), 0);
+    }
+
+    #[test]
+    fn a_hostile_pin_never_reaches_the_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let http = http_with(b"x", None);
+        let src = source_over(&http);
+        src.configure(&SidecarUpdateSettings {
+            toolchain_pin: Some("../../orgs/evil".to_string()),
+            ..Default::default()
+        });
+        let catalog = src.load_catalog(tmp.path()).unwrap();
+        assert!(catalog.toolchain_error.unwrap().contains("not a usable"));
+        assert!(http.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_nightly_channel_reads_the_nightly_repository() {
+        // M-42: the channel was defined (`NIGHTLY_REPO`) but nothing ever selected it.
+        let tmp = tempfile::tempdir().unwrap();
+        let http = http_with(b"nightly build", None);
+        let nightly_url = format!("https://api.github.com/repos/{NIGHTLY_REPO}/releases/latest");
+        http.set_body(
+            &nightly_url,
+            release_json_for("2026.10.15.232501", "yt-dlp_linux").as_bytes(),
+        );
+        let src = source_over(&http);
+        src.configure(&SidecarUpdateSettings {
+            channel: SidecarChannel::Nightly,
+            ..Default::default()
+        });
+        let catalog = src.load_catalog(tmp.path()).unwrap();
+        assert_eq!(
+            catalog.toolchain_latest.as_deref(),
+            Some("2026.10.15.232501")
+        );
+        assert_eq!(http.count(LATEST_URL), 0);
+    }
+
+    #[test]
+    fn switching_channel_does_not_serve_the_other_channels_cached_lookup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let http = http_with(b"build", None);
+        let nightly_url = format!("https://api.github.com/repos/{NIGHTLY_REPO}/releases/latest");
+        http.set_body(
+            &nightly_url,
+            release_json_for("2026.10.15.232501", "yt-dlp_linux").as_bytes(),
+        );
+        let src = source_over(&http);
+        let stable = src.load_catalog(tmp.path()).unwrap();
+        assert_eq!(stable.toolchain_latest.as_deref(), Some("2026.10.01"));
+        src.configure(&SidecarUpdateSettings {
+            channel: SidecarChannel::Nightly,
+            ..Default::default()
+        });
+        let nightly = src.load_catalog(tmp.path()).unwrap();
+        assert_eq!(
+            nightly.toolchain_latest.as_deref(),
+            Some("2026.10.15.232501")
+        );
     }
 
     #[test]

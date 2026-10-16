@@ -11,7 +11,6 @@ use crate::job::{Job, JobState};
 use crate::media_extras::MediaExtrasOptions;
 use crate::proxy_settings::ProxySettings;
 use crate::quality_policy::DefaultQualityPolicy;
-use crate::sidecar_updates::SidecarUpdateSettings;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,10 +67,6 @@ fn default_proxy_settings() -> ProxySettings {
     ProxySettings::default()
 }
 
-fn default_sidecar_update_settings() -> SidecarUpdateSettings {
-    SidecarUpdateSettings::default()
-}
-
 /// On-disk representation of the job queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedQueue {
@@ -89,8 +84,6 @@ pub struct PersistedQueue {
     pub cookie_channel: CookieChannel,
     #[serde(default = "default_proxy_settings")]
     pub proxy_settings: ProxySettings,
-    #[serde(default = "default_sidecar_update_settings")]
-    pub sidecar_update_settings: SidecarUpdateSettings,
     #[serde(default = "default_filename_template")]
     pub filename_template: String,
     #[serde(default)]
@@ -244,7 +237,6 @@ pub struct LoadedQueue {
     pub media_extras: MediaExtrasSettings,
     pub cookie_channel: CookieChannel,
     pub proxy_settings: ProxySettings,
-    pub sidecar_update_settings: SidecarUpdateSettings,
     pub filename_template: String,
     pub probe_tier_settings: ProbeTierSettings,
     /// Human-readable notes about anything skipped, reset or moved aside.
@@ -266,7 +258,6 @@ impl LoadedQueue {
             },
             cookie_channel: CookieChannel::default(),
             proxy_settings: ProxySettings::default(),
-            sidecar_update_settings: SidecarUpdateSettings::default(),
             filename_template: DEFAULT_FILENAME_TEMPLATE.to_string(),
             probe_tier_settings: ProbeTierSettings::default(),
             warnings: Vec::new(),
@@ -335,7 +326,6 @@ pub fn load_queue(library_root: &Path) -> Result<LoadedQueue, String> {
         }
     };
     loaded.proxy_settings = queue.proxy_settings.normalized();
-    loaded.sidecar_update_settings = queue.sidecar_update_settings;
     loaded.filename_template =
         match crate::filename_template::validate_filename_template(&queue.filename_template) {
             Ok(()) => queue.filename_template.trim().to_string(),
@@ -504,7 +494,6 @@ pub fn build_queue(
     default_media_extras: &MediaExtrasOptions,
     cookie_channel: &CookieChannel,
     proxy_settings: &ProxySettings,
-    sidecar_update_settings: &SidecarUpdateSettings,
     filename_template: &str,
     probe_tier_settings: &ProbeTierSettings,
 ) -> PersistedQueue {
@@ -517,7 +506,6 @@ pub fn build_queue(
         default_media_extras: *default_media_extras,
         cookie_channel: cookie_channel.clone(),
         proxy_settings: proxy_settings.clone(),
-        sidecar_update_settings: sidecar_update_settings.clone(),
         filename_template: filename_template.to_string(),
         probe_tier_settings: *probe_tier_settings,
         jobs: jobs.iter().map(Job::to_persisted).collect(),
@@ -704,7 +692,6 @@ mod tests {
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
             &ProxySettings::default(),
-            &SidecarUpdateSettings::default(),
             DEFAULT_FILENAME_TEMPLATE,
             &ProbeTierSettings::default(),
         );
@@ -797,7 +784,6 @@ mod tests {
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
             &ProxySettings::default(),
-            &SidecarUpdateSettings::default(),
             DEFAULT_FILENAME_TEMPLATE,
             &ProbeTierSettings::default(),
         );

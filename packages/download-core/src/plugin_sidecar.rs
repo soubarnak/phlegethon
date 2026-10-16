@@ -423,6 +423,9 @@ pub enum BundledInstall {
     UpToDate,
     /// A newer package (from an out-of-band update) is installed and was left alone.
     KeptNewer { installed: String },
+    /// The user pinned (or rolled back to) the installed version, which may be older
+    /// than the bundled one; it was left alone (M-33).
+    KeptPinned { installed: String },
 }
 
 /// Manifest of the plugin package embedded in this build.
@@ -449,31 +452,59 @@ fn bundled_digest() -> String {
         .collect()
 }
 
-/// `a.b.c` comparison on the numeric components; non-numeric parts count as 0.
+/// Whether `candidate` is a newer version than `installed`.
+///
+/// Compares the dot-separated numeric components, padding the shorter with
+/// zeros, so `2026.10.01.1` is newer than `2026.10.01` and `0.10.0` newer than
+/// `0.9.0`. A pre-release (`-rc1`) sorts below its release, and build metadata
+/// (`+...`) is ignored (L-30).
 pub fn version_is_newer(candidate: &str, installed: &str) -> bool {
-    fn parts(v: &str) -> Vec<u64> {
-        v.trim_start_matches('v')
-            .split(['.', '-', '+'])
-            .map(|p| p.parse().unwrap_or(0))
-            .collect()
+    fn split(v: &str) -> (Vec<u64>, Option<&str>) {
+        let v = v.trim().trim_start_matches('v');
+        let v = v.split('+').next().unwrap_or(v);
+        let (core, pre) = match v.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (v, None),
+        };
+        (
+            core.split('.').map(|p| p.parse().unwrap_or(0)).collect(),
+            pre,
+        )
     }
-    let (mut a, mut b) = (parts(candidate), parts(installed));
+    let ((mut a, pre_a), (mut b, pre_b)) = (split(candidate), split(installed));
     let len = a.len().max(b.len());
     a.resize(len, 0);
     b.resize(len, 0);
-    a > b
+    if a != b {
+        return a > b;
+    }
+    match (pre_a, pre_b) {
+        (None, Some(_)) => true,
+        (Some(_), None) | (None, None) => false,
+        (Some(x), Some(y)) => x > y,
+    }
 }
 
 /// Install the plugin package embedded in this build into `sidecar_root`, unless
 /// an equal or newer one is already there.
 ///
 /// Call once at startup, before the yt-dlp configuration is built. A package that
-/// was updated out of band to a higher version is never downgraded.
+/// was updated out of band to a higher version is never downgraded, and the
+/// version named by `plugin_pin` in the sidecar settings is never replaced.
 pub fn ensure_bundled_plugins(sidecar_root: &Path) -> Result<BundledInstall, String> {
     let _lock = lock_sidecar_root(sidecar_root)?;
     let bundled = bundled_manifest();
     if let Ok(installed) = load_manifest(sidecar_root) {
         if installed_package_is_intact(sidecar_root, &installed) {
+            let pinned = crate::sidecar_updates::load_sidecar_settings(sidecar_root)
+                .ok()
+                .flatten()
+                .and_then(|settings| settings.plugin_pin);
+            if pinned.as_deref() == Some(installed.version.as_str()) {
+                return Ok(BundledInstall::KeptPinned {
+                    installed: installed.version,
+                });
+            }
             if version_is_newer(&installed.version, &bundled.version) {
                 return Ok(BundledInstall::KeptNewer {
                     installed: installed.version,
@@ -659,6 +690,13 @@ mod tests {
         assert!(!version_is_newer("0.2.0", "0.2.0"));
         assert!(!version_is_newer("0.2.0", "0.2.1"));
         assert!(version_is_newer("v0.3.0", "0.2.9"));
+        // L-30: a pre-release is older than its release, and a revision is newer.
+        assert!(version_is_newer("0.3.0", "0.3.0-rc1"));
+        assert!(!version_is_newer("0.3.0-rc1", "0.3.0"));
+        assert!(version_is_newer("0.3.0-rc2", "0.3.0-rc1"));
+        assert!(version_is_newer("2026.10.01.1", "2026.10.01"));
+        assert!(!version_is_newer("2025.12.31", "2026.01.01"));
+        assert!(!version_is_newer("1.0.0+build7", "1.0.0"));
     }
 
     #[test]
@@ -764,6 +802,39 @@ mod tests {
             }
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "# out-of-band update");
+    }
+
+    #[test]
+    fn a_pinned_older_plugin_survives_the_next_launch() {
+        // M-33: a pin or rollback below the bundled version was overwritten at every start.
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_bundled_plugins(tmp.path()).unwrap();
+        let mut old = load_manifest(tmp.path()).unwrap();
+        old.version = "0.0.1".to_string();
+        write_manifest(tmp.path(), &old).unwrap();
+
+        // Without a pin the older package is replaced by the bundled one.
+        assert!(matches!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::Installed { .. }
+        ));
+        write_manifest(tmp.path(), &old).unwrap();
+
+        crate::sidecar_updates::save_sidecar_settings(
+            tmp.path(),
+            &crate::sidecar_updates::SidecarUpdateSettings {
+                plugin_pin: Some("0.0.1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::KeptPinned {
+                installed: "0.0.1".to_string()
+            }
+        );
+        assert_eq!(load_manifest(tmp.path()).unwrap().version, "0.0.1");
     }
 
     #[test]
