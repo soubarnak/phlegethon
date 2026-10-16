@@ -77,7 +77,7 @@ With Phlegethon desktop running:
 | --- | --- |
 | Toolbar icon | Send current tab URL |
 | Context menu → Send page/link to Phlegethon | Send URL |
-| Context menu → …(with cookies) | Send URL + write Netscape cookie file → Core `CookieChannel` |
+| Context menu → …(with cookies) | Send URL + a Netscape cookie file used by that download only (per-job cookie session) |
 
 Launch Sites still use **Probe-then-Confirm** — the companion never auto-confirms a probe sheet.
 
@@ -87,7 +87,7 @@ Launch Sites still use **Probe-then-Confirm** — the companion never auto-confi
 | --- | --- | --- |
 | Tauri shell | Background thread in `companion.rs` | `$XDG_RUNTIME_DIR/phlegethon/companion.sock` (see ADR 0005) |
 
-Both call the same Download Core enqueue path as paste/drop. Optional cookies are applied via `set_cookie_channel` before enqueue.
+Both call the same Download Core enqueue path as paste/drop. Optional cookies are attached to that one enqueue as a per-job cookie session. They never replace the cookie setting in Settings. The shell deletes the cookie file when the job Completes or is discarded, or when the probe sheet is dismissed.
 
 ## Troubleshooting
 
