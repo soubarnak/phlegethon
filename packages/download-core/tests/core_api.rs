@@ -7231,6 +7231,28 @@ impl HttpBackend for SlowRangeFakeHttp {
     }
 }
 
+/// Block until the job reports at least `bytes` downloaded.
+fn wait_for_progress(core: &Arc<Mutex<Core>>, job_id: &str, bytes: u64) {
+    let started = std::time::Instant::now();
+    loop {
+        let downloaded = core
+            .lock()
+            .unwrap()
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .map_or(0, |j| j.bytes_downloaded);
+        if downloaded >= bytes {
+            return;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "job never reached {bytes} bytes"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn wait_for_status(
     core: &Arc<Mutex<Core>>,
     job_id: &str,
@@ -7357,7 +7379,7 @@ fn segmented_pause_then_resume_produces_intact_file() {
     Core::dispatch_pending(core.clone()).unwrap();
 
     // Let the four segments write a little, then pause.
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    wait_for_progress(&core, &job_id, 40);
     signals
         .request_pause(&job_id)
         .expect("pause flag registered")
@@ -7367,8 +7389,8 @@ fn segmented_pause_then_resume_produces_intact_file() {
     let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
     let part_path = job_dir.join("seg-pause.bin.part");
     assert!(
-        !part_path.exists(),
-        "interrupted segmented partial has holes and must be dropped, not resumed"
+        part_path.exists(),
+        "a paused segmented transfer keeps its partial"
     );
     let paused_snap = core
         .lock()
@@ -7377,13 +7399,14 @@ fn segmented_pause_then_resume_produces_intact_file() {
         .into_iter()
         .find(|j| j.job_id == job_id)
         .unwrap();
-    assert_eq!(
-        paused_snap.bytes_downloaded, 0,
-        "no resumable bytes after segmented pause"
+    assert!(
+        paused_snap.bytes_downloaded > 0 && paused_snap.bytes_downloaded < 400,
+        "pause keeps the segments' progress, got {}",
+        paused_snap.bytes_downloaded
     );
     collect_events(&rx);
 
-    // Resume: the transfer restarts and must produce byte-identical output.
+    // Resume: the transfer continues and must produce byte-identical output.
     {
         let mut guard = core.lock().unwrap();
         guard.resume_job(&job_id).unwrap();
@@ -7938,6 +7961,9 @@ struct OriginState {
     etag: Option<String>,
 }
 
+type RangeScript =
+    Arc<Mutex<std::collections::HashMap<(String, u64), std::collections::VecDeque<Reply>>>>;
+
 type RecordedFetch = (String, Option<std::ops::Range<u64>>, Option<String>);
 
 /// Fake origin that records every fetch and answers from a per-URL script.
@@ -7946,6 +7972,9 @@ struct ScriptedHttp {
     origins: Arc<Mutex<std::collections::HashMap<String, OriginState>>>,
     script: Arc<Mutex<std::collections::HashMap<String, std::collections::VecDeque<Reply>>>>,
     requests: Arc<Mutex<Vec<RecordedFetch>>>,
+    /// Replies for ranged fetches that start at a given offset; consulted
+    /// before `script` so concurrent segment fetches stay deterministic.
+    range_script: RangeScript,
     default_reply: Reply,
     advertise_range: bool,
 }
@@ -7968,6 +7997,7 @@ impl ScriptedHttp {
             origins: Arc::new(Mutex::new(origins)),
             script: Arc::new(Mutex::new(std::collections::HashMap::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
+            range_script: Arc::new(Mutex::new(std::collections::HashMap::new())),
             default_reply: Reply::Honor,
             advertise_range: false,
         }
@@ -7978,6 +8008,15 @@ impl ScriptedHttp {
             .lock()
             .unwrap()
             .insert(url.to_string(), replies.iter().copied().collect());
+        self
+    }
+
+    /// Script the replies to ranged fetches of `url` that start at `start`.
+    fn then_at(self, url: &str, start: u64, replies: &[Reply]) -> Self {
+        self.range_script
+            .lock()
+            .unwrap()
+            .insert((url.to_string(), start), replies.iter().copied().collect());
         self
     }
 
@@ -8015,12 +8054,21 @@ impl HttpBackend for ScriptedHttp {
             range.clone(),
             if_range.map(str::to_string),
         ));
-        let reply = self
-            .script
-            .lock()
-            .unwrap()
-            .get_mut(url)
-            .and_then(|q| q.pop_front())
+        let by_range = range.as_ref().and_then(|r| {
+            self.range_script
+                .lock()
+                .unwrap()
+                .get_mut(&(url.to_string(), r.start))
+                .and_then(|q| q.pop_front())
+        });
+        let reply = by_range
+            .or_else(|| {
+                self.script
+                    .lock()
+                    .unwrap()
+                    .get_mut(url)
+                    .and_then(|q| q.pop_front())
+            })
             .unwrap_or(self.default_reply);
         let origins = self.origins.lock().unwrap();
         let origin = origins
@@ -8455,4 +8503,263 @@ fn pause_interrupts_a_transfer_that_is_waiting_for_tokens() {
         paused,
         "the throttled transfer should stop within about two seconds"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: Segmented Transfer progress is a persisted table (H-4, M-15)
+// ---------------------------------------------------------------------------
+
+/// A 64-byte object served in four 16-byte segments.
+fn segmented_origin(urls: &[&str], body: &[u8]) -> ScriptedHttp {
+    let entries: Vec<(&str, &[u8])> = urls.iter().map(|u| (*u, body)).collect();
+    let mut http = ScriptedHttp::new(&entries);
+    http.advertise_range = true;
+    http
+}
+
+fn run_until_finished(
+    core: &mut Core,
+    rx: &crossbeam_channel::Receiver<CoreEvent>,
+) -> Vec<CoreEvent> {
+    let mut all = Vec::new();
+    for _ in 0..8 {
+        all.extend(run_until_idle(core, rx));
+        if all.iter().any(|e| {
+            matches!(
+                e,
+                CoreEvent::JobCompleted { .. } | CoreEvent::JobFailed { .. }
+            )
+        }) {
+            break;
+        }
+    }
+    all
+}
+
+fn job_bytes(core: &Core, job_id: &str) -> u64 {
+    core.list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap()
+        .bytes_downloaded
+}
+
+#[test]
+fn segment_that_ends_early_fails_the_job_instead_of_leaving_a_hole() {
+    let body = object_body(7);
+    // The second segment (16..32) stops after five bytes with a clean EOF.
+    let http =
+        segmented_origin(&[SCRIPTED_URL], &body).then_at(SCRIPTED_URL, 16, &[Reply::Truncated(5)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "a short segment must fail the job, got {events:?}"
+    );
+    assert!(
+        !root.join("jobs").join(&job_id).join("object.bin").exists(),
+        "the object with a hole must not be published"
+    );
+}
+
+#[test]
+fn failover_after_a_failed_segment_fetches_only_the_unfinished_range() {
+    let body = object_body(8);
+    let mirror_a = "https://a.example.com/object.bin";
+    let mirror_b = "https://b.example.com/object.bin";
+    // Mirror A drops the second segment after five bytes.
+    let http = segmented_origin(&[mirror_a, mirror_b], &body).then_at(
+        mirror_a,
+        16,
+        &[Reply::ErrorAfter(5)],
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, mirror_a);
+    core.add_job_mirror(&job_id, mirror_b.to_string()).unwrap();
+
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete on the second mirror, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    let on_b: Vec<_> = http
+        .requests()
+        .into_iter()
+        .filter(|r| r.0 == mirror_b)
+        .collect();
+    assert_eq!(on_b.len(), 1, "finished segments are not fetched again");
+    assert_eq!(
+        on_b[0].1,
+        Some(21..32),
+        "only the missing tail is requested"
+    );
+    assert_eq!(
+        on_b[0].2.as_deref(),
+        Some("\"v1\""),
+        "the continuation is guarded by If-Range"
+    );
+}
+
+/// Run a transfer in which the second segment dies after five bytes, then
+/// edit `jobs.json` as a crash would leave it: the job still Pending.
+fn crash_with_one_partial_segment(root: &std::path::Path, body: &[u8]) -> String {
+    let http =
+        segmented_origin(&[SCRIPTED_URL], body).then_at(SCRIPTED_URL, 16, &[Reply::ErrorAfter(5)]);
+    let (mut core, rx) = make_core(Box::new(http));
+    core.set_library_root(root.to_path_buf()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+    run_until_finished(&mut core, &rx);
+    drop(core);
+
+    let queue = root.join(".phlegethon").join("jobs.json");
+    let raw = std::fs::read_to_string(&queue).unwrap();
+    assert!(raw.contains("\"failed\""), "setup: job failed, got {raw}");
+    std::fs::write(&queue, raw.replace("\"failed\"", "\"downloading\"")).unwrap();
+    job_id
+}
+
+#[test]
+fn relaunch_continues_a_segmented_download_from_its_persisted_table() {
+    let body = object_body(9);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id = crash_with_one_partial_segment(&root, &body);
+
+    let http = segmented_origin(&[SCRIPTED_URL], &body);
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    assert_eq!(
+        job_bytes(&core, &job_id),
+        16 + 5 + 16 + 16,
+        "progress comes from the segment table, not the preallocated .part length"
+    );
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    let ranges: Vec<_> = http.requests().into_iter().map(|r| r.1).collect();
+    assert_eq!(
+        ranges,
+        vec![Some(21..32)],
+        "only the unfinished segment tail is fetched after a relaunch"
+    );
+}
+
+#[test]
+fn relaunch_restarts_when_the_part_no_longer_matches_the_table() {
+    let body = object_body(10);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id = crash_with_one_partial_segment(&root, &body);
+    let part = root.join("jobs").join(&job_id).join("object.bin.part");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&part)
+        .unwrap()
+        .set_len(30)
+        .unwrap();
+
+    let http = segmented_origin(&[SCRIPTED_URL], &body);
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    assert_eq!(
+        job_bytes(&core, &job_id),
+        0,
+        "an unreadable table is dropped"
+    );
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    assert_eq!(
+        http.requests().len(),
+        4,
+        "every segment is fetched again from its start"
+    );
+}
+
+#[test]
+fn resumed_segment_restarts_when_the_object_changed() {
+    let old_body = object_body(11);
+    let new_body = object_body(12);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id = crash_with_one_partial_segment(&root, &old_body);
+
+    let http = segmented_origin(&[SCRIPTED_URL], &new_body);
+    http.replace_object(SCRIPTED_URL, &new_body, "\"v2\"");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(
+        completed_file(&root, &job_id),
+        new_body,
+        "bytes of the old object must not survive"
+    );
+}
+
+#[test]
+fn complete_segment_table_left_by_a_crash_is_finished_without_a_request() {
+    let body = object_body(13);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id = crash_with_one_partial_segment(&root, &body);
+    // Crash window: every byte is on disk and counted, but the rename never ran.
+    let part = root.join("jobs").join(&job_id).join("object.bin.part");
+    std::fs::write(&part, &body).unwrap();
+    let queue = root.join(".phlegethon").join("jobs.json");
+    let raw = std::fs::read_to_string(&queue).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    for seg in doc["jobs"][0]["segments"].as_array_mut().unwrap() {
+        seg["written"] = seg["end"].clone();
+        seg["written"] =
+            serde_json::json!(seg["end"].as_u64().unwrap() - seg["start"].as_u64().unwrap());
+    }
+    std::fs::write(&queue, serde_json::to_string(&doc).unwrap()).unwrap();
+
+    let http = segmented_origin(&[SCRIPTED_URL], &body);
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    assert!(http.requests().is_empty(), "nothing is left to fetch");
 }
