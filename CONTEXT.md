@@ -65,7 +65,7 @@ The folder where a specific download job writes its files — always a job-owned
 _Avoid_: scattering batch items across unrelated folders by default, writing single-item overrides into a shared folder verbatim, requiring every job to stay under Library Root
 
 **Discard**:
-User action that removes a job from the queue; for in-flight, Paused, or Failed jobs it also stops the transfer and deletes that job’s files under its Job Destination (including partials); for Completed jobs it removes the queue row only and leaves files on disk.
+User action that removes a job from the queue; for in-flight, Paused, or Failed jobs it also stops the transfer and deletes that job’s files under its Job Destination (including partials); for Completed jobs it removes the queue row only and leaves files on disk. If the files cannot be deleted, the job stays in the queue so Discard can be retried. A Discard that arrives as a transfer finishes is honoured with the Completed-job behaviour (row removed, file kept).
 _Avoid_: Cancel (as the product name for this action), Pause, deleting Completed outputs, leaving orphaned partials after removing an unfinished job
 
 **Resumable Transfer**:
