@@ -34,7 +34,7 @@ make xbps-container LIBC=musl
 ls out/glibc/          # the .xbps
 ```
 
-The container needs `--privileged` for xbps-src's `uchroot` build chroot. Rootless podman is the intended local setup.
+The container needs `--privileged` for xbps-src's `uchroot` build chroot. GitHub Actions uses Docker. Rootless podman runs `binary-bootstrap` but then fails in the package step with `/dev/null: Read-only file system`, so a local rootless podman build does not finish yet. Rootful podman and Docker are untested here; on a Void host use `scripts/xbps-build.sh`.
 
 Or build it with xbps-src on your Void machine:
 

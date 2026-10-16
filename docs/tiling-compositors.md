@@ -21,7 +21,7 @@ The reverse-DNS identifier `com.phlegethon.app` is the Tauri bundle identifier a
 **Settings, Library folder** and **Save to...** open a native folder chooser through `xdg-desktop-portal` (the `FileChooser` interface). The portal needs a backend for your session, and a bare compositor does not install one.
 
 1. Install `xdg-desktop-portal` (an xbps dependency of Phlegethon) and a backend that implements `FileChooser`: `xdg-desktop-portal-gtk` for most setups, `xdg-desktop-portal-kde` on KDE, or `xdg-desktop-portal-gnome` (which needs `nautilus` for the chooser).
-2. Tell the portal which backend to use. niri ships a `niri-portals.conf` that prefers the GNOME backend for most interfaces. Without GNOME that leaves `FileChooser` unanswered, so override it in `~/.config/xdg-desktop-portal/niri-portals.conf`:
+2. Check which backend the portal picks. niri ships a `niri-portals.conf` with `default=gnome;gtk;`: the GNOME backend first, then GTK. If `xdg-desktop-portal-gnome` is installed without `nautilus`, its chooser does not work, and the portal does not fall back. To force the GTK chooser, put this in `~/.config/xdg-desktop-portal/niri-portals.conf` (optional when only the GTK backend is installed):
 
    ```ini
    [preferred]
@@ -30,7 +30,7 @@ The reverse-DNS identifier `com.phlegethon.app` is the Tauri bundle identifier a
    ```
 
    Other compositors use `<XDG_CURRENT_DESKTOP>-portals.conf`, or `portals.conf`, in the same directory. See `portals.conf(5)`.
-3. Start the portal from the session. Most compositors do this through D-Bus activation. If the chooser never appears, run `systemctl --user status xdg-desktop-portal` or start `/usr/libexec/xdg-desktop-portal -r` by hand and read its log.
+3. Make sure the portal runs in the session. Most compositors start it through D-Bus activation. If the chooser never appears, list the session bus names with `dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames | grep portal`, or start `/usr/libexec/xdg-desktop-portal -r` by hand and read its log.
 
 Without a working portal Phlegethon falls back to `zenity`, then `kdialog`, and finally asks you to type the path. That fallback opens a separate dialog window; see the floating rule below.
 

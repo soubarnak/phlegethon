@@ -60,6 +60,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/tauri-shell/frontend/package-lock.json
+      - name: Build the frontend (the tarball test needs frontend/dist)
+        working-directory: packages/tauri-shell/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
       - name: Every version location agrees
         run: scripts/check-versions.sh
       - name: Script tests

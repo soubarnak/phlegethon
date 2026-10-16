@@ -114,7 +114,8 @@ xbps:
 	scripts/xbps-build.sh
 
 # Build the xbps package in a pinned Void container (packaging/void/images.env). Run `make dist` first.
-# Rootless podman works; the container needs --privileged for the uchroot build chroot.
+# The container needs --privileged for the uchroot build chroot. Rootless podman currently
+# fails in the package step (see README), so this target is unverified outside Docker.
 xbps-container:
 	@test -f dist/phlegethon-$$(sed -n 's/^version=//p' packaging/void/srcpkgs/phlegethon/template).tar.gz \
 		|| { echo "run 'make dist' first"; exit 1; }

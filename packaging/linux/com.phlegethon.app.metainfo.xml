@@ -23,7 +23,7 @@
   </provides>
   <releases>
     <!-- Newest first. Keep the first entry equal to the application version (scripts/check-versions.sh). -->
-    <release version="0.1.0" date="2026-10-16" />
+    <release version="0.1.0" date="2026-10-16" type="development" />
   </releases>
   <content_rating type="oars-1.1" />
 </component>
