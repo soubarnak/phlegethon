@@ -13,11 +13,13 @@ pub mod portal;
 
 use std::path::{Path, PathBuf};
 
-/// Directories on `PATH`, in order. Empty entries are skipped.
+/// Absolute directories on `PATH`, in order. Empty and relative entries (`.`, `bin`)
+/// are skipped: they resolve against the current directory, so a program planted there
+/// would run in place of zenity, dbus-send or notify-send (L-28).
 pub fn path_dirs_from_env(path_var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     match path_var {
         Some(raw) => std::env::split_paths(raw)
-            .filter(|p| !p.as_os_str().is_empty())
+            .filter(|p| p.is_absolute())
             .collect(),
         None => Vec::new(),
     }
@@ -57,5 +59,24 @@ pub(crate) mod test_util {
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).unwrap();
         path
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn relative_and_empty_path_entries_are_ignored() {
+        let raw = OsString::from("/usr/bin::.:bin:/opt/tools/../bin:./rel");
+        assert_eq!(
+            path_dirs_from_env(Some(&raw)),
+            vec![
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/opt/tools/../bin")
+            ]
+        );
+        assert!(path_dirs_from_env(None).is_empty());
     }
 }

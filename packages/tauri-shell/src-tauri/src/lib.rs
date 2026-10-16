@@ -562,40 +562,74 @@ fn detect_picker_method(dirs: &[PathBuf], portal: bool) -> PickerMethod {
     }
 }
 
+/// Run the portal folder dialog. `Failed` means the portal gave up without the user
+/// choosing anything, so the caller continues with zenity, kdialog or a typed path (H-20).
+async fn pick_with_portal(
+    app: &tauri::AppHandle,
+    label: String,
+) -> Result<phlegethon_shell_support::portal::PortalPick, String> {
+    use phlegethon_shell_support::portal;
+    // Non-blocking picker + channel: avoids blocking_pick_* wedging the
+    // WebKitGTK event loop when rfd used gtk3.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let started = Instant::now();
+    app.dialog()
+        .file()
+        .set_title(label)
+        .pick_folder(move |folder| {
+            let _ = tx.send(folder);
+        });
+    let folder = tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(portal::classify_portal_pick(
+        folder
+            .and_then(|path| path.into_path().ok())
+            .map(|p| p.to_path_buf()),
+        started.elapsed(),
+        portal::HUMAN_DISMISS_FLOOR,
+    ))
+}
+
 #[tauri::command]
 async fn pick_folder(
     app: tauri::AppHandle,
     title: Option<String>,
 ) -> Result<PickFolderResult, String> {
-    use phlegethon_shell_support::{picker, portal};
+    use phlegethon_shell_support::picker;
+    use phlegethon_shell_support::portal::PortalPick;
     let label = title.unwrap_or_else(|| "Choose folder".to_string());
     let dirs = path_dirs();
-    let portal_up = tauri::async_runtime::spawn_blocking(portal::portal_available)
-        .await
-        .map_err(|e| e.to_string())?;
+    let portal_up = tauri::async_runtime::spawn_blocking(
+        phlegethon_shell_support::portal::file_chooser_available,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
-    match detect_picker_method(&dirs, portal_up) {
-        PickerMethod::Portal => {
-            // Non-blocking picker + channel: avoids blocking_pick_* wedging the
-            // WebKitGTK event loop when rfd used gtk3.
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            app.dialog()
-                .file()
-                .set_title(label)
-                .pick_folder(move |folder| {
-                    let _ = tx.send(folder);
-                });
-            let folder = tauri::async_runtime::spawn_blocking(move || rx.recv())
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
-            Ok(PickFolderResult {
-                path: folder
-                    .and_then(|path| path.into_path().ok())
-                    .map(|p| p.display().to_string()),
-                method: PickerMethod::Portal,
-            })
+    if portal_up {
+        match pick_with_portal(&app, label.clone()).await? {
+            PortalPick::Picked(path) => {
+                return Ok(PickFolderResult {
+                    path: Some(path.display().to_string()),
+                    method: PickerMethod::Portal,
+                })
+            }
+            PortalPick::Cancelled => {
+                return Ok(PickFolderResult {
+                    path: None,
+                    method: PickerMethod::Portal,
+                })
+            }
+            PortalPick::Failed => {
+                log::warn!(
+                    "the FileChooser portal failed without a user choice; trying zenity or kdialog"
+                )
+            }
         }
+    }
+
+    match detect_picker_method(&dirs, false) {
         method @ (PickerMethod::Zenity | PickerMethod::Kdialog) => {
             let (backend, program) =
                 picker::detect(&dirs).ok_or_else(|| "folder picker disappeared".to_string())?;
@@ -613,7 +647,8 @@ async fn pick_folder(
                 method,
             })
         }
-        PickerMethod::Manual => Ok(PickFolderResult {
+        // No native chooser works: the UI asks for a typed path.
+        _ => Ok(PickFolderResult {
             path: None,
             method: PickerMethod::Manual,
         }),
@@ -632,7 +667,7 @@ struct PlatformCapabilities {
 async fn get_platform_capabilities() -> Result<PlatformCapabilities, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let dirs = path_dirs();
-        let portal = phlegethon_shell_support::portal::portal_available();
+        let portal = phlegethon_shell_support::portal::file_chooser_available();
         PlatformCapabilities {
             folder_picker: detect_picker_method(&dirs, portal),
             portal,
