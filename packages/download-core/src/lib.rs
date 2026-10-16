@@ -89,6 +89,10 @@ pub use sidecar_updates::{
 };
 pub use url_input::{normalize_url, split_urls};
 
+/// Capacity of the Core event channel. Lifecycle events block when it is full; progress
+/// events are dropped instead (see `TransferWriter`). A shell must keep reading events.
+pub const EVENT_CHANNEL_CAPACITY: usize = 8192;
+
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -1014,7 +1018,7 @@ impl Core {
         job_signals: Arc<job_signals::JobSignals>,
         free_space: Arc<dyn disk_space::FreeSpaceLookup>,
     ) -> (Self, crossbeam_channel::Receiver<CoreEvent>) {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = crossbeam_channel::bounded(EVENT_CHANNEL_CAPACITY);
         let http: Arc<dyn HttpBackend> = Arc::from(http);
         let sniffer: Arc<dyn PageSniffer> =
             Arc::new(page_sniffer::HtmlPageSniffer::new(Arc::clone(&http)));

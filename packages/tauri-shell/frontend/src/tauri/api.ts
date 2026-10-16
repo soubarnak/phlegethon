@@ -57,7 +57,6 @@ export const api = {
   processPending: () => invoke<void>("process_pending"),
   /** Companion intents that arrived before mount. Call once on mount, after subscribing to `companion-intent` (M-69). */
   takePendingIntents: () => invoke<CompanionIntent[]>("take_pending_intents"),
-  pollEvents: () => invoke<CoreEvent[]>("poll_events"),
   pauseJob: (jobId: string) => invoke<void>("pause_job", { jobId }),
   resumeJob: (jobId: string) => invoke<void>("resume_job", { jobId }),
   retryJob: (jobId: string) => invoke<void>("retry_job", { jobId }),

@@ -13,6 +13,7 @@ compile_error!(
 
 mod companion;
 mod intents;
+mod progress;
 
 use download_core::{
     ArchiveEntry, ArchiveOutcome, Core, CoreEvent, EnqueueOptions, EnqueueOutcome,
@@ -34,16 +35,12 @@ use tauri_plugin_opener::OpenerExt;
 
 /// How long a Toolchain status snapshot is reused before re-probing tools.
 const TOOLCHAIN_STATUS_TTL: Duration = Duration::from_secs(30);
-/// Upper bound for buffered events awaiting `poll_events` (legacy polling path).
-const EVENT_BUFFER_CAP: usize = 2048;
 
 struct AppState {
     core: Arc<Mutex<Core>>,
     job_signals: Arc<JobSignals>,
     /// Core event receiver; taken by the drain thread in `setup`.
     event_rx: Mutex<Option<crossbeam_channel::Receiver<CoreEvent>>>,
-    /// Summaries kept for `poll_events` after they were pushed as `core-event`.
-    event_buffer: Mutex<Vec<EventSummary>>,
     library_root: Mutex<Option<PathBuf>>,
     process_pending_busy: Arc<AtomicBool>,
     /// Companion and second-launch intents waiting for the webview (M-69).
@@ -84,7 +81,6 @@ impl AppState {
             core: Arc::new(Mutex::new(core)),
             job_signals,
             event_rx: Mutex::new(Some(rx)),
-            event_buffer: Mutex::new(Vec::new()),
             library_root: Mutex::new(None),
             process_pending_busy: Arc::new(AtomicBool::new(false)),
             intents: intents::IntentInbox::default(),
@@ -119,7 +115,7 @@ impl From<EnqueueOutcome> for EnqueueResult {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type")]
 enum EventSummary {
     JobProgress {
@@ -154,6 +150,32 @@ enum EventSummary {
         next_url: String,
         error: String,
     },
+}
+
+impl EventSummary {
+    fn job_id(&self) -> Option<&str> {
+        match self {
+            EventSummary::JobProgress { job_id, .. }
+            | EventSummary::JobCompleted { job_id, .. }
+            | EventSummary::JobFailed { job_id, .. }
+            | EventSummary::JobPaused { job_id }
+            | EventSummary::JobResumed { job_id }
+            | EventSummary::JobRetried { job_id }
+            | EventSummary::JobDiscarded { job_id }
+            | EventSummary::JobMirrorFailover { job_id, .. } => Some(job_id),
+        }
+    }
+
+    /// The job stops reporting progress after this event, until a retry or resume.
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            EventSummary::JobCompleted { .. }
+                | EventSummary::JobFailed { .. }
+                | EventSummary::JobPaused { .. }
+                | EventSummary::JobDiscarded { .. }
+        )
+    }
 }
 
 fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
@@ -207,25 +229,37 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
     }
 }
 
-/// Forward Core events to the webview as `core-event` and keep a copy for `poll_events`.
+/// Forward Core events to the webview as `core-event`, with progress limited to about
+/// 5 Hz per job (H-25). The thread never takes the Core lock, so a Core thread that
+/// blocks on a full event channel is always released.
 fn start_event_drain(app: tauri::AppHandle, rx: crossbeam_channel::Receiver<CoreEvent>) {
     std::thread::spawn(move || {
-        while let Ok(evt) = rx.recv() {
-            let Some(summary) = event_to_summary(&evt) else {
-                continue;
-            };
-            if let Err(err) = app.emit("core-event", &summary) {
+        let emit = |summary: &EventSummary| {
+            if let Err(err) = app.emit("core-event", summary) {
                 log::warn!("failed to emit core-event: {err}");
             }
-            if let Some(state) = app.try_state::<AppState>() {
-                if let Ok(mut buf) = state.event_buffer.lock() {
-                    if buf.len() >= EVENT_BUFFER_CAP {
-                        let overflow = buf.len() + 1 - EVENT_BUFFER_CAP;
-                        buf.drain(..overflow);
+        };
+        let mut coalescer = progress::ProgressCoalescer::new(progress::PROGRESS_INTERVAL);
+        loop {
+            let wait = coalescer
+                .next_flush_in(Instant::now())
+                .unwrap_or(Duration::from_secs(3600));
+            match rx.recv_timeout(wait) {
+                Ok(evt) => {
+                    if let Some(summary) = event_to_summary(&evt) {
+                        coalescer
+                            .push(summary, Instant::now())
+                            .iter()
+                            .for_each(emit);
                     }
-                    buf.push(summary);
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    coalescer.flush_all().iter().for_each(emit);
+                    break;
                 }
             }
+            coalescer.flush_due(Instant::now()).iter().for_each(emit);
         }
     });
 }
@@ -1229,14 +1263,6 @@ fn handle_second_launch(app: &tauri::AppHandle, argv: Vec<String>) {
     });
 }
 
-/// Legacy polling path: events are pushed as `core-event`; this drains the
-/// buffered copies for frontends that still poll.
-#[tauri::command]
-async fn poll_events(state: State<'_, AppState>) -> Result<Vec<EventSummary>, String> {
-    let mut buf = state.event_buffer.lock().map_err(|e| e.to_string())?;
-    Ok(std::mem::take(&mut *buf))
-}
-
 // ---------------------------------------------------------------------------
 // History (Download Archive query)
 // ---------------------------------------------------------------------------
@@ -1501,7 +1527,6 @@ pub fn run() {
             open_output,
             is_main_window_focused,
             focus_main_window,
-            poll_events,
             take_pending_intents,
             list_history,
             list_history_by_outcome,
