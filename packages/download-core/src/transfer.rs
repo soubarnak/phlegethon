@@ -1,6 +1,6 @@
 //! Body I/O executed outside the Core mutex (issue #31).
 
-use crate::bandwidth::{shared_token_bucket, SharedTokenBucket, TransferProgress, TransferWriter};
+use crate::bandwidth::{SharedTokenBucket, TransferProgress, TransferWriter};
 use crate::http::{FetchResult, HttpBackend};
 use std::io::Write;
 use std::ops::Range;
@@ -141,6 +141,8 @@ pub fn execute_segment_fetch(params: SegmentFetchParams) -> Result<u64, SegmentE
     let result = match fetched {
         Ok(result) => result,
         Err(_) if writer.overflowed => return Err(SegmentError::RangeIgnored),
+        // A pause makes the sink refuse data, which the backend reports as an error.
+        Err(_) if paused => return Ok(bytes_written),
         Err(err) => return Err(SegmentError::Failed(err)),
     };
     writer
@@ -198,8 +200,4 @@ impl Write for OffsetWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         self.file.flush()
     }
-}
-
-pub fn make_job_bucket(rate: u64, clock: Arc<dyn crate::bandwidth::Clock>) -> SharedTokenBucket {
-    shared_token_bucket(rate, clock)
 }

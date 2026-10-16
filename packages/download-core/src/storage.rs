@@ -205,7 +205,7 @@ pub fn load_global_bandwidth_cap(library_root: &Path) -> Result<Option<u64>, Str
         fs::read_to_string(&path).map_err(|e| format!("read queue {}: {e}", path.display()))?;
     let queue: PersistedQueue =
         serde_json::from_str(&raw).map_err(|e| format!("parse queue {}: {e}", path.display()))?;
-    Ok(queue.global_bandwidth_cap)
+    Ok(queue.global_bandwidth_cap.filter(|&cap| cap > 0))
 }
 
 /// Load the Active Job Limit from the queue file, if present.

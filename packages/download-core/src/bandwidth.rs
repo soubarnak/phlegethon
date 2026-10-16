@@ -19,6 +19,11 @@ pub struct TransferProgress {
 /// Monotonic time source for bandwidth refill.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Duration;
+
+    /// Block for `duration` of this clock's time. A transfer waiting for
+    /// Bandwidth Cap tokens sleeps here, so tests with a manual clock do not
+    /// wait in real time.
+    fn sleep(&self, duration: Duration);
 }
 
 /// Production clock backed by `std::time::Instant`.
@@ -43,6 +48,10 @@ impl Default for SystemClock {
 impl Clock for SystemClock {
     fn now(&self) -> Duration {
         self.start.elapsed()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
     }
 }
 
@@ -72,6 +81,11 @@ impl ManualClock {
 impl Clock for ManualClock {
     fn now(&self) -> Duration {
         *self.now.lock().unwrap()
+    }
+
+    /// Sleeping advances the manual clock instead of waiting.
+    fn sleep(&self, duration: Duration) {
+        self.advance(duration);
     }
 }
 
@@ -108,6 +122,20 @@ impl TokenBucket {
         self.rate
     }
 
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
+    /// How long until `wanted` bytes of tokens are available.
+    pub fn wait_for(&mut self, wanted: u64) -> Duration {
+        self.refill();
+        let missing = wanted as f64 - self.tokens;
+        if missing <= 0.0 || self.rate == 0 {
+            return Duration::ZERO;
+        }
+        Duration::from_secs_f64(missing / self.rate as f64).max(Duration::from_millis(1))
+    }
+
     fn refill(&mut self) {
         let now = self.clock.now();
         if now <= self.last_refill {
@@ -142,7 +170,16 @@ impl TokenBucket {
     }
 }
 
-/// Shared global bucket used across jobs in one scheduling round.
+impl std::fmt::Debug for TokenBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenBucket")
+            .field("rate", &self.rate)
+            .field("tokens", &self.tokens)
+            .finish()
+    }
+}
+
+/// Shared bucket: one global bucket on `Core` and one per capped job.
 pub type SharedTokenBucket = Arc<Mutex<TokenBucket>>;
 
 pub fn shared_token_bucket(rate_bytes_per_sec: u64, clock: Arc<dyn Clock>) -> SharedTokenBucket {
@@ -203,15 +240,8 @@ impl<'a, W: Write> TransferWriter<'a, W> {
         });
     }
 
-    fn allowed_bytes(&mut self, requested: u64) -> u64 {
-        if requested == 0 {
-            return 0;
-        }
-        if self.pause_requested.load(Ordering::Acquire) {
-            self.paused = true;
-            return 0;
-        }
-
+    /// Take tokens for up to `requested` bytes without waiting.
+    fn try_allowed_bytes(&mut self, requested: u64) -> u64 {
         let mut allowed = requested;
         if let Some(global) = &self.global {
             allowed = global.lock().unwrap().consume(allowed);
@@ -242,9 +272,52 @@ impl<'a, W: Write> TransferWriter<'a, W> {
     }
 }
 
+impl<W: Write> TransferWriter<'_, W> {
+    /// Wait until the buckets grant tokens, polling the stop flag.
+    ///
+    /// Returns 0 only when a pause or Discard was requested (`paused` is set).
+    fn wait_allowed_bytes(&mut self, requested: u64) -> u64 {
+        // Grant in slices of about 50 ms of the tightest cap, so a tiny cap
+        // still writes steadily and a stop request is seen quickly.
+        let rates = [&self.global, &self.job]
+            .into_iter()
+            .flatten()
+            .map(|b| b.lock().unwrap().rate());
+        let slice = rates.min().map_or(requested, |rate| (rate / 20).max(1));
+        let wanted = requested.min(slice);
+        loop {
+            if self.pause_requested.load(Ordering::Acquire) {
+                self.paused = true;
+                return 0;
+            }
+            let allowed = self.try_allowed_bytes(wanted);
+            if allowed > 0 {
+                return allowed;
+            }
+            let mut wait = Duration::ZERO;
+            let mut clock = None;
+            for bucket in [&self.global, &self.job].into_iter().flatten() {
+                let mut bucket = bucket.lock().unwrap();
+                wait = wait.max(bucket.wait_for(1));
+                clock = Some(bucket.clock().clone());
+            }
+            match clock {
+                Some(clock) => clock.sleep(wait.clamp(Duration::from_millis(1), MAX_WAIT_SLICE)),
+                None => return wanted,
+            }
+        }
+    }
+}
+
+/// Longest single sleep while waiting for tokens, so a pause is noticed fast.
+const MAX_WAIT_SLICE: Duration = Duration::from_millis(100);
+
 impl<W: Write> Write for TransferWriter<'_, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let allowed = self.allowed_bytes(buf.len() as u64) as usize;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let allowed = self.wait_allowed_bytes(buf.len() as u64) as usize;
         if allowed == 0 {
             return Ok(0);
         }

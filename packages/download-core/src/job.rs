@@ -1,5 +1,6 @@
 //! Job struct — state machine per download job.
 
+use crate::bandwidth::SharedTokenBucket;
 use crate::extractor::ExtractionTier;
 use crate::integrity::ExpectedHash;
 use crate::media_extras::MediaExtrasOptions;
@@ -125,6 +126,8 @@ pub struct Job {
     last_error: Option<String>,
     /// Page URL sent as `Referer` when fetching this job's media.
     referer: Option<String>,
+    /// Runtime token bucket for `bandwidth_cap` (not persisted).
+    bandwidth_bucket: Option<SharedTokenBucket>,
     /// `ETag` of the object seen on the first reply; sent as `If-Range` on resume.
     etag: Option<String>,
     /// `Last-Modified` of the object seen on the first reply (`If-Range` fallback).
@@ -205,6 +208,7 @@ impl Job {
             extraction_tier: None,
             last_error: None,
             referer: None,
+            bandwidth_bucket: None,
             etag: None,
             last_modified: None,
             range_ignored: false,
@@ -222,7 +226,7 @@ impl Job {
             bytes_received: persisted.bytes_received,
             live_downloaded: Arc::new(AtomicU64::new(persisted.bytes_received)),
             total_bytes: None,
-            bandwidth_cap: persisted.bandwidth_cap,
+            bandwidth_cap: persisted.bandwidth_cap.filter(|&cap| cap > 0),
             pause_requested: Arc::new(AtomicBool::new(false)),
             discard_requested: Arc::new(AtomicBool::new(false)),
             transfer_active: Arc::new(AtomicBool::new(false)),
@@ -239,6 +243,7 @@ impl Job {
             extraction_tier: persisted.extraction_tier,
             last_error: persisted.last_error,
             referer: persisted.referer,
+            bandwidth_bucket: None,
             etag: persisted.etag,
             last_modified: persisted.last_modified,
             range_ignored: persisted.range_ignored,
@@ -521,10 +526,26 @@ impl Job {
 
     pub fn set_bandwidth_cap(&mut self, cap: u64) {
         self.bandwidth_cap = Some(cap);
+        self.bandwidth_bucket = None;
     }
 
     pub fn remove_bandwidth_cap(&mut self) {
         self.bandwidth_cap = None;
+        self.bandwidth_bucket = None;
+    }
+
+    /// The job's token bucket, created on first use and kept until the cap
+    /// changes, so re-planning the job does not refill a one-second burst.
+    pub fn bandwidth_bucket(
+        &mut self,
+        clock: &Arc<dyn crate::bandwidth::Clock>,
+    ) -> Option<SharedTokenBucket> {
+        let rate = self.bandwidth_cap?;
+        Some(
+            self.bandwidth_bucket
+                .get_or_insert_with(|| crate::bandwidth::shared_token_bucket(rate, clock.clone()))
+                .clone(),
+        )
     }
 
     pub fn pause_requested(&self) -> &Arc<AtomicBool> {
@@ -607,5 +628,34 @@ impl Job {
                 self.id, self.state
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bandwidth::{Clock, ManualClock};
+
+    #[test]
+    fn bandwidth_bucket_is_kept_until_the_cap_changes() {
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::new());
+        let mut job = Job::new(
+            "https://example.com/a.bin".into(),
+            PathBuf::from("/tmp/phlegethon-test"),
+        );
+        assert!(job.bandwidth_bucket(&clock).is_none());
+
+        job.set_bandwidth_cap(100);
+        let first = job.bandwidth_bucket(&clock).unwrap();
+        let again = job.bandwidth_bucket(&clock).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "re-planning must reuse the bucket"
+        );
+
+        job.set_bandwidth_cap(200);
+        let rebuilt = job.bandwidth_bucket(&clock).unwrap();
+        assert!(!Arc::ptr_eq(&first, &rebuilt));
+        assert_eq!(rebuilt.lock().unwrap().rate(), 200);
     }
 }

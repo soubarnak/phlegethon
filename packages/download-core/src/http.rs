@@ -333,13 +333,12 @@ impl HttpBackend for ProdHttpBackend {
                     .write(&buf[chunk_written..n])
                     .map_err(|e| format!("write sink {url}: {e}"))?;
                 if w == 0 {
-                    break;
+                    // The sink only refuses data when a pause or Discard was
+                    // requested; Core checks that flag before this error.
+                    return Err(format!("sink stopped accepting data for {url}"));
                 }
                 chunk_written += w;
                 written += w as u64;
-            }
-            if chunk_written < n {
-                break;
             }
         }
 

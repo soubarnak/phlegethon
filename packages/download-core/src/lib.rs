@@ -97,7 +97,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use transfer::{
-    execute_segment_fetch, execute_single_fetch, make_job_bucket, SegmentError, SegmentFetchParams,
+    execute_segment_fetch, execute_single_fetch, SegmentError, SegmentFetchParams,
     SingleFetchParams,
 };
 
@@ -168,6 +168,10 @@ pub struct Core {
     /// Global bandwidth cap in bytes per second.
     /// None = globally uncapped.
     bandwidth_cap: Option<u64>,
+    /// The one token bucket every transfer shares for the global cap. Rebuilt
+    /// only when the cap changes, so jobs started in different dispatch
+    /// rounds draw from the same bucket.
+    global_bucket: Option<SharedTokenBucket>,
     /// Maximum concurrent transferring jobs (default [`DEFAULT_ACTIVE_JOB_LIMIT`]).
     active_job_limit: u32,
     default_quality_policy: DefaultQualityPolicy,
@@ -916,6 +920,7 @@ impl Core {
             jobs: Vec::new(),
             event_tx: tx,
             bandwidth_cap: None,
+            global_bucket: None,
             active_job_limit: DEFAULT_ACTIVE_JOB_LIMIT,
             default_quality_policy: DefaultQualityPolicy::default(),
             audio_only_mode: false,
@@ -1031,6 +1036,7 @@ impl Core {
         }
         if let Some(cap) = storage::load_global_bandwidth_cap(&root)? {
             self.bandwidth_cap = Some(cap);
+            self.rebuild_global_bucket();
         }
         self.active_job_limit = storage::load_active_job_limit(&root)?;
         let quality_settings = storage::load_quality_settings(&root)?;
@@ -1502,15 +1508,29 @@ impl Core {
     ///
     /// When set, aggregate throughput across all jobs is limited to this rate.
     /// None/unset = globally uncapped.
-    pub fn set_global_bandwidth_cap(&mut self, cap: u64) {
+    ///
+    /// A cap of 0 is rejected: a bucket that never refills would stall every
+    /// transfer. Use [`Self::remove_global_bandwidth_cap`] for uncapped.
+    pub fn set_global_bandwidth_cap(&mut self, cap: u64) -> Result<(), String> {
+        if cap == 0 {
+            return Err("Bandwidth Cap must be at least 1 byte per second".to_string());
+        }
         self.bandwidth_cap = Some(cap);
-        let _ = self.persist_queue_now();
+        self.rebuild_global_bucket();
+        self.persist_queue_now()
     }
 
     /// Remove the global bandwidth cap (restore uncapped default).
-    pub fn remove_global_bandwidth_cap(&mut self) {
+    pub fn remove_global_bandwidth_cap(&mut self) -> Result<(), String> {
         self.bandwidth_cap = None;
-        let _ = self.persist_queue_now();
+        self.rebuild_global_bucket();
+        self.persist_queue_now()
+    }
+
+    fn rebuild_global_bucket(&mut self) {
+        self.global_bucket = self
+            .bandwidth_cap
+            .map(|rate| shared_token_bucket(rate, self.clock.clone()));
     }
 
     /// Return the current global bandwidth cap, if set.
@@ -1522,6 +1542,9 @@ impl Core {
     ///
     /// Effective rate is `min(global, per-job)` when both are set.
     pub fn set_job_bandwidth_cap(&mut self, job_id: &str, cap: u64) -> Result<(), String> {
+        if cap == 0 {
+            return Err("Bandwidth Cap must be at least 1 byte per second".to_string());
+        }
         let job = self
             .jobs
             .iter_mut()
@@ -2442,9 +2465,7 @@ impl Core {
     /// Process pending jobs synchronously — each transfer runs to completion
     /// before the next starts.  Prefer [`Self::dispatch_pending`] in shells.
     pub fn process_pending(&mut self) -> Result<(), String> {
-        let global_bucket = self
-            .bandwidth_cap
-            .map(|rate| shared_token_bucket(rate, self.clock.clone()));
+        let global_bucket = self.global_bucket.clone();
 
         let indices: Vec<usize> = self
             .jobs
@@ -2473,9 +2494,7 @@ impl Core {
             if slots == 0 {
                 return Ok(());
             }
-            let global_bucket = core
-                .bandwidth_cap
-                .map(|rate| shared_token_bucket(rate, core.clock.clone()));
+            let global_bucket = core.global_bucket.clone();
             let mut job_ids = Vec::new();
             for job in &core.jobs {
                 if !job.is_pending() {
@@ -2639,8 +2658,7 @@ impl Core {
         }
 
         let filename = self.jobs[i].filename().to_string();
-        let job_cap = self.jobs[i].bandwidth_cap();
-        let job_bucket = job_cap.map(|rate| make_job_bucket(rate, self.clock.clone()));
+        let job_bucket = self.jobs[i].bandwidth_bucket(&self.clock);
 
         if bytes_received == 0 {
             let supports_range = matches!(self.http.supports_range(&url), Ok(true));
