@@ -20,6 +20,7 @@ mod http;
 mod integrity;
 mod job;
 mod job_signals;
+mod launch_sites;
 mod media_extras;
 mod metalink;
 mod mirror_set;

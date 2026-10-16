@@ -7528,6 +7528,32 @@ fn launch_site_probe_still_hard_fails_on_generic_extractor() {
 }
 
 #[test]
+fn launch_site_subdomains_never_fall_back_to_the_generic_extractor() {
+    for url in [
+        "https://m.xhamster.com/videos/x-1",
+        "https://music.youtube.com/watch?v=generic",
+        "https://en.xxxbp.tv/v/1",
+    ] {
+        let mut toolchain = FakeExtractorToolchain::new();
+        toolchain.insert(url, "Looks Generic", url, vec![("720p", "720p")]);
+        toolchain.mark_generic(url);
+        let calls_handle = toolchain.clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+        core.set_library_root(tmp.path().join("library")).unwrap();
+        core.set_page_sniffer(Arc::new(FakePageSniffer::new()));
+
+        let err = core.probe(url).unwrap_err();
+        assert!(err.contains("Launch Site"), "{url}: {err}");
+        let calls = calls_handle.probe_calls();
+        assert!(
+            calls.iter().all(|(_, allow)| !allow),
+            "{url}: Launch Sites never allow generic: {calls:?}"
+        );
+    }
+}
+
+#[test]
 fn unknown_site_accepts_generic_extractor_with_warning() {
     let mut toolchain = FakeExtractorToolchain::new();
     toolchain.insert(
