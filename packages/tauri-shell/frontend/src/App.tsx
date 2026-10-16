@@ -5,6 +5,8 @@ import {
   HeaderGlobalAction,
   HeaderGlobalBar,
   HeaderName,
+  InlineLoading,
+  InlineNotification,
   Tab,
   TabList,
   TabPanel,
@@ -51,7 +53,7 @@ export default function App() {
 function Shell() {
   const toasts = useToasts();
   const [theme, toggleTheme] = useTheme();
-  const { jobs, refresh, kick, lastEvent } = useJobs();
+  const { jobs, loading, error: jobsError, refresh, kick, events, dismissEvents } = useJobs();
   const [tab, setTab] = useState(TAB_QUEUE);
   const [destination, setDestination] = useState<string | null>(null);
   const [clipboardWatch, setClipboardWatch] = useBooleanPreference("phlegethon-clipboard-watcher", false);
@@ -59,11 +61,14 @@ function Shell() {
   // URLs awaiting Probe-then-Confirm; the head is shown, the rest wait their turn.
   const [probeQueue, setProbeQueue] = useState<string[]>([]);
   const probeUrl = probeQueue[0] ?? null;
-  const [busy, setBusy] = useState(false);
+  // Count of addUrls runs queued or in progress; they run one at a time (M-64).
+  const [pendingAdds, setPendingAdds] = useState(0);
+  const busy = pendingAdds > 0;
+  const addChain = useRef<Promise<unknown>>(Promise.resolve());
   const [historyKey, setHistoryKey] = useState(0);
   const [toolchain, setToolchain] = useState<ToolchainStatus | null>(null);
   const [duplicate, setDuplicate] = useState<{ match: ActiveJobMatch; resolve: (r: DuplicateResolution) => void } | null>(null);
-  const [discard, setDiscard] = useState<{ ids: string[]; copy: DiscardConfirmCopy } | null>(null);
+  const [discardIds, setDiscardIds] = useState<string[] | null>(null);
   const [prompt, setPrompt] = useState<PromptRequest | null>(null);
   const jobsRef = useRef<JobRow[]>([]);
   jobsRef.current = jobs;
@@ -74,24 +79,27 @@ function Shell() {
   }, []);
 
   // ---- history reloads and notifications on terminal events
+  // Every queued event is handled exactly once; toggling notifications re-runs the
+  // effect but finds the queue already dismissed (M-65).
   useEffect(() => {
-    if (!lastEvent) return;
-    if (lastEvent.type === "JobCompleted" || lastEvent.type === "JobFailed") {
-      setHistoryKey((k) => k + 1);
-      const job = jobsRef.current.find((j) => j.job_id === lastEvent.job_id);
-      const title = job?.title ?? lastEvent.job_id;
+    if (events.length === 0) return;
+    setHistoryKey((k) => k + 1);
+    for (const { event } of events) {
+      const job = jobsRef.current.find((j) => j.job_id === event.job_id);
+      const title = job?.title ?? event.job_id;
       void (async () => {
         const port = await notificationPort();
         await maybeNotify({
           port,
           isMainWindowFocused: () => api.isMainWindowFocused(),
           settingsEnabled: notificationsEnabled,
-          headline: lastEvent.type === "JobCompleted" ? t("notify.completed") : t("notify.failed"),
-          body: lastEvent.type === "JobCompleted" ? title : `${title}: ${lastEvent.error}`,
+          headline: event.type === "JobCompleted" ? t("notify.completed") : t("notify.failed"),
+          body: event.type === "JobCompleted" ? title : `${title}: ${event.error}`,
         });
       })();
     }
-  }, [lastEvent, notificationsEnabled]);
+    dismissEvents(events[events.length - 1].id);
+  }, [events, dismissEvents, notificationsEnabled]);
 
   // ---- enqueue flow
   const queueProbe = useCallback((url: string) => {
@@ -118,9 +126,8 @@ function Shell() {
     [],
   );
 
-  const addUrls = useCallback(
+  const runAddUrls = useCallback(
     async (text: string) => {
-      setBusy(true);
       try {
         const outcome = await processUrlInput(
           {
@@ -140,17 +147,32 @@ function Shell() {
         );
         if (outcome.total === 0) {
           toasts.warning(t("url.noneFound"));
+        } else if (outcome.failed.length > 0) {
+          const detail = outcome.failed
+            .slice(0, 3)
+            .map(({ url, error }) => `${url}: ${errorToString(error)}`)
+            .join("\n");
+          toasts.error(t("url.addFailedSome", { failed: outcome.failed.length, total: outcome.total }), detail);
         } else if (outcome.enqueued > 1) {
           toasts.info(t("url.addedMany", { count: outcome.enqueued }));
         }
       } catch (err) {
         toasts.error(t("url.addFailed"), err);
-      } finally {
-        setBusy(false);
       }
     },
     [confirmDuplicate, enqueueOne, toasts],
   );
+
+  // One duplicate prompt can be open at a time, so submissions from paste, drop, the
+  // clipboard watcher and History wait for the previous one to finish.
+  const runAddUrlsRef = useRef(runAddUrls);
+  runAddUrlsRef.current = runAddUrls;
+  const addUrls = useCallback((text: string) => {
+    setPendingAdds((n) => n + 1);
+    const run = addChain.current.then(() => runAddUrlsRef.current(text));
+    addChain.current = run.catch(() => undefined).finally(() => setPendingAdds((n) => n - 1));
+    return run;
+  }, []);
 
   // Companion (browser extension) hand-off. The shell has already acted on the URL:
   // a direct file is enqueued but emits no core-event, and a page waits for a probe.
@@ -189,24 +211,25 @@ function Shell() {
   }, []);
 
   // ---- probe lifecycle
-  const advanceProbeQueue = useCallback(() => {
-    setProbeQueue((q) => q.slice(1));
+  // Remove by URL, not by position: a second close or a late confirm must not skip the next URL (M-63).
+  const dropProbe = useCallback((url: string | null) => {
+    if (url) setProbeQueue((q) => q.filter((u) => u !== url));
   }, []);
 
   const onProbeConfirmed = useCallback(
-    async (jobIds: string[]) => {
+    async (url: string, jobIds: string[]) => {
       toasts.success(t("probe.queued", { count: jobIds.length }));
-      advanceProbeQueue();
+      dropProbe(url);
       setTab(TAB_QUEUE);
       await refresh();
       await kick();
     },
-    [advanceProbeQueue, refresh, kick, toasts],
+    [dropProbe, refresh, kick, toasts],
   );
 
   const tryPlain = useCallback(
     async (url: string) => {
-      advanceProbeQueue();
+      dropProbe(url);
       try {
         await enqueueOne(url, true);
         toasts.info(t("probe.plainQueued"));
@@ -214,14 +237,17 @@ function Shell() {
         toasts.error(t("probe.plainFailed"), err);
       }
     },
-    [advanceProbeQueue, enqueueOne, toasts],
+    [dropProbe, enqueueOne, toasts],
   );
 
-  const openCookieSettings = useCallback(() => {
-    advanceProbeQueue();
-    setTab(TAB_SETTINGS);
-    window.setTimeout(() => document.getElementById("settings-cookies")?.scrollIntoView({ behavior: "smooth" }), 50);
-  }, [advanceProbeQueue]);
+  const openCookieSettings = useCallback(
+    (url: string) => {
+      dropProbe(url);
+      setTab(TAB_SETTINGS);
+      window.setTimeout(() => document.getElementById("settings-cookies")?.scrollIntoView({ behavior: "smooth" }), 50);
+    },
+    [dropProbe],
+  );
 
   // ---- queue actions
   const guard = useCallback(
@@ -261,15 +287,7 @@ function Shell() {
           await kick();
         }),
       discard: (ids) => {
-        const selected = ids
-          .map((id) => jobsRef.current.find((j) => j.job_id === id))
-          .filter((j): j is JobRow => !!j);
-        if (selected.length === 0) return;
-        const copy =
-          selected.length === 1
-            ? buildDiscardConfirmCopy(selected[0].status, selected[0].destination)
-            : buildBatchDiscardCopy(selected.map((j) => j.status));
-        setDiscard({ ids, copy });
+        if (ids.some((id) => jobsRef.current.some((j) => j.job_id === id))) setDiscardIds(ids);
       },
       moveUp: (job) =>
         void guard(t("queue.reorderFailed"), () => api.reorderJob(job.queue_index, Math.max(0, job.queue_index - 1))),
@@ -315,12 +333,25 @@ function Shell() {
     [guard, kick, toasts],
   );
 
+  // Built from the live jobs on every render, so a job that completes while the dialog is
+  // open no longer shows the warning about deleting files (L-60).
+  const discardCopy = useMemo<DiscardConfirmCopy | null>(() => {
+    if (!discardIds) return null;
+    const selected = discardIds
+      .map((id) => jobs.find((j) => j.job_id === id))
+      .filter((j): j is JobRow => !!j);
+    if (selected.length === 0) return null;
+    return selected.length === 1
+      ? buildDiscardConfirmCopy(selected[0].status, selected[0].destination)
+      : buildBatchDiscardCopy(selected.map((j) => j.status));
+  }, [discardIds, jobs]);
+
   const confirmDiscard = useCallback(async () => {
-    if (!discard) return;
-    const ids = discard.ids;
-    setDiscard(null);
+    if (!discardIds) return;
+    const ids = discardIds;
+    setDiscardIds(null);
     await guard(t("queue.discardFailed"), () => Promise.all(ids.map((id) => api.discardJob(id))));
-  }, [discard, guard]);
+  }, [discardIds, guard]);
 
   const header = (
     <Header aria-label="Phlegethon">
@@ -378,7 +409,23 @@ function Shell() {
             <TabPanels>
               <TabPanel>
                 <div className="ph-panel">
-                  <QueueTable jobs={jobs} actions={actions} hasAnyJobs={jobs.length > 0} />
+                  {jobsError && (
+                    <InlineNotification
+                      kind="error"
+                      lowContrast
+                      hideCloseButton
+                      title={t("queue.loadFailed")}
+                      subtitle={jobsError}
+                      data-testid="queue-error"
+                    />
+                  )}
+                  {loading && jobs.length === 0 ? (
+                    <InlineLoading description={t("queue.loading")} data-testid="queue-loading" />
+                  ) : (
+                    !(jobsError && jobs.length === 0) && (
+                      <QueueTable jobs={jobs} actions={actions} hasAnyJobs={jobs.length > 0} />
+                    )
+                  )}
                 </div>
               </TabPanel>
               <TabPanel>
@@ -408,13 +455,13 @@ function Shell() {
       <ProbeModal
         url={probeUrl}
         initialDestination={destination}
-        onClose={advanceProbeQueue}
-        onConfirmed={(ids) => void onProbeConfirmed(ids)}
+        onClose={() => dropProbe(probeUrl)}
+        onConfirmed={(ids) => probeUrl && void onProbeConfirmed(probeUrl, ids)}
         onTryPlain={(url) => void tryPlain(url)}
-        onOpenSettings={openCookieSettings}
+        onOpenSettings={() => probeUrl && openCookieSettings(probeUrl)}
         onError={(title, err) => toasts.error(title, errorToString(err))}
       />
-      <DiscardModal copy={discard?.copy ?? null} onConfirm={() => void confirmDiscard()} onCancel={() => setDiscard(null)} />
+      <DiscardModal copy={discardCopy} onConfirm={() => void confirmDiscard()} onCancel={() => setDiscardIds(null)} />
       <DuplicateUrlModal
         match={duplicate?.match ?? null}
         onResolve={(resolution) => {
