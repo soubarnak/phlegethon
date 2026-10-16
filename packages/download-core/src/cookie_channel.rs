@@ -59,6 +59,71 @@ impl CookieChannel {
     }
 }
 
+/// A private, short-lived copy of the user's cookie file, deleted on drop.
+///
+/// yt-dlp writes its cookie jar back to the `--cookies` file on exit, so handing it the
+/// user's own file lets it rewrite or truncate it. Each run gets a throwaway copy.
+#[derive(Debug)]
+pub struct CookieFileCopy {
+    path: PathBuf,
+}
+
+impl CookieFileCopy {
+    fn create(original: &std::path::Path) -> Result<Self, String> {
+        use std::io::Write;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("phlegethon-cookies-{}-{n}.txt", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut copy = options
+            .open(&path)
+            .map_err(|e| format!("create cookie file copy: {e}"))?;
+        let guard = Self { path };
+        match std::fs::read(original) {
+            Ok(bytes) => copy
+                .write_all(&bytes)
+                .map_err(|e| format!("copy cookie file: {e}"))?,
+            // yt-dlp treats a missing cookie file as an empty jar.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("read cookie file {}: {e}", original.display())),
+        }
+        Ok(guard)
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for CookieFileCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl CookieChannel {
+    /// The channel to hand to yt-dlp for one run: `cookie_file` replaced by a private
+    /// copy that lives as long as the returned guard.
+    pub fn with_private_cookie_file(&self) -> Result<(Self, Option<CookieFileCopy>), String> {
+        let Some(original) = &self.cookie_file else {
+            return Ok((self.clone(), None));
+        };
+        let copy = CookieFileCopy::create(original)?;
+        let channel = Self {
+            cookies_from_browser: self.cookies_from_browser.clone(),
+            cookie_file: Some(copy.path().to_path_buf()),
+        };
+        Ok((channel, Some(copy)))
+    }
+}
+
 /// Build yt-dlp argv fragments for the configured cookie channel.
 pub fn ytdlp_cookie_args(channel: &CookieChannel) -> Vec<String> {
     let mut args = Vec::new();
@@ -89,6 +154,65 @@ pub fn append_ytdlp_cookie_args(cmd: &mut std::process::Command, channel: &Cooki
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn private_cookie_copy_keeps_the_original_and_is_removed_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("cookies.txt");
+        std::fs::write(
+            &original,
+            "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tk\tv\n",
+        )
+        .unwrap();
+        let channel = CookieChannel {
+            cookies_from_browser: None,
+            cookie_file: Some(original.clone()),
+        };
+        let (private, guard) = channel.with_private_cookie_file().unwrap();
+        let guard = guard.expect("a cookie file gets a copy");
+        let copy = private.cookie_file.clone().unwrap();
+        assert_ne!(copy, original);
+        assert_eq!(
+            std::fs::read(&copy).unwrap(),
+            std::fs::read(&original).unwrap()
+        );
+        // yt-dlp rewrites the file it is given; the user's file must not change.
+        std::fs::write(&copy, "rewritten by yt-dlp").unwrap();
+        assert!(std::fs::read_to_string(&original)
+            .unwrap()
+            .contains("Netscape"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(guard);
+        assert!(!copy.exists());
+    }
+
+    #[test]
+    fn private_cookie_copy_of_a_missing_file_is_empty_and_leaves_no_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("absent.txt");
+        let channel = CookieChannel {
+            cookies_from_browser: Some("firefox".into()),
+            cookie_file: Some(original.clone()),
+        };
+        let (private, guard) = channel.with_private_cookie_file().unwrap();
+        assert_eq!(private.cookies_from_browser.as_deref(), Some("firefox"));
+        assert_eq!(
+            std::fs::read(private.cookie_file.as_ref().unwrap()).unwrap(),
+            b""
+        );
+        drop(guard);
+        assert!(!original.exists());
+        let (same, none) = CookieChannel::default().with_private_cookie_file().unwrap();
+        assert_eq!(same, CookieChannel::default());
+        assert!(none.is_none());
+    }
 
     #[test]
     fn ytdlp_cookie_args_empty_when_unconfigured() {

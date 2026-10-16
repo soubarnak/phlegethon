@@ -953,6 +953,153 @@ fn pause_during_in_flight_extractor_download_stops_promptly() {
 }
 
 #[test]
+fn resume_after_pause_reruns_a_resumable_extractor_in_the_same_destination() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=resume-ext",
+        "Resume Extractor Video",
+        "https://cdn.youtube.com/resume-ext.mp4",
+        vec![("720p", "720p")],
+    );
+    toolchain.enable_resume();
+    let total_chunks = 40;
+    let chunks_written =
+        toolchain.enable_slow_download(total_chunks, std::time::Duration::from_millis(10));
+    let calls = toolchain.clone();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.probe("https://www.youtube.com/watch?v=resume-ext")
+        .unwrap();
+    collect_events(&rx);
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=resume-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_id = core.confirm_probe_selection(&selection, None).unwrap()[0].clone();
+    let signals = core.job_signals();
+    let job_dir = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .map(|j| PathBuf::from(j.destination))
+        .expect("job destination");
+
+    let core = Arc::new(Mutex::new(core));
+    let rx = Arc::new(rx);
+    let worker = {
+        let (core, rx) = (core.clone(), rx.clone());
+        std::thread::spawn(move || {
+            core.lock().unwrap().process_pending().unwrap();
+            collect_events(&rx)
+        })
+    };
+    let started = std::time::Instant::now();
+    while *chunks_written.lock().unwrap() < 5 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "extractor download never became active"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    signals
+        .request_pause(&job_id)
+        .expect("pause flag registered")
+        .store(true, std::sync::atomic::Ordering::Release);
+    let events = worker.join().unwrap();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::JobPaused { job_id: id } if id == &job_id)));
+    let paused_at = *chunks_written.lock().unwrap();
+    assert!(paused_at < total_chunks, "pause came too late");
+
+    let mut guard = core.lock().unwrap();
+    guard.resume_job(&job_id).unwrap();
+    guard.process_pending().unwrap();
+    let events = collect_events(&rx);
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            CoreEvent::JobFailed { error, .. } if error.contains("cannot resume")
+        )),
+        "Resume must not fail an extractor job: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { job_id: id, .. } if id == &job_id)),
+        "{events:?}"
+    );
+    let dests = calls.download_dests();
+    assert_eq!(dests.len(), 2, "{dests:?}");
+    assert_eq!(dests[0], dests[1], "Resume reuses the Job Destination");
+    assert_eq!(dests[0], job_dir);
+    let partial = std::fs::read_to_string(job_dir.join("extractor-partial.bin")).unwrap();
+    let chunk_lines: Vec<&str> = partial.lines().collect();
+    assert_eq!(
+        chunk_lines.len(),
+        total_chunks as usize,
+        "no restart from zero"
+    );
+    assert!(chunk_lines[0].starts_with("chunk:0:"));
+}
+
+#[test]
+fn extractor_progress_comes_from_the_toolchain_not_from_the_destination_size() {
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        "https://www.youtube.com/watch?v=progress-ext",
+        "Progress Video",
+        "https://cdn.youtube.com/progress-ext.mp4",
+        vec![("720p", "720p")],
+    );
+    toolchain.report_progress(vec![
+        ExtractorProgress {
+            downloaded_bytes: 50,
+            total_bytes: Some(100),
+        },
+        ExtractorProgress {
+            downloaded_bytes: 100,
+            total_bytes: Some(100),
+        },
+    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.probe("https://www.youtube.com/watch?v=progress-ext")
+        .unwrap();
+    let selection = ProbeSelection {
+        url: "https://www.youtube.com/watch?v=progress-ext".to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_id = core.confirm_probe_selection(&selection, None).unwrap()[0].clone();
+    collect_events(&rx);
+    core.process_pending().unwrap();
+    let progress: Vec<(u64, Option<u64>)> = collect_events(&rx)
+        .into_iter()
+        .filter_map(|e| match e {
+            CoreEvent::JobProgress {
+                job_id: id,
+                bytes_downloaded,
+                total_bytes,
+            } if id == job_id => Some((bytes_downloaded, total_bytes)),
+            _ => None,
+        })
+        .collect();
+    assert!(progress.contains(&(50, Some(100))), "{progress:?}");
+    assert!(progress.contains(&(100, Some(100))), "{progress:?}");
+}
+
+#[test]
 fn pause_on_completed_job_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, _rx) = make_core(Box::new(fake_http()));
@@ -7978,6 +8125,28 @@ fn probe_with_nothing_found_reports_both_tiers() {
     );
 }
 
+/// M-25: the tier-3 wrapper buried yt-dlp's `[code]` mid-string, so shells lost the hint.
+#[test]
+fn probe_failure_keeps_the_ytdlp_error_code_at_the_front() {
+    let url = "https://walled.example.org/page";
+    let tmp = tempfile::tempdir().unwrap();
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.fail_probe(
+        url,
+        "[needs_browser_cookies] yt-dlp probe failed (exit Some(1)): HTTP Error 403",
+    );
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_page_sniffer(Arc::new(FakePageSniffer::new()));
+    let err = core.probe(url).unwrap_err();
+    assert_eq!(
+        download_core::error_code(&err),
+        Some("needs_browser_cookies"),
+        "got: {err}"
+    );
+    assert!(err.contains("no downloadable media found"), "got: {err}");
+}
+
 #[test]
 fn cancel_probe_aborts_between_tiers() {
     let url = "https://slow.example.org/page";
@@ -7992,7 +8161,7 @@ fn cancel_probe_aborts_between_tiers() {
     assert!(core.cancel_probe(url), "in-flight probe is cancellable");
     let err = plan.run().unwrap_err();
     assert!(err.contains("cancelled"), "got: {err}");
-    let err = core.finish_probe(plan.url(), Err(err)).unwrap_err();
+    let err = core.finish_probe(&plan, Err(err)).unwrap_err();
     assert!(err.contains("cancelled"));
     assert!(!core.cancel_probe(url), "finished probes are forgotten");
 }

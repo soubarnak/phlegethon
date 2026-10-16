@@ -206,6 +206,16 @@ fn default_tier() -> ExtractionTier {
     ExtractionTier::Dedicated
 }
 
+/// Download progress a toolchain reports while it runs.
+///
+/// `downloaded_bytes` and `total_bytes` cover every file the toolchain fetches for the job
+/// (yt-dlp downloads video and audio as separate files), so the pair never exceeds 100 %.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtractorProgress {
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
 /// Result of an Extractor Toolchain download attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractorDownloadOutcome {
@@ -274,8 +284,12 @@ pub trait ExtractorToolchain: Send + Sync {
     ///
     /// Whether this toolchain can resume a partial download after relaunch.
     ///
-    /// When `false`, Core marks interrupted extractor jobs Failed on relaunch
-    /// instead of silently restarting from zero.
+    /// When `true`, Resume (and a relaunch) runs the toolchain again in the same Job
+    /// Destination with the same format and output spec, and the toolchain continues
+    /// its own partial files (yt-dlp keeps its `.part` files).
+    ///
+    /// When `false`, Core marks an interrupted extractor job Failed instead of
+    /// silently restarting from zero.
     fn supports_extractor_resume(&self) -> bool {
         false
     }
@@ -324,6 +338,37 @@ pub trait ExtractorToolchain: Send + Sync {
         )
     }
 
+    /// [`ExtractorToolchain::download_with_referer`] that also reports progress.
+    ///
+    /// Default ignores `progress`; Core then falls back to measuring the Job Destination
+    /// on disk. Production reports bytes parsed from yt-dlp's `--progress-template`.
+    #[allow(clippy::too_many_arguments)]
+    fn download_with_progress(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+        stop: &AtomicBool,
+        media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        output_template: &str,
+        referer: Option<&str>,
+        _progress: &(dyn Fn(ExtractorProgress) + Send + Sync),
+    ) -> Result<ExtractorDownloadOutcome, String> {
+        self.download_with_referer(
+            url,
+            format,
+            dest_dir,
+            stop,
+            media_extras,
+            cookies,
+            proxy,
+            output_template,
+            referer,
+        )
+    }
+
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
     fn download(
         &self,
@@ -362,10 +407,18 @@ pub struct FakeExtractorToolchain {
     orphan_temp_names: Vec<String>,
     /// Optional ffmpeg directory reported to Core for embed/remux capability.
     ffmpeg_dir: Option<std::path::PathBuf>,
+    /// Whether the fake continues its own partial file like yt-dlp does.
+    resume_supported: bool,
+    /// Progress the fake reports before it writes its output (tests).
+    reported_progress: Vec<ExtractorProgress>,
+    /// Destination directory of every `download` call (tests).
+    download_dests: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     /// Count of [`ExtractorToolchain::apply_sidecar_root`] calls (tests).
     sidecar_root_applies: std::sync::Arc<std::sync::Mutex<u32>>,
     /// URLs whose probe reports yt-dlp's `Generic` extractor key.
     generic_urls: HashSet<String>,
+    /// URLs whose probe fails with this exact message.
+    probe_errors: std::collections::HashMap<String, String>,
     /// Record of `(url, allow_generic)` for every probe call (tests).
     probe_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
     /// Record of `(url, cookies)` for every probe and download call (tests).
@@ -416,6 +469,25 @@ impl FakeExtractorToolchain {
         self.orphan_temp_names = names.iter().map(|s| (*s).to_string()).collect();
     }
 
+    /// Make `download` continue a partial file in the destination, like yt-dlp's `.part`
+    /// files, and report resume support to Core.
+    pub fn enable_resume(&mut self) {
+        self.resume_supported = true;
+    }
+
+    /// Report these progress values (one per 120 ms) before the fake download finishes.
+    pub fn report_progress(&mut self, progress: Vec<ExtractorProgress>) {
+        self.reported_progress = progress;
+    }
+
+    /// Destination directory of every `download` call so far.
+    pub fn download_dests(&self) -> Vec<std::path::PathBuf> {
+        self.download_dests
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
     /// Report a specific ffmpeg directory to Core (tests: empty dir → unavailable).
     pub fn set_ffmpeg_dir(&mut self, dir: std::path::PathBuf) {
         self.ffmpeg_dir = Some(dir);
@@ -437,6 +509,12 @@ impl FakeExtractorToolchain {
     /// `allow_generic = true` it returns the items tagged `GenericExtractor`.
     pub fn mark_generic(&mut self, url: &str) {
         self.generic_urls.insert(url.to_string());
+    }
+
+    /// Make the probe of `url` fail with `message` (tag it with `[code]` like yt-dlp).
+    pub fn fail_probe(&mut self, url: &str, message: &str) {
+        self.probe_errors
+            .insert(url.to_string(), message.to_string());
     }
 
     /// `(url, allow_generic)` for every probe call so far.
@@ -575,6 +653,39 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         self.ffmpeg_dir.as_deref()
     }
 
+    fn supports_extractor_resume(&self) -> bool {
+        self.resume_supported
+    }
+
+    fn download_with_progress(
+        &self,
+        url: &str,
+        format: &str,
+        dest_dir: &std::path::Path,
+        stop: &AtomicBool,
+        media_extras: &MediaExtrasOptions,
+        cookies: &CookieChannel,
+        proxy: &ProxySettings,
+        output_template: &str,
+        _referer: Option<&str>,
+        progress: &(dyn Fn(ExtractorProgress) + Send + Sync),
+    ) -> Result<ExtractorDownloadOutcome, String> {
+        for p in &self.reported_progress {
+            progress(*p);
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        self.download(
+            url,
+            format,
+            dest_dir,
+            stop,
+            media_extras,
+            cookies,
+            proxy,
+            output_template,
+        )
+    }
+
     fn apply_sidecar_root(&self, _root: &std::path::Path) {
         if let Ok(mut count) = self.sidecar_root_applies.lock() {
             *count = count.saturating_add(1);
@@ -599,6 +710,9 @@ impl ExtractorToolchain for FakeExtractorToolchain {
     ) -> Result<ProbeResult, String> {
         if let Ok(mut calls) = self.probe_calls.lock() {
             calls.push((url.to_string(), policy.allow_generic));
+        }
+        if let Some(message) = self.probe_errors.get(url) {
+            return Err(message.clone());
         }
         if let Ok(mut calls) = self.cookie_calls.lock() {
             calls.push((url.to_string(), cookies.clone()));
@@ -639,6 +753,9 @@ impl ExtractorToolchain for FakeExtractorToolchain {
         _proxy: &ProxySettings,
         output_template: &str,
     ) -> Result<ExtractorDownloadOutcome, String> {
+        if let Ok(mut dests) = self.download_dests.lock() {
+            dests.push(dest_dir.to_path_buf());
+        }
         if let Ok(mut calls) = self.cookie_calls.lock() {
             calls.push((url.to_string(), cookies.clone()));
         }
@@ -651,9 +768,17 @@ impl ExtractorToolchain for FakeExtractorToolchain {
 
         if let Some(slow) = &self.slow_download {
             let path = dest_dir.join("extractor-partial.bin");
-            std::fs::write(&path, b"").map_err(|e| format!("create partial {path:?}: {e}"))?;
+            // A resuming fake continues after the chunks already on disk.
+            let first_chunk = if self.resume_supported && path.is_file() {
+                std::fs::read_to_string(&path)
+                    .map(|text| text.lines().count() as u32)
+                    .unwrap_or(0)
+            } else {
+                std::fs::write(&path, b"").map_err(|e| format!("create partial {path:?}: {e}"))?;
+                0
+            };
 
-            for chunk in 0..slow.total_chunks {
+            for chunk in first_chunk..slow.total_chunks {
                 if stop.load(Ordering::Acquire) {
                     return Ok(ExtractorDownloadOutcome::Stopped);
                 }

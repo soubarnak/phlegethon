@@ -202,45 +202,9 @@ fn cidr_contains(net: std::net::IpAddr, prefix: u8, ip: std::net::IpAddr) -> boo
     (a >> shift) == (b >> shift)
 }
 
-/// Build yt-dlp argv fragments for the configured global proxy.
-pub fn ytdlp_proxy_args(settings: &ProxySettings) -> Vec<String> {
-    let Some(url) = settings
-        .url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return Vec::new();
-    };
-    vec!["--proxy".to_string(), url.to_string()]
-}
-
-/// Append proxy argv fragments to a yt-dlp command builder.
-pub fn append_ytdlp_proxy_args(cmd: &mut std::process::Command, settings: &ProxySettings) {
-    for arg in ytdlp_proxy_args(settings) {
-        cmd.arg(arg);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ytdlp_proxy_args_empty_when_unconfigured() {
-        assert!(ytdlp_proxy_args(&ProxySettings::default()).is_empty());
-    }
-
-    #[test]
-    fn ytdlp_proxy_args_includes_proxy_flag() {
-        let settings = ProxySettings {
-            url: Some("socks5://127.0.0.1:1080".to_string()),
-        };
-        assert_eq!(
-            ytdlp_proxy_args(&settings),
-            vec!["--proxy".to_string(), "socks5://127.0.0.1:1080".to_string()]
-        );
-    }
 
     #[test]
     fn validate_accepts_http_and_socks_schemes() {

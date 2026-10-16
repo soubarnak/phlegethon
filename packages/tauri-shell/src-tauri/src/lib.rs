@@ -214,7 +214,9 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
         CoreEvent::JobDiscarded { job_id } => Some(EventSummary::JobDiscarded {
             job_id: job_id.clone(),
         }),
-        CoreEvent::ProbeResult { .. } | CoreEvent::ProbeFailed { .. } => None,
+        CoreEvent::ProbeResult { .. }
+        | CoreEvent::ProbeFailed { .. }
+        | CoreEvent::JobsReordered { .. } => None,
         CoreEvent::JobMirrorFailover {
             job_id,
             previous_url,
@@ -246,6 +248,15 @@ fn start_event_drain(app: tauri::AppHandle, rx: crossbeam_channel::Receiver<Core
                 .unwrap_or(Duration::from_secs(3600));
             match rx.recv_timeout(wait) {
                 Ok(evt) => {
+                    if matches!(
+                        evt,
+                        CoreEvent::JobCompleted { .. } | CoreEvent::JobDiscarded { .. }
+                    ) {
+                        // Own thread: the sweep takes the Core lock, which a long process_pending
+                        // can hold, and the event drain must keep delivering progress.
+                        let app = app.clone();
+                        std::thread::spawn(move || companion::sweep_cookie_files(&app));
+                    }
                     if let Some(summary) = event_to_summary(&evt) {
                         coalescer
                             .push(summary, Instant::now())
@@ -368,9 +379,17 @@ async fn cancel_probe(state: State<'_, AppState>, url: String) -> Result<bool, S
 }
 
 #[tauri::command]
-async fn clear_pending_probe(state: State<'_, AppState>, url: String) -> Result<(), String> {
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.clear_pending_probe(&url)
+async fn clear_pending_probe(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<(), String> {
+    {
+        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        core.clear_pending_probe(&url)?;
+    }
+    companion::release_pending_probe(&app, &url);
+    Ok(())
 }
 
 /// Exact formats for one probe item (flat playlist entries start with presets).
@@ -559,14 +578,20 @@ async fn preview_filename_template(template: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn confirm_probe_selection(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     selection: ProbeSelection,
     destination: Option<String>,
 ) -> Result<Vec<String>, String> {
     ensure_library_root(&state)?;
     let dest = parse_optional_destination(destination);
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.confirm_probe_selection(&selection, dest)
+    let job_ids = {
+        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        core.confirm_probe_selection(&selection, dest)?
+    };
+    // The confirmed jobs carry the cookie session now; the pending-probe claim is done.
+    companion::release_pending_probe(&app, &selection.url);
+    Ok(job_ids)
 }
 
 #[tauri::command]

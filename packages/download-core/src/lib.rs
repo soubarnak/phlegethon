@@ -43,6 +43,7 @@ pub use toolchain_discovery::{
     classify_ytdlp_failure, detect_libc, error_code, error_code_hint, tag_error, EjsStatus,
     JsRuntime, JsRuntimeKind, Libc, PlatformInfo, ToolInfo, ToolchainStatus, YtDlpLauncher,
     YtDlpSource, ERROR_CODE_NEEDS_BROWSER_COOKIES, ERROR_CODE_NEEDS_JS_RUNTIME, ERROR_CODE_TIMEOUT,
+    ERROR_CODE_TOOLCHAIN_MISSING,
 };
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
@@ -54,13 +55,15 @@ pub use disk_space::{
 pub use download_archive::{ArchiveEntry, ArchiveOutcome, DownloadArchive};
 pub use event::CoreEvent;
 pub use extractor::{
-    is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain,
-    FakeExtractorToolchain, ItemSelection, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult,
-    ProbeSelection, ProbeTierSettings, Quality, DEFAULT_PROBE_TIMEOUT_SECS,
+    is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorProgress,
+    ExtractorToolchain, FakeExtractorToolchain, ItemSelection, MediaFetchKind, MediaItem,
+    ProbePolicy, ProbeResult, ProbeSelection, ProbeTierSettings, Quality,
+    DEFAULT_PROBE_TIMEOUT_SECS,
 };
 pub use filename_template::{
     media_item_raw_id, prepare_extractor_output, render_template, resolve_collision,
-    sanitize_filename, TemplateVars, DEFAULT_FILENAME_TEMPLATE,
+    sanitize_filename, validate_filename_template, TemplateVars, DEFAULT_FILENAME_TEMPLATE,
+    MAX_FILENAME_BYTES,
 };
 pub use github_release_source::{
     select_asset as select_ytdlp_release_asset, GitHubReleaseUpdateSource,
@@ -78,7 +81,7 @@ pub use page_sniffer::{
     FakePageSniffer, HtmlPageSniffer, PageSniffer, SniffOutcome, SniffSource, SniffedKind,
     SniffedMedia,
 };
-pub use proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
+pub use proxy_settings::ProxySettings;
 pub use quality_policy::{select_default_quality, DefaultQualityPolicy, DEFAULT_MAX_HEIGHT};
 pub use sidecar_updates::{
     apply_sidecar_updates, apply_sidecar_updates_on_launch, check_sidecar_updates,
@@ -88,7 +91,7 @@ pub use sidecar_updates::{
     SidecarUpdateCheckResult, SidecarUpdateSettings, SidecarUpdateSource, ToolchainManifest,
     UpdateCatalog, TOOLCHAIN_MANIFEST_FILENAME, UPDATE_CATALOG_FILENAME,
 };
-pub use url_input::{normalize_url, split_urls};
+pub use url_input::{normalize_url, split_urls, split_urls_report, SplitUrlsReport};
 
 /// Capacity of the Core event channel. Lifecycle events block when it is full; progress
 /// events are dropped instead (see `TransferWriter`). A shell must keep reading events.
@@ -207,11 +210,21 @@ pub struct Core {
     sniffer: Arc<dyn PageSniffer>,
     /// Settings-backed fallback-chain policy.
     probe_tier_settings: ProbeTierSettings,
-    /// Cancel flags for in-flight probes, keyed by normalized URL.
-    probe_cancels: HashMap<String, Arc<AtomicBool>>,
+    /// Cancel flags for in-flight probes, keyed by probe id, with the normalized
+    /// URL each probe runs against (several probes of one URL can be in flight).
+    probe_cancels: HashMap<u64, (String, Arc<AtomicBool>)>,
+    next_probe_id: u64,
     /// Cookie sessions handed in with an enqueue that still needs a probe,
     /// keyed by normalized URL. Moved onto the jobs at confirm.
     probe_cookie_sessions: HashMap<String, CookieChannel>,
+}
+
+/// What [`Core::set_library_root`] found while restoring the queue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct LibraryRootReport {
+    /// Human-readable notes: files moved aside as corrupt, queue entries
+    /// skipped, settings reset. Empty when everything loaded cleanly.
+    pub warnings: Vec<String>,
 }
 
 /// Options for [`Core::enqueue_with_options`].
@@ -252,6 +265,8 @@ pub struct ProbePlan {
     proxy: ProxySettings,
     settings: ProbeTierSettings,
     cancel: Arc<AtomicBool>,
+    /// Unique per planned probe, so concurrent probes of one URL stay distinct.
+    id: u64,
 }
 
 impl ProbePlan {
@@ -275,6 +290,7 @@ impl ProbePlan {
             proxy,
             settings,
             cancel: Arc::new(AtomicBool::new(false)),
+            id: 0,
         })
     }
 
@@ -415,10 +431,16 @@ impl ProbePlan {
             }
         }
 
-        Err(format!(
+        // Keep yt-dlp's `[code]` at the front so shells still show the cookie, timeout,
+        // JS-runtime or geo hint for it.
+        let message = format!(
             "no downloadable media found for {}. yt-dlp: {ytdlp_error}{sniff_note}",
             self.url
-        ))
+        );
+        Err(match error_code(&ytdlp_error) {
+            Some(code) => tag_error(code, message),
+            None => message,
+        })
     }
 }
 
@@ -863,8 +885,9 @@ struct ExtractorFetchParams {
 }
 
 /// Run an Extractor Toolchain download on a worker thread and emit
-/// [`CoreEvent::JobProgress`] from on-disk growth under the Job Destination
-/// until it finishes or stops. Runs without the Core mutex.
+/// [`CoreEvent::JobProgress`] until it finishes or stops. Progress comes from the byte
+/// counts the toolchain reports; a toolchain that reports none is measured by the
+/// on-disk size of the Job Destination. Runs without the Core mutex.
 fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownloadOutcome, String> {
     let ExtractorFetchParams {
         extractor,
@@ -884,8 +907,11 @@ fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownload
     } = params;
     let (result_tx, result_rx) = mpsc::channel();
     let dest_worker = dest.clone();
+    // Latest progress the toolchain reported; `None` until it reports anything.
+    let reported: Arc<Mutex<Option<ExtractorProgress>>> = Arc::new(Mutex::new(None));
+    let reported_worker = Arc::clone(&reported);
     std::thread::spawn(move || {
-        let outcome = extractor.download_with_referer(
+        let outcome = extractor.download_with_progress(
             &url,
             &format,
             &dest_worker,
@@ -895,24 +921,43 @@ fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownload
             &proxy,
             &output_spec,
             referer.as_deref(),
+            &move |p| {
+                if let Ok(mut slot) = reported_worker.lock() {
+                    *slot = Some(p);
+                }
+            },
         );
         let _ = result_tx.send(outcome);
     });
 
-    let mut last_emitted: Option<u64> = None;
+    let mut last_emitted: Option<(u64, Option<u64>)> = None;
     loop {
         match result_rx.try_recv() {
             Ok(outcome) => break outcome,
             Err(mpsc::TryRecvError::Empty) => {
-                let on_disk = storage::destination_byte_total(&dest);
-                if last_emitted != Some(on_disk) {
-                    live_bytes.store(on_disk, Ordering::Release);
+                // Prefer the toolchain's own byte counts; a recursive size walk of the
+                // destination counts both files of a merge and the merged output.
+                let current = match reported.lock().ok().and_then(|slot| *slot) {
+                    Some(p) => {
+                        let total = match (p.total_bytes, total_for_progress) {
+                            (Some(a), Some(b)) => Some(a.max(b)),
+                            (a, b) => a.or(b),
+                        };
+                        (
+                            total.map_or(p.downloaded_bytes, |t| p.downloaded_bytes.min(t)),
+                            total,
+                        )
+                    }
+                    None => (storage::destination_byte_total(&dest), total_for_progress),
+                };
+                if last_emitted != Some(current) {
+                    live_bytes.store(current.0, Ordering::Release);
                     let _ = event_tx.send(CoreEvent::JobProgress {
                         job_id: job_id.clone(),
-                        bytes_downloaded: on_disk,
-                        total_bytes: total_for_progress,
+                        bytes_downloaded: current.0,
+                        total_bytes: current.1,
                     });
-                    last_emitted = Some(on_disk);
+                    last_emitted = Some(current);
                 }
                 std::thread::sleep(EXTRACTOR_DISK_POLL_INTERVAL);
             }
@@ -1087,6 +1132,7 @@ impl Core {
             sniffer,
             probe_tier_settings: ProbeTierSettings::default(),
             probe_cancels: HashMap::new(),
+            next_probe_id: 0,
             probe_cookie_sessions: HashMap::new(),
         };
         (core, rx)
@@ -1173,39 +1219,61 @@ impl Core {
     ///
     /// Creates the directory if it does not exist and restores any persisted
     /// queue state from `{library_root}/.phlegethon/jobs.json`.
-    pub fn set_library_root(&mut self, root: PathBuf) -> Result<(), String> {
+    ///
+    /// Refuses (`Err`) while any transfer is active, because the swap replaces
+    /// every live job and its signals. The same applies when the root is the
+    /// current one: pause the jobs or wait first.
+    ///
+    /// Nothing changes unless the whole load succeeds. An unreadable
+    /// `jobs.json` or `archive.json` does not make the root unusable: the file
+    /// is moved to `<name>.corrupt-<timestamp>`, Core starts with an empty
+    /// queue or archive, and the returned [`LibraryRootReport`] says so. Single
+    /// bad queue rows are skipped the same way. Show the warnings to the user.
+    pub fn set_library_root(&mut self, root: PathBuf) -> Result<LibraryRootReport, String> {
+        if self.transfers_active() {
+            return Err(
+                "cannot change the Library Root while transfers are active; pause them or wait \
+                 for them to finish"
+                    .to_string(),
+            );
+        }
         std::fs::create_dir_all(&root).map_err(|e| format!("create library root: {e}"))?;
-        self.jobs = storage::load_jobs(&root)?;
+        let mut loaded = storage::load_queue(&root)?;
+        let (archive, archive_warning) = download_archive::DownloadArchive::load_or_reset(&root)?;
+        let mut warnings = std::mem::take(&mut loaded.warnings);
+        warnings.extend(archive_warning);
+
+        // Everything is loaded; commit it together.
         for job in &self.jobs {
+            self.job_signals.unregister(job.id());
+        }
+        for job in &loaded.jobs {
             self.register_job_signals(job);
         }
-        if let Some(cap) = storage::load_global_bandwidth_cap(&root)? {
-            self.bandwidth_cap = Some(cap);
-            self.rebuild_global_bucket();
-        }
-        self.active_job_limit = storage::load_active_job_limit(&root)?;
-        let quality_settings = storage::load_quality_settings(&root)?;
-        self.default_quality_policy = quality_settings.policy;
-        self.audio_only_mode = quality_settings.audio_only_mode;
-        let media_settings = storage::load_media_extras_settings(&root)?;
-        self.default_media_extras = media_settings.defaults;
-        self.cookie_channel = storage::load_cookie_channel(&root)?;
-        self.proxy_settings = storage::load_proxy_settings(&root)?;
+        self.jobs = loaded.jobs;
+        self.bandwidth_cap = loaded.global_bandwidth_cap;
+        self.rebuild_global_bucket();
+        self.active_job_limit = loaded.active_job_limit;
+        self.default_quality_policy = loaded.quality.policy;
+        self.audio_only_mode = loaded.quality.audio_only_mode;
+        self.default_media_extras = loaded.media_extras.defaults;
+        self.cookie_channel = loaded.cookie_channel;
+        self.proxy_settings = loaded.proxy_settings;
         // A persisted setting the HTTP client rejects (for example an `https://` proxy saved
         // by an older release) must not stop the library from opening; the backend refuses
         // requests until the user fixes the setting.
         if let Err(e) = self.http.apply_proxy_settings(&self.proxy_settings) {
             eprintln!("saved proxy setting rejected: {e}");
         }
-        self.sidecar_update_settings = storage::load_sidecar_update_settings(&root)?;
-        self.filename_template = storage::load_filename_template(&root)?;
-        self.probe_tier_settings = storage::load_probe_tier_settings(&root)?;
-        self.download_archive = download_archive::DownloadArchive::load(&root)?;
+        self.sidecar_update_settings = loaded.sidecar_update_settings;
+        self.filename_template = loaded.filename_template;
+        self.probe_tier_settings = loaded.probe_tier_settings;
+        self.download_archive = archive;
         self.library_root = Some(root);
         self.last_progress_flush = Instant::now();
         self.bytes_since_progress_flush = 0;
         self.progress_flush_pending = false;
-        Ok(())
+        Ok(LibraryRootReport { warnings })
     }
 
     /// Current Library Root, if set.
@@ -1356,14 +1424,15 @@ impl Core {
             return Ok(());
         }
         self.jobs[job_index].set_last_error(Some(error.clone()));
+        self.record_media_identity(job_id, job_index);
+        let persisted = self.persist_queue_now();
         self.event_tx
             .send(CoreEvent::JobFailed {
                 job_id: job_id.to_string(),
                 error,
             })
             .map_err(|_| "event channel closed".to_string())?;
-        self.record_media_identity(job_id, job_index)?;
-        self.persist_queue_now()
+        persisted
     }
 
     fn guard_disk_space_for_transfer(
@@ -1461,9 +1530,7 @@ impl Core {
                 job.set_cookie_session(cookie_session);
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
-                self.register_job_signals(&job);
-                self.jobs.push(job);
-                self.persist_queue_now()?;
+                self.push_jobs_persisted(vec![job])?;
                 Ok(EnqueueOutcome::EnqueueDirect {
                     job_id,
                     destination: dest,
@@ -1481,6 +1548,24 @@ impl Core {
                 Ok(EnqueueOutcome::ProbeThenConfirm { url: url_str })
             }
         }
+    }
+
+    /// Append new jobs to the queue and persist, all or nothing: when the save
+    /// fails the jobs are taken out again, so memory never holds jobs that
+    /// `jobs.json` lacks (a retry would otherwise queue duplicates).
+    fn push_jobs_persisted(&mut self, jobs: Vec<job::Job>) -> Result<(), String> {
+        let first_new = self.jobs.len();
+        for job in jobs {
+            self.register_job_signals(&job);
+            self.jobs.push(job);
+        }
+        if let Err(err) = self.persist_queue_now() {
+            for job in self.jobs.drain(first_new..) {
+                self.job_signals.unregister(job.id());
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Find an active or queued job matching a normalized URL.
@@ -1676,22 +1761,45 @@ impl Core {
             .position(|j| j.id() == job_id)
             .ok_or_else(|| format!("job {job_id} not found"))?;
 
-        self.jobs.remove(pos);
-        self.job_signals.unregister(job_id);
-
+        // Delete first. When the delete fails the job stays in the queue (and
+        // on disk), so the user can retry the Discard; removing the row first
+        // would bring the job back from `jobs.json` after a restart.
         if !completed && destination.exists() {
-            std::fs::remove_dir_all(destination)
-                .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))?;
+            if let Err(err) = self.delete_job_destination(destination) {
+                self.jobs[pos].clear_discard_requested();
+                self.jobs[pos].clear_pause_requested();
+                return Err(err);
+            }
         }
 
+        self.jobs.remove(pos);
+        self.job_signals.unregister(job_id);
+        let persisted = self.persist_queue_now();
         self.event_tx
             .send(CoreEvent::JobDiscarded {
                 job_id: job_id.to_string(),
             })
             .map_err(|_| "event channel closed".to_string())?;
+        persisted
+    }
 
-        self.persist_queue_now()?;
-        Ok(())
+    /// Delete a job's whole Job Destination (Discard of an unfinished job).
+    ///
+    /// Refuses a folder that is, or contains, the Library Root: a Job
+    /// Destination is job-owned and never a shared folder.
+    fn delete_job_destination(&self, destination: &Path) -> Result<(), String> {
+        if !destination.is_absolute()
+            || self
+                .library_root
+                .as_deref()
+                .is_some_and(|root| root.starts_with(destination))
+        {
+            return Err(format!(
+                "refusing to delete {destination:?}: not a job-owned Job Destination"
+            ));
+        }
+        std::fs::remove_dir_all(destination)
+            .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))
     }
 
     /// After an in-flight body read stops, either Discard or Pause.
@@ -1874,7 +1982,12 @@ impl Core {
         }
         let job = self.jobs.remove(from_index);
         self.jobs.insert(to_index, job);
+        // Persist before announcing, so a restart never contradicts the event.
         self.persist_queue_now()?;
+        let _ = self.event_tx.send(CoreEvent::JobsReordered {
+            from_index,
+            to_index,
+        });
         Ok(())
     }
 
@@ -2230,11 +2343,8 @@ impl Core {
 
     /// Update the Filename Template and persist it.
     pub fn set_filename_template(&mut self, template: String) -> Result<(), String> {
-        let trimmed = template.trim();
-        if trimmed.is_empty() {
-            return Err("Filename Template cannot be empty".to_string());
-        }
-        self.filename_template = trimmed.to_string();
+        validate_filename_template(&template)?;
+        self.filename_template = template.trim().to_string();
         self.persist_queue_now()
     }
 
@@ -2410,7 +2520,7 @@ impl Core {
     pub fn probe(&mut self, url: &str) -> Result<ProbeResult, String> {
         let plan = self.plan_probe(url)?;
         let outcome = plan.run();
-        self.finish_probe(plan.url(), outcome)
+        self.finish_probe(&plan, outcome)
     }
 
     /// Probe with the Core mutex released during the network work.
@@ -2421,7 +2531,7 @@ impl Core {
         };
         let outcome = plan.run();
         let mut guard = core.lock().map_err(|e| e.to_string())?;
-        guard.finish_probe(plan.url(), outcome)
+        guard.finish_probe(&plan, outcome)
     }
 
     /// Capture everything a probe needs (settings, toolchain, cancel flag).
@@ -2429,7 +2539,7 @@ impl Core {
         let cookies = normalize_url(url)
             .and_then(|key| self.probe_cookie_sessions.get(&key).cloned())
             .unwrap_or_else(|| self.cookie_channel.clone());
-        let plan = ProbePlan::standalone(
+        let mut plan = ProbePlan::standalone(
             url,
             Arc::clone(&self.extractor),
             Arc::clone(&self.sniffer),
@@ -2437,18 +2547,26 @@ impl Core {
             cookies,
             self.proxy_settings.clone(),
         )?;
+        self.next_probe_id += 1;
+        plan.id = self.next_probe_id;
         self.probe_cancels
-            .insert(plan.url().to_string(), plan.cancel_flag());
+            .insert(plan.id, (plan.url().to_string(), plan.cancel_flag()));
         Ok(plan)
     }
 
     /// Record a probe outcome: archive marks, pending store, events.
+    ///
+    /// Only this plan's own cancel flag is released, so another probe of the
+    /// same URL that is still running keeps its flag. A failed probe also drops
+    /// any result stored for the URL by an earlier probe, so the sheet the user
+    /// is looking at cannot be confirmed from a stale result.
     pub fn finish_probe(
         &mut self,
-        url: &str,
+        plan: &ProbePlan,
         outcome: Result<ProbeResult, String>,
     ) -> Result<ProbeResult, String> {
-        self.probe_cancels.remove(url);
+        self.probe_cancels.remove(&plan.id);
+        let url = plan.url();
         match outcome {
             Ok(mut result) => {
                 self.mark_archived_probe_items(&mut result.items);
@@ -2463,6 +2581,7 @@ impl Core {
                 Ok(result)
             }
             Err(err) => {
+                self.pending_probes.remove(url);
                 self.event_tx
                     .send(CoreEvent::ProbeFailed {
                         url: url.to_string(),
@@ -2479,13 +2598,14 @@ impl Core {
         let Some(key) = normalize_url(url) else {
             return false;
         };
-        match self.probe_cancels.get(&key) {
-            Some(flag) => {
+        let mut found = false;
+        for (_, (probe_url, flag)) in self.probe_cancels.iter() {
+            if *probe_url == key {
                 flag.store(true, Ordering::Release);
-                true
+                found = true;
             }
-            None => false,
         }
+        found
     }
 
     /// Current fallback-chain settings.
@@ -2699,7 +2819,7 @@ impl Core {
         let items_map: HashMap<&str, &MediaItem> =
             probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
 
-        let mut job_ids = Vec::new();
+        let mut new_jobs: Vec<job::Job> = Vec::new();
         let media_extras = self.resolve_media_extras(selection.media_extras);
 
         for sel in &selection.items {
@@ -2761,14 +2881,16 @@ impl Core {
                 job.set_total_bytes(Some(size));
             }
 
-            job_ids.push(job.id().to_string());
-            self.register_job_signals(&job);
-            self.jobs.push(job);
+            new_jobs.push(job);
         }
 
+        // The whole selection is valid; queue it in one step. A failed save
+        // keeps the pending probe so the user can confirm again without
+        // duplicating anything.
+        let job_ids: Vec<String> = new_jobs.iter().map(|j| j.id().to_string()).collect();
+        self.push_jobs_persisted(new_jobs)?;
         self.pending_probes.remove(&url_key);
         self.probe_cookie_sessions.remove(&url_key);
-        self.persist_queue_now()?;
         Ok(job_ids)
     }
 
@@ -3028,7 +3150,7 @@ impl Core {
                 self.finalize_failed_job(
                     job_id,
                     i,
-                    "extractor cannot resume partial download; use Retry".into(),
+                    "extractor cannot resume a partial download".into(),
                 )?;
                 return Ok(None);
             }
@@ -3310,7 +3432,30 @@ impl Core {
 
     /// Apply the result of an unlocked transfer.  Returns `true` when the
     /// mirror failover loop should retry.
+    ///
+    /// A Discard that arrived while the transfer was finishing is honoured
+    /// here: a transfer that ends Completed (or Failed) before it sees the
+    /// stop signal would otherwise leave the row behind after `discard_job`
+    /// returned `Ok`.
     fn finish_unlocked_transfer(
+        &mut self,
+        outcome: UnlockedTransferOutcome,
+    ) -> Result<bool, String> {
+        let job_id = outcome.job_id().to_string();
+        let retry = self.apply_unlocked_transfer(outcome)?;
+        let Some(index) = self.job_index(&job_id) else {
+            return Ok(retry);
+        };
+        if !self.jobs[index].is_discard_requested() {
+            return Ok(retry);
+        }
+        let completed = self.jobs[index].is_completed();
+        let destination = self.jobs[index].destination().to_path_buf();
+        self.finalize_discard(&job_id, completed, &destination)?;
+        Ok(false)
+    }
+
+    fn apply_unlocked_transfer(
         &mut self,
         outcome: UnlockedTransferOutcome,
     ) -> Result<bool, String> {
@@ -3621,6 +3766,7 @@ impl Core {
             .ok_or_else(|| format!("job {job_id} not found"))?;
         if self.jobs[job_index].advance_mirror() {
             let next_url = self.jobs[job_index].url().to_string();
+            let persisted = self.persist_queue_now();
             self.event_tx
                 .send(CoreEvent::JobMirrorFailover {
                     job_id: job_id.to_string(),
@@ -3629,7 +3775,7 @@ impl Core {
                     error: err,
                 })
                 .map_err(|_| "event channel closed".to_string())?;
-            self.persist_queue_now()?;
+            persisted?;
             Ok(true)
         } else {
             self.finalize_failed_job(job_id, job_index, err)?;
@@ -3751,6 +3897,13 @@ impl Core {
             }
         }
 
+        self.jobs[job_index].mark_completed();
+        if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
+            self.jobs[job_index].set_filename(name);
+        }
+        self.record_media_identity(job_id, job_index);
+        // Persist before announcing, so a restart never contradicts the event.
+        let persisted = self.persist_queue_now();
         self.event_tx
             .send(CoreEvent::JobCompleted {
                 job_id: job_id.to_string(),
@@ -3758,13 +3911,7 @@ impl Core {
                 path: file_path.to_path_buf(),
             })
             .map_err(|_| "event channel closed".to_string())?;
-
-        self.jobs[job_index].mark_completed();
-        if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-            self.jobs[job_index].set_filename(name);
-        }
-        self.record_media_identity(job_id, job_index)?;
-        self.persist_queue_now()
+        persisted
     }
 
     fn mark_archived_probe_items(&self, items: &mut [MediaItem]) {
@@ -3773,9 +3920,13 @@ impl Core {
         }
     }
 
-    fn record_media_identity(&mut self, job_id: &str, job_index: usize) -> Result<(), String> {
+    /// Record a finished media job in the Download Archive.
+    ///
+    /// Best effort: the archive is History, not queue state, so a failed save
+    /// is logged and never blocks the job's own terminal state.
+    fn record_media_identity(&mut self, job_id: &str, job_index: usize) {
         let Some(media_id) = self.jobs[job_index].media_id().map(str::to_string) else {
-            return Ok(());
+            return;
         };
         let is_completed = self.jobs[job_index].is_completed();
         let title = self.jobs[job_index]
@@ -3802,9 +3953,10 @@ impl Core {
         };
         self.download_archive.record(entry);
         if let Some(root) = &self.library_root {
-            self.download_archive.save(root)?;
+            if let Err(err) = self.download_archive.save(root) {
+                eprintln!("phlegethon: could not save the Download Archive: {err}");
+            }
         }
-        Ok(())
     }
 
     // -----------------------------------------------------------------------

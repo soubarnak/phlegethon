@@ -43,14 +43,18 @@ impl YtDlpLauncher {
 
     /// A [`Command`] with no arguments yet.
     pub fn command(&self) -> Command {
-        match self {
+        let mut cmd = match self {
             Self::Binary { path } => Command::new(path),
             Self::PythonModule { python } => {
                 let mut cmd = Command::new(python);
                 cmd.args(["-m", "yt_dlp"]);
                 cmd
             }
-        }
+        };
+        // Python picks its stdout encoding from the locale; under a C locale yt-dlp would
+        // fail on, or mangle, non-ASCII titles. Force UTF-8 for the child.
+        cmd.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
+        cmd
     }
 
     /// Human-readable location for the Toolchain panel.
@@ -130,9 +134,16 @@ pub fn discover_ytdlp(
 }
 
 /// `PATH` split into directories.
+///
+/// Relative and empty entries are dropped: they mean "the current directory", which
+/// would let a file in whatever folder the app started from stand in for a tool.
 pub fn path_dirs_from_env() -> Vec<PathBuf> {
     std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
+        .map(|p| {
+            std::env::split_paths(&p)
+                .filter(|dir| dir.is_absolute())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -143,6 +154,7 @@ pub fn find_in_path(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
         return is_executable_file(&p).then_some(p);
     }
     dirs.iter()
+        .filter(|d| d.is_absolute())
         .map(|d| d.join(name))
         .find(|p| is_executable_file(p))
 }
@@ -592,6 +604,19 @@ impl PipeCapture {
         self.done.load(Ordering::Acquire)
     }
 
+    /// Bytes captured so far (or taken so far, never decreasing within one run).
+    fn len(&self) -> usize {
+        self.buf.lock().map(|b| b.len()).unwrap_or_default()
+    }
+
+    /// Copy the bytes captured after the first `from` bytes.
+    fn read_from(&self, from: usize) -> Vec<u8> {
+        self.buf
+            .lock()
+            .map(|b| b.get(from..).map(<[u8]>::to_vec).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
     /// Take what was captured so far.
     fn take(&self) -> Vec<u8> {
         self.buf
@@ -660,6 +685,33 @@ pub fn run_command_with_deadline_polling(
     deadline: Option<Instant>,
     poll_interval: Duration,
 ) -> Result<CommandOutcome, String> {
+    run_command_observing(cmd, stop, deadline, poll_interval, None)
+}
+
+/// [`run_command_with_deadline_polling`] that also hands every new chunk of stdout to
+/// `observer` while the child runs (called from the polling thread, once per poll).
+/// The full output is still returned at the end.
+pub fn run_command_observing(
+    cmd: &mut Command,
+    stop: Option<&AtomicBool>,
+    deadline: Option<Instant>,
+    poll_interval: Duration,
+    observer: Option<&mut dyn FnMut(&[u8])>,
+) -> Result<CommandOutcome, String> {
+    run_command_watched(cmd, stop, deadline, None, poll_interval, observer)
+}
+
+/// [`run_command_observing`] that also gives up when the child prints nothing on stdout
+/// or stderr for `stall`: the outcome is [`CommandOutcome::TimedOut`] after the process
+/// tree is killed. A hung network read then ends the run instead of blocking it forever.
+pub fn run_command_watched(
+    cmd: &mut Command,
+    stop: Option<&AtomicBool>,
+    deadline: Option<Instant>,
+    stall: Option<Duration>,
+    poll_interval: Duration,
+    mut observer: Option<&mut dyn FnMut(&[u8])>,
+) -> Result<CommandOutcome, String> {
     if stop.is_some_and(|s| s.load(Ordering::Acquire)) {
         return Ok(CommandOutcome::Stopped);
     }
@@ -667,9 +719,14 @@ pub fn run_command_with_deadline_polling(
     // Output is always captured here; callers must not have to remember to pipe it.
     cmd_prepare(cmd);
     own_the_process_tree(cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn {program}: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        let message = format!("failed to spawn {program}: {e}");
+        if e.kind() == std::io::ErrorKind::NotFound {
+            tag_error(ERROR_CODE_TOOLCHAIN_MISSING, message)
+        } else {
+            message
+        }
+    })?;
 
     let stdout_pipe = child
         .stdout
@@ -682,7 +739,31 @@ pub fn run_command_with_deadline_polling(
     let stdout = PipeCapture::spawn(stdout_pipe);
     let stderr = PipeCapture::spawn(stderr_pipe);
 
+    let mut observed = 0usize;
+    let mut observe = |stdout: &PipeCapture, observed: &mut usize| {
+        if let Some(observer) = observer.as_deref_mut() {
+            let chunk = stdout.read_from(*observed);
+            if !chunk.is_empty() {
+                *observed += chunk.len();
+                observer(&chunk);
+            }
+        }
+    };
+
+    let mut last_output = Instant::now();
+    let mut seen = 0usize;
     let status = loop {
+        observe(&stdout, &mut observed);
+        let total = stdout.len() + stderr.len();
+        if total != seen {
+            seen = total;
+            last_output = Instant::now();
+        }
+        if stall.is_some_and(|limit| last_output.elapsed() >= limit) {
+            kill_process_tree(&mut child);
+            wait_for_readers([&stdout, &stderr]);
+            return Ok(CommandOutcome::TimedOut);
+        }
         if stop.is_some_and(|s| s.load(Ordering::Acquire)) {
             kill_process_tree(&mut child);
             wait_for_readers([&stdout, &stderr]);
@@ -716,6 +797,7 @@ pub fn run_command_with_deadline_polling(
         }
         wait_for_readers([&stdout, &stderr]);
     }
+    observe(&stdout, &mut observed);
     Ok(CommandOutcome::Finished {
         status,
         stdout: stdout.take(),
@@ -756,47 +838,73 @@ pub const ERROR_CODE_TIMEOUT: &str = "timeout";
 pub const ERROR_CODE_UNSUPPORTED_URL: &str = "unsupported_url";
 pub const ERROR_CODE_GEO_BLOCKED: &str = "geo_blocked";
 pub const ERROR_CODE_NOT_FOUND: &str = "not_found";
+pub const ERROR_CODE_TOOLCHAIN_MISSING: &str = "toolchain_missing";
 
 /// Classify yt-dlp stderr into a known failure code, when recognisable.
+///
+/// Each code needs wording that yt-dlp or the site really uses for that failure. A bare
+/// `403` or a mention of `deno` is not enough: a 403 can be a hotlink or expired URL, and
+/// `deno` can sit in a path.
 pub fn classify_ytdlp_failure(stderr: &str) -> Option<&'static str> {
     let lower = stderr.to_ascii_lowercase();
-    let cloudflare = lower.contains("just a moment")
-        || lower.contains("cloudflare")
-        || lower.contains("cf-chl")
-        || lower.contains("challenges.cloudflare.com")
-        || lower.contains("captcha");
-    let forbidden = lower.contains("http error 403") || lower.contains("403 forbidden");
-    let login = lower.contains("sign in to confirm")
-        || lower.contains("login required")
-        || lower.contains("--cookies")
-        || lower.contains("cookies-from-browser")
-        || lower.contains("not a bot")
-        || lower.contains("age-restricted")
-        || lower.contains("confirm your age");
-    if cloudflare || login || forbidden {
-        return Some(ERROR_CODE_NEEDS_BROWSER_COOKIES);
-    }
-    if lower.contains("js runtime")
-        || lower.contains("javascript runtime")
-        || lower.contains("--js-runtimes")
-        || lower.contains("n challenge")
-        || lower.contains("nsig")
-        || lower.contains("yt-dlp-ejs")
-        || lower.contains("deno")
-    {
-        return Some(ERROR_CODE_NEEDS_JS_RUNTIME);
-    }
-    if lower.contains("not available in your country")
-        || lower.contains("geo restricted")
-        || lower.contains("geo-restricted")
-        || lower.contains("geoblocked")
-    {
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+
+    // Geo wording is specific, so it wins over the generic blocked-request markers a
+    // geo-block page often carries too.
+    if has(&[
+        "not available in your country",
+        "available in your country",
+        "not available in your region",
+        "available in your region",
+        "blocked in your country",
+        "geo restricted",
+        "geo-restricted",
+        "geo restriction",
+        "geo-restriction",
+        "geoblocked",
+        "geo-blocked",
+        "geo bypass",
+    ]) {
         return Some(ERROR_CODE_GEO_BLOCKED);
     }
-    if lower.contains("http error 404")
-        || lower.contains("video unavailable")
-        || lower.contains("has been removed")
-    {
+    let cloudflare = has(&[
+        "just a moment",
+        "cloudflare",
+        "cf-chl",
+        "challenges.cloudflare.com",
+        "captcha",
+    ]);
+    let login = has(&[
+        "sign in to confirm",
+        "login required",
+        "log in to",
+        "--cookies",
+        "cookies-from-browser",
+        "not a bot",
+        "age-restricted",
+        "confirm your age",
+        "private video",
+        "members-only",
+    ]);
+    if cloudflare || login {
+        return Some(ERROR_CODE_NEEDS_BROWSER_COOKIES);
+    }
+    if has(&[
+        "js runtime",
+        "javascript runtime",
+        "--js-runtimes",
+        "n challenge solving failed",
+        "nsig extraction failed",
+        "yt-dlp-ejs",
+    ]) {
+        return Some(ERROR_CODE_NEEDS_JS_RUNTIME);
+    }
+    if has(&[
+        "http error 404",
+        "video unavailable",
+        "has been removed",
+        "no longer available",
+    ]) {
         return Some(ERROR_CODE_NOT_FOUND);
     }
     if lower.contains("unsupported url") {
@@ -837,6 +945,10 @@ pub fn error_code_hint(code: &str) -> Option<&'static str> {
         ERROR_CODE_GEO_BLOCKED => Some("The site reports this media is not available in your region. A proxy in Settings may help."),
         ERROR_CODE_NOT_FOUND => Some("The media could not be found; it may have been removed."),
         ERROR_CODE_UNSUPPORTED_URL => Some("yt-dlp does not support this URL; the page sniffer found nothing either."),
+        ERROR_CODE_TOOLCHAIN_MISSING => Some(
+            "A required tool was not found. Open Toolchain → Install to set up yt-dlp, or \
+             install it with your package manager.",
+        ),
         _ => None,
     }
 }
@@ -1047,7 +1159,9 @@ mod tests {
     #[test]
     fn failure_classification_and_error_codes() {
         assert_eq!(
-            classify_ytdlp_failure("ERROR: Unable to download webpage: HTTP Error 403: Forbidden"),
+            classify_ytdlp_failure(
+                "ERROR: Unable to download webpage: HTTP Error 403: Forbidden (Cloudflare)"
+            ),
             Some(ERROR_CODE_NEEDS_BROWSER_COOKIES)
         );
         assert_eq!(
@@ -1076,6 +1190,84 @@ mod tests {
         assert!(error_code_hint(ERROR_CODE_NEEDS_BROWSER_COOKIES)
             .unwrap()
             .contains("Cookies"));
+    }
+
+    /// L-19: a bare 403 or a path that happens to contain `deno` is not evidence of a
+    /// cookie wall or a missing JS runtime, and common geo wording was missed.
+    #[test]
+    fn failure_classification_needs_real_evidence() {
+        assert_eq!(
+            classify_ytdlp_failure(
+                "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+            ),
+            None
+        );
+        assert_eq!(
+            classify_ytdlp_failure("ERROR: cannot write to /home/deno/Videos/clip.mp4"),
+            None
+        );
+        for geo in [
+            "ERROR: [youtube] x: The uploader has not made this video available in your country",
+            "ERROR: This video is not available in your region",
+            "ERROR: [site] This content is geo-restricted",
+            "ERROR: Geo restriction detected; use --geo-bypass",
+        ] {
+            assert_eq!(
+                classify_ytdlp_failure(geo),
+                Some(ERROR_CODE_GEO_BLOCKED),
+                "{geo}"
+            );
+        }
+    }
+
+    /// M-26: a missing binary used to be an untagged "failed to spawn ... No such file".
+    #[test]
+    fn missing_binary_is_tagged_toolchain_missing() {
+        let mut cmd = Command::new("/nonexistent/phlegethon/yt-dlp");
+        let err =
+            run_command_with_deadline_polling(&mut cmd, None, None, Duration::from_millis(10))
+                .unwrap_err();
+        assert_eq!(
+            error_code(&err),
+            Some(ERROR_CODE_TOOLCHAIN_MISSING),
+            "{err}"
+        );
+        assert!(error_code_hint(ERROR_CODE_TOOLCHAIN_MISSING)
+            .unwrap()
+            .contains("Toolchain"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_forces_utf8_for_python() {
+        let cmd = YtDlpLauncher::binary(PathBuf::from("/bin/true")).command();
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs
+            .iter()
+            .any(|(k, v)| *k == "PYTHONUTF8" && *v == Some(std::ffi::OsStr::new("1"))));
+    }
+
+    /// L-28: `.` and empty PATH entries mean "the current directory".
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_entries_are_ignored() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Remove(PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let name = format!("phlegethon-path-test-{}", std::process::id());
+        let file = std::env::current_dir().unwrap().join(&name);
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
+        let _cleanup = Remove(file.clone());
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let relative = [PathBuf::from("."), PathBuf::new()];
+        assert_eq!(find_in_path(&name, &relative), None);
+        let absolute = [std::env::current_dir().unwrap()];
+        assert_eq!(find_in_path(&name, &absolute), Some(file));
     }
 
     #[test]

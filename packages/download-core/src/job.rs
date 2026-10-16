@@ -25,6 +25,9 @@ pub enum EnqueueOutcome {
 }
 
 /// Derive a filename from a URL path segment.
+///
+/// The segment is percent-decoded and sanitized, so `My%20File.zip` becomes
+/// `My File.zip` and the result is always a single safe file name.
 pub fn filename_from_url(url: &str) -> String {
     url::Url::parse(url)
         .ok()
@@ -32,7 +35,7 @@ pub fn filename_from_url(url: &str) -> String {
             u.path_segments()
                 .and_then(|mut s| s.next_back())
                 .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
+                .map(|s| crate::sanitize_filename(&crate::page_sniffer::percent_decode(s)))
         })
         .unwrap_or_else(|| "download".to_string())
 }
@@ -634,6 +637,10 @@ impl Job {
 
     pub fn discard_requested(&self) -> &Arc<AtomicBool> {
         &self.discard_requested
+    }
+
+    pub fn clear_discard_requested(&self) {
+        self.discard_requested.store(false, Ordering::Release);
     }
 
     pub fn is_discard_requested(&self) -> bool {
