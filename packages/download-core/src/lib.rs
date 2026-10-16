@@ -583,6 +583,21 @@ struct PlanningHead {
     file_size: Result<u64, String>,
 }
 
+/// Reserve `total` bytes for the `.part` so a full disk fails the job at the
+/// start. A filesystem without `fallocate` falls back to a sparse file.
+fn preallocate(file: &std::fs::File, total: u64) -> Result<(), String> {
+    use fs2::FileExt;
+    match file.allocate(total) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(28) => Err(format!(
+            "no space left on the device for {total} bytes: {e}"
+        )),
+        Err(_) => file
+            .set_len(total)
+            .map_err(|e| format!("preallocate partial: {e}")),
+    }
+}
+
 enum SegmentedPlanning {
     /// The job uses a single connection.
     NotApplicable,
@@ -1204,7 +1219,9 @@ impl Core {
     /// advance counters without the Core lock, so the dispatch tick is what
     /// carries that progress into `jobs.json` before a crash can lose it.
     fn persist_segment_progress(&mut self) -> Result<(), String> {
-        let live = self.jobs.iter().any(|j| j.has_live_segments());
+        let live = self.jobs.iter().any(|j| {
+            j.has_live_segments() || (j.is_pending() && j.transfer_active().load(Ordering::Acquire))
+        });
         if live && self.last_progress_flush.elapsed() >= PROGRESS_FLUSH_INTERVAL {
             self.persist_queue_now()?;
         }
@@ -1288,7 +1305,10 @@ impl Core {
         job_index: usize,
         error: String,
     ) -> Result<(), String> {
-        self.jobs[job_index].mark_failed();
+        if !self.jobs[job_index].mark_failed() {
+            // Already Completed: a late failure must not undo it.
+            return Ok(());
+        }
         self.jobs[job_index].set_last_error(Some(error.clone()));
         self.event_tx
             .send(CoreEvent::JobFailed {
@@ -1310,6 +1330,15 @@ impl Core {
         head: Option<&PlanningHead>,
     ) -> Result<bool, String> {
         let Some(total) = self.resolve_known_total(job_index, url, head) else {
+            // The size is unknown, so only the safety margin can be required.
+            // A failed lookup does not block the job.
+            if let Ok(free) = self.free_space.free_bytes(destination) {
+                if !disk_space::has_sufficient_free_space(free, 0) {
+                    let err = disk_space::insufficient_disk_space_error(destination, free, 0);
+                    self.fail_job_for_disk_space(job_index, job_id, err)?;
+                    return Ok(false);
+                }
+            }
             return Ok(true);
         };
         if let Err(err) = self.check_disk_space_before_start(destination, total, bytes_received) {
@@ -3031,8 +3060,13 @@ impl Core {
             self.persist_queue_now()?;
             let part = std::fs::File::create(&part_path)
                 .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
-            part.set_len(total)
-                .map_err(|e| format!("preallocate partial {part_path:?}: {e}"))?;
+            if let Err(err) = preallocate(&part, total) {
+                // Out of space now, not midway through the transfer.
+                let _ = std::fs::remove_file(&part_path);
+                self.jobs[i].clear_segments();
+                self.finalize_failed_job(job_id, i, err)?;
+                return Ok(SegmentedPlanning::Finalized);
+            }
             self.jobs[i].freeze_segments();
         }
 
@@ -3521,7 +3555,7 @@ impl Core {
         file_path: &Path,
         total: u64,
     ) -> Result<(), String> {
-        std::fs::rename(part_path, file_path)
+        fsutil::rename_durable(part_path, file_path)
             .map_err(|e| format!("rename {part_path:?} -> {file_path:?}: {e}"))?;
 
         self.finalize_completed_job(job_id, job_index, file_path, total)
@@ -3535,6 +3569,9 @@ impl Core {
         file_path: &Path,
         bytes_written: u64,
     ) -> Result<(), String> {
+        if !self.jobs[job_index].is_pending() {
+            return Ok(());
+        }
         if let Some(expected) = self.jobs[job_index].expected_hash().cloned() {
             if let Err(err) = expected.verify_file(file_path) {
                 return self.finalize_failed_job(job_id, job_index, err);
