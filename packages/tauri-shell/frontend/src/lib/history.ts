@@ -1,4 +1,5 @@
 /** History (Download Archive) view helpers. */
+import { t } from "./i18n";
 import type { ArchiveEntry, ArchiveOutcome } from "@/tauri/types";
 
 export type HistoryFilter = "all" | ArchiveOutcome;
@@ -13,10 +14,10 @@ export function formatTimestamp(unixSecs: number, now: Date = new Date()): strin
   const d = new Date(unixSecs * 1000);
   const diffMs = now.getTime() - d.getTime();
 
-  if (diffMs < 60_000) return "Just now";
+  if (diffMs < 60_000) return t("history.justNow");
   if (diffMs < 3600_000) {
     const mins = Math.floor(diffMs / 60_000);
-    return `${mins}m ago`;
+    return t("history.minutesAgo", { count: mins });
   }
   if (d.toDateString() === now.toDateString()) {
     return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -24,7 +25,8 @@ export function formatTimestamp(unixSecs: number, now: Date = new Date()): strin
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   if (d.toDateString() === yesterday.toDateString()) {
-    return "Yesterday " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    return t("history.yesterday", { time });
   }
   return d.toLocaleDateString(undefined, {
     month: "short",

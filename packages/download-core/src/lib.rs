@@ -20,6 +20,7 @@ mod http;
 mod integrity;
 mod job;
 mod job_signals;
+mod launch_sites;
 mod media_extras;
 mod metalink;
 mod mirror_set;
@@ -65,7 +66,7 @@ pub use filename_template::{
 pub use github_release_source::{
     select_asset as select_ytdlp_release_asset, GitHubReleaseUpdateSource,
 };
-pub use http::{FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
+pub use http::{ContentRange, FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
@@ -99,7 +100,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use transfer::{
-    execute_segment_fetch, execute_single_fetch, make_job_bucket, SegmentFetchParams,
+    execute_segment_fetch, execute_single_fetch, SegmentError, SegmentFetchParams,
     SingleFetchParams,
 };
 
@@ -170,6 +171,10 @@ pub struct Core {
     /// Global bandwidth cap in bytes per second.
     /// None = globally uncapped.
     bandwidth_cap: Option<u64>,
+    /// The one token bucket every transfer shares for the global cap. Rebuilt
+    /// only when the cap changes, so jobs started in different dispatch
+    /// rounds draw from the same bucket.
+    global_bucket: Option<SharedTokenBucket>,
     /// Maximum concurrent transferring jobs (default [`DEFAULT_ACTIVE_JOB_LIMIT`]).
     active_job_limit: u32,
     default_quality_policy: DefaultQualityPolicy,
@@ -201,15 +206,34 @@ pub struct Core {
     probe_tier_settings: ProbeTierSettings,
     /// Cancel flags for in-flight probes, keyed by normalized URL.
     probe_cancels: HashMap<String, Arc<AtomicBool>>,
+    /// Cookie sessions handed in with an enqueue that still needs a probe,
+    /// keyed by normalized URL. Moved onto the jobs at confirm.
+    probe_cookie_sessions: HashMap<String, CookieChannel>,
 }
 
 /// Options for [`Core::enqueue_with_options`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Construct with `EnqueueOptions { force_direct: true, ..Default::default() }`
+/// so new options do not break callers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnqueueOptions {
     /// Skip classification and create a plain HTTP job for the URL itself
     /// ("Try plain download" after a failed probe).
     #[serde(default)]
     pub force_direct: bool,
+    /// Per-job cookie session (for example a Chrome Companion hand-off).
+    ///
+    /// Core uses it, instead of the global cookie channel, for every probe,
+    /// quality lookup and extractor download that belongs to this enqueue: a
+    /// direct URL gets a job that carries the session; a URL that needs
+    /// Probe-then-Confirm keeps the session until [`Core::confirm_probe_selection`]
+    /// copies it onto each confirmed job (or [`Core::clear_pending_probe`]
+    /// drops it). The global channel from [`Core::cookie_channel`] is never
+    /// changed. The session is validated (`CookieChannel::validate`) and
+    /// persisted with the job in `jobs.json`; an unconfigured session is
+    /// ignored. The caller owns the cookie file's lifetime.
+    #[serde(default)]
+    pub cookie_session: Option<CookieChannel>,
 }
 
 /// Everything a probe needs, captured under the Core lock so the network work
@@ -493,6 +517,7 @@ enum UnlockedTransferPlan {
         part_path: PathBuf,
         file_path: PathBuf,
         range: Option<Range<u64>>,
+        if_range: Option<String>,
         append: bool,
         truncate: bool,
         http: Arc<dyn HttpBackend>,
@@ -508,6 +533,13 @@ enum UnlockedTransferPlan {
         url: String,
         part_path: PathBuf,
         file_path: PathBuf,
+        total_size: u64,
+        /// Segments still to fetch, with the counter each one advances.
+        work: Vec<SegmentWork>,
+        /// `If-Range` validator for segments that continue earlier progress.
+        if_range: Option<String>,
+        /// The plan continues a stored table rather than starting a new one.
+        resumed: bool,
         http: Arc<dyn HttpBackend>,
         global_bucket: Option<SharedTokenBucket>,
         job_bucket: Option<SharedTokenBucket>,
@@ -550,7 +582,9 @@ enum UnlockedTransferOutcome {
         part_path: PathBuf,
         file_path: PathBuf,
         failed_url: String,
-        result: Result<(u64, u64, bool), String>,
+        total_size: u64,
+        resumed: bool,
+        result: SegmentedDone,
     },
     Extracted {
         job_id: String,
@@ -560,6 +594,55 @@ enum UnlockedTransferOutcome {
         post: Option<PostprocessOutcome>,
         stop: Arc<AtomicBool>,
     },
+    /// The transfer code panicked; the job is failed so it cannot stay active.
+    Panicked { job_id: String, message: String },
+}
+
+/// Answers to the HEAD requests planning needs, fetched without the Core
+/// lock. Planning uses them only while the job still points at `url`.
+struct PlanningHead {
+    url: String,
+    supports_range: Result<bool, String>,
+    file_size: Result<u64, String>,
+}
+
+/// Reserve `total` bytes for the `.part` so a full disk fails the job at the
+/// start. A filesystem without `fallocate` falls back to a sparse file.
+fn preallocate(file: &std::fs::File, total: u64) -> Result<(), String> {
+    use fs2::FileExt;
+    match file.allocate(total) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(28) => Err(format!(
+            "no space left on the device for {total} bytes: {e}"
+        )),
+        Err(_) => file
+            .set_len(total)
+            .map_err(|e| format!("preallocate partial: {e}")),
+    }
+}
+
+enum SegmentedPlanning {
+    /// The job uses a single connection.
+    NotApplicable,
+    Plan(Box<UnlockedTransferPlan>),
+    /// The job was finalized during planning (already complete, or empty).
+    Finalized,
+}
+
+/// One segment's unfinished range and the counter its fetch advances.
+struct SegmentWork {
+    range: Range<u64>,
+    written: Arc<AtomicU64>,
+}
+
+/// What a Segmented Transfer run left behind: the validators any finished
+/// segment reported, and the failure that stopped it, if any. Segments that
+/// did finish keep their progress in the job's segment table either way.
+struct SegmentedDone {
+    paused: bool,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    error: Option<SegmentError>,
 }
 
 impl UnlockedTransferOutcome {
@@ -567,13 +650,56 @@ impl UnlockedTransferOutcome {
         match self {
             Self::Fetched { job_id, .. }
             | Self::Segmented { job_id, .. }
-            | Self::Extracted { job_id, .. } => job_id,
+            | Self::Extracted { job_id, .. }
+            | Self::Panicked { job_id, .. } => job_id,
         }
     }
 }
 
 impl UnlockedTransferPlan {
+    fn job_id(&self) -> &str {
+        match self {
+            Self::SingleFetch { job_id, .. }
+            | Self::Segmented { job_id, .. }
+            | Self::ExtractorFetch { job_id, .. } => job_id,
+        }
+    }
+
+    fn transfer_active_flag(&self) -> Arc<AtomicBool> {
+        match self {
+            Self::SingleFetch {
+                transfer_active, ..
+            }
+            | Self::Segmented {
+                transfer_active, ..
+            }
+            | Self::ExtractorFetch {
+                transfer_active, ..
+            } => transfer_active.clone(),
+        }
+    }
+
+    /// Run the transfer. A panic inside it must not leave the job marked
+    /// active, so it is caught, the flag is cleared, and the job is reported
+    /// as failed through [`UnlockedTransferOutcome::Panicked`].
     fn run(self) -> UnlockedTransferOutcome {
+        let job_id = self.job_id().to_string();
+        let active = self.transfer_active_flag();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_inner())) {
+            Ok(outcome) => outcome,
+            Err(payload) => {
+                active.store(false, Ordering::Release);
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|m| m.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                UnlockedTransferOutcome::Panicked { job_id, message }
+            }
+        }
+    }
+
+    fn run_inner(self) -> UnlockedTransferOutcome {
         match self {
             Self::SingleFetch {
                 job_id,
@@ -582,6 +708,7 @@ impl UnlockedTransferPlan {
                 part_path,
                 file_path,
                 range,
+                if_range,
                 append,
                 truncate,
                 http,
@@ -598,6 +725,7 @@ impl UnlockedTransferPlan {
                     url,
                     part_path: part_path.clone(),
                     range,
+                    if_range,
                     append,
                     truncate,
                     global_bucket,
@@ -620,6 +748,10 @@ impl UnlockedTransferPlan {
                 url,
                 part_path,
                 file_path,
+                total_size,
+                work,
+                if_range,
+                resumed,
                 http,
                 global_bucket,
                 job_bucket,
@@ -632,6 +764,8 @@ impl UnlockedTransferPlan {
                     http,
                     &url,
                     &part_path,
+                    work,
+                    if_range,
                     global_bucket,
                     job_bucket,
                     pause_requested,
@@ -643,6 +777,8 @@ impl UnlockedTransferPlan {
                     part_path,
                     file_path,
                     failed_url,
+                    total_size,
+                    resumed,
                     result,
                 }
             }
@@ -809,79 +945,82 @@ fn run_extractor_fetch(params: ExtractorFetchParams) -> Result<ExtractorDownload
 
 /// Multi-connection Range transfer into `part_path`. Runs without the Core mutex.
 ///
-/// Returns `(total_size, bytes_written, paused)`.
+/// Each `work` entry fetches the unfinished tail of one segment and advances
+/// its counter as bytes reach the disk, so an interrupted run leaves an exact
+/// record of what is done.
+#[allow(clippy::too_many_arguments)]
 fn run_segmented_fetch(
     http: Arc<dyn HttpBackend>,
     url: &str,
     part_path: &Path,
+    work: Vec<SegmentWork>,
+    if_range: Option<String>,
     global_bucket: Option<SharedTokenBucket>,
     job_bucket: Option<SharedTokenBucket>,
     pause_requested: Arc<AtomicBool>,
     progress: Option<TransferProgress>,
-) -> Result<(u64, u64, bool), String> {
-    let total_size = http.file_size(url)?;
-    if total_size == 0 {
-        return Err("empty file, nothing to download".to_string());
-    }
-
-    std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(part_path)
-        .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
-
-    let seg_count = DEFAULT_SEGMENT_COUNT.min(total_size);
-    let seg_size = total_size / seg_count;
-    let mut segments: Vec<Range<u64>> = Vec::with_capacity(seg_count as usize);
-    for s in 0..seg_count {
-        let start = s * seg_size;
-        let end = if s == seg_count - 1 {
-            total_size
-        } else {
-            (s + 1) * seg_size
-        };
-        if start < end {
-            segments.push(start..end);
-        }
-    }
-
-    let url_owned = url.to_string();
-    let part_path_owned = part_path.to_path_buf();
-
-    let segment_results: Vec<Result<u64, String>> = std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for range in segments {
-            let http_ref = http.clone();
-            let url_ref = url_owned.clone();
-            let part_ref = part_path_owned.clone();
-            let global = global_bucket.clone();
-            let job = job_bucket.clone();
-            let pause = pause_requested.clone();
-            let prog = progress.clone();
-            handles.push(scope.spawn(move || {
-                execute_segment_fetch(SegmentFetchParams {
-                    http: http_ref,
-                    url: url_ref,
-                    part_path: part_ref,
-                    range,
-                    global_bucket: global,
-                    job_bucket: job,
-                    pause_requested: pause,
-                    progress: prog,
+) -> SegmentedDone {
+    let segment_results: Vec<Result<transfer::SegmentFetched, SegmentError>> =
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for item in work {
+                let http_ref = http.clone();
+                let url_ref = url.to_string();
+                let part_ref = part_path.to_path_buf();
+                let global = global_bucket.clone();
+                let job = job_bucket.clone();
+                let pause = pause_requested.clone();
+                let prog = progress.clone();
+                let validator = if_range.clone();
+                handles.push(scope.spawn(move || {
+                    execute_segment_fetch(SegmentFetchParams {
+                        http: http_ref,
+                        url: url_ref,
+                        part_path: part_ref,
+                        range: item.range,
+                        if_range: validator,
+                        written: item.written,
+                        global_bucket: global,
+                        job_bucket: job,
+                        pause_requested: pause,
+                        progress: prog,
+                    })
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(SegmentError::Failed("segment worker panicked".to_string()))
+                    })
                 })
-            }));
-        }
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+                .collect()
+        });
 
-    let mut bytes_written = 0u64;
+    let mut done = SegmentedDone {
+        paused: pause_requested.load(Ordering::Acquire),
+        etag: None,
+        last_modified: None,
+        error: None,
+    };
     for result in segment_results {
-        bytes_written = bytes_written.saturating_add(result?);
+        match result {
+            Ok(fetched) => {
+                if done.etag.is_none() && done.last_modified.is_none() {
+                    done.etag = fetched.etag;
+                    done.last_modified = fetched.last_modified;
+                }
+            }
+            // A server that ignores Range outranks any other failure.
+            Err(SegmentError::RangeIgnored) => done.error = Some(SegmentError::RangeIgnored),
+            Err(err) => {
+                if done.error.is_none() {
+                    done.error = Some(err);
+                }
+            }
+        }
     }
-
-    let paused = pause_requested.load(Ordering::Acquire);
-    Ok((total_size, bytes_written, paused))
+    done
 }
 
 impl Core {
@@ -945,6 +1084,7 @@ impl Core {
             jobs: Vec::new(),
             event_tx: tx,
             bandwidth_cap: None,
+            global_bucket: None,
             active_job_limit: DEFAULT_ACTIVE_JOB_LIMIT,
             default_quality_policy: DefaultQualityPolicy::default(),
             audio_only_mode: false,
@@ -967,6 +1107,7 @@ impl Core {
             sniffer,
             probe_tier_settings: ProbeTierSettings::default(),
             probe_cancels: HashMap::new(),
+            probe_cookie_sessions: HashMap::new(),
         };
         (core, rx)
     }
@@ -1060,6 +1201,7 @@ impl Core {
         }
         if let Some(cap) = storage::load_global_bandwidth_cap(&root)? {
             self.bandwidth_cap = Some(cap);
+            self.rebuild_global_bucket();
         }
         self.active_job_limit = storage::load_active_job_limit(&root)?;
         let quality_settings = storage::load_quality_settings(&root)?;
@@ -1069,7 +1211,12 @@ impl Core {
         self.default_media_extras = media_settings.defaults;
         self.cookie_channel = storage::load_cookie_channel(&root)?;
         self.proxy_settings = storage::load_proxy_settings(&root)?;
-        self.http.apply_proxy_settings(&self.proxy_settings);
+        // A persisted setting the HTTP client rejects (for example an `https://` proxy saved
+        // by an older release) must not stop the library from opening; the backend refuses
+        // requests until the user fixes the setting.
+        if let Err(e) = self.http.apply_proxy_settings(&self.proxy_settings) {
+            eprintln!("saved proxy setting rejected: {e}");
+        }
         self.sidecar_update_settings = storage::load_sidecar_update_settings(&root)?;
         self.filename_template = storage::load_filename_template(&root)?;
         self.probe_tier_settings = storage::load_probe_tier_settings(&root)?;
@@ -1134,6 +1281,19 @@ impl Core {
         Ok(())
     }
 
+    /// Save the segment tables of running Segmented Transfers. Their workers
+    /// advance counters without the Core lock, so the dispatch tick is what
+    /// carries that progress into `jobs.json` before a crash can lose it.
+    fn persist_segment_progress(&mut self) -> Result<(), String> {
+        let live = self.jobs.iter().any(|j| {
+            j.has_live_segments() || (j.is_pending() && j.transfer_active().load(Ordering::Acquire))
+        });
+        if live && self.last_progress_flush.elapsed() >= PROGRESS_FLUSH_INTERVAL {
+            self.persist_queue_now()?;
+        }
+        Ok(())
+    }
+
     fn flush_pending_progress(&mut self) -> Result<(), String> {
         if self.progress_flush_pending {
             self.persist_queue_now()?;
@@ -1147,10 +1307,30 @@ impl Core {
         self.jobs.iter().position(|j| j.id() == job_id)
     }
 
-    fn resolve_known_total(&self, job_index: usize, url: &str) -> Option<u64> {
+    fn resolve_known_total(
+        &self,
+        job_index: usize,
+        url: &str,
+        head: Option<&PlanningHead>,
+    ) -> Option<u64> {
         self.jobs[job_index]
             .total_bytes()
-            .or_else(|| self.http.file_size(url).ok().filter(|&n| n > 0))
+            .or_else(|| self.head_file_size(url, head).ok().filter(|&n| n > 0))
+    }
+
+    /// `file_size` from the pre-fetched HEAD when it is for `url`, else live.
+    fn head_file_size(&self, url: &str, head: Option<&PlanningHead>) -> Result<u64, String> {
+        match head {
+            Some(h) if h.url == url => h.file_size.clone(),
+            _ => self.http.file_size(url),
+        }
+    }
+
+    fn head_supports_range(&self, url: &str, head: Option<&PlanningHead>) -> Result<bool, String> {
+        match head {
+            Some(h) if h.url == url => h.supports_range.clone(),
+            _ => self.http.supports_range(url),
+        }
     }
 
     fn check_disk_space_before_start(
@@ -1191,7 +1371,10 @@ impl Core {
         job_index: usize,
         error: String,
     ) -> Result<(), String> {
-        self.jobs[job_index].mark_failed();
+        if !self.jobs[job_index].mark_failed() {
+            // Already Completed: a late failure must not undo it.
+            return Ok(());
+        }
         self.jobs[job_index].set_last_error(Some(error.clone()));
         self.event_tx
             .send(CoreEvent::JobFailed {
@@ -1210,8 +1393,18 @@ impl Core {
         destination: &Path,
         url: &str,
         bytes_received: u64,
+        head: Option<&PlanningHead>,
     ) -> Result<bool, String> {
-        let Some(total) = self.resolve_known_total(job_index, url) else {
+        let Some(total) = self.resolve_known_total(job_index, url, head) else {
+            // The size is unknown, so only the safety margin can be required.
+            // A failed lookup does not block the job.
+            if let Ok(free) = self.free_space.free_bytes(destination) {
+                if !disk_space::has_sufficient_free_space(free, 0) {
+                    let err = disk_space::insufficient_disk_space_error(destination, free, 0);
+                    self.fail_job_for_disk_space(job_index, job_id, err)?;
+                    return Ok(false);
+                }
+            }
             return Ok(true);
         };
         if let Err(err) = self.check_disk_space_before_start(destination, total, bytes_received) {
@@ -1262,6 +1455,14 @@ impl Core {
         if let Some(ref dest) = destination {
             Self::require_absolute_destination(dest)?;
         }
+        let cookie_session = match options.cookie_session {
+            Some(session) => {
+                let session = session.normalized();
+                session.validate()?;
+                session.is_configured().then_some(session)
+            }
+            None => None,
+        };
 
         let kind = if options.force_direct {
             classification::Kind::EnqueueDirect
@@ -1277,6 +1478,7 @@ impl Core {
                 if options.force_direct {
                     job.set_extraction_tier(ExtractionTier::DirectFile);
                 }
+                job.set_cookie_session(cookie_session);
                 let job_id = job.id().to_string();
                 let dest = job.destination().to_path_buf();
                 self.register_job_signals(&job);
@@ -1288,6 +1490,14 @@ impl Core {
                 })
             }
             classification::Kind::ProbeThenConfirm => {
+                match cookie_session {
+                    Some(session) => {
+                        self.probe_cookie_sessions.insert(url_str.clone(), session);
+                    }
+                    None => {
+                        self.probe_cookie_sessions.remove(&url_str);
+                    }
+                }
                 Ok(EnqueueOutcome::ProbeThenConfirm { url: url_str })
             }
         }
@@ -1531,15 +1741,29 @@ impl Core {
     ///
     /// When set, aggregate throughput across all jobs is limited to this rate.
     /// None/unset = globally uncapped.
-    pub fn set_global_bandwidth_cap(&mut self, cap: u64) {
+    ///
+    /// A cap of 0 is rejected: a bucket that never refills would stall every
+    /// transfer. Use [`Self::remove_global_bandwidth_cap`] for uncapped.
+    pub fn set_global_bandwidth_cap(&mut self, cap: u64) -> Result<(), String> {
+        if cap == 0 {
+            return Err("Bandwidth Cap must be at least 1 byte per second".to_string());
+        }
         self.bandwidth_cap = Some(cap);
-        let _ = self.persist_queue_now();
+        self.rebuild_global_bucket();
+        self.persist_queue_now()
     }
 
     /// Remove the global bandwidth cap (restore uncapped default).
-    pub fn remove_global_bandwidth_cap(&mut self) {
+    pub fn remove_global_bandwidth_cap(&mut self) -> Result<(), String> {
         self.bandwidth_cap = None;
-        let _ = self.persist_queue_now();
+        self.rebuild_global_bucket();
+        self.persist_queue_now()
+    }
+
+    fn rebuild_global_bucket(&mut self) {
+        self.global_bucket = self
+            .bandwidth_cap
+            .map(|rate| shared_token_bucket(rate, self.clock.clone()));
     }
 
     /// Return the current global bandwidth cap, if set.
@@ -1551,6 +1775,9 @@ impl Core {
     ///
     /// Effective rate is `min(global, per-job)` when both are set.
     pub fn set_job_bandwidth_cap(&mut self, job_id: &str, cap: u64) -> Result<(), String> {
+        if cap == 0 {
+            return Err("Bandwidth Cap must be at least 1 byte per second".to_string());
+        }
         let job = self
             .jobs
             .iter_mut()
@@ -1718,6 +1945,16 @@ impl Core {
         self.persist_queue_now()
     }
 
+    /// Cookie session attached to one job, if any (see
+    /// [`EnqueueOptions::cookie_session`]). `None` means the job uses the
+    /// global cookie channel.
+    pub fn job_cookie_session(&self, job_id: &str) -> Result<Option<CookieChannel>, String> {
+        let index = self
+            .job_index(job_id)
+            .ok_or_else(|| format!("job not found: {job_id}"))?;
+        Ok(self.jobs[index].cookie_session().cloned())
+    }
+
     /// Current global proxy settings.
     pub fn proxy_settings(&self) -> ProxySettings {
         self.proxy_settings.clone()
@@ -1730,8 +1967,8 @@ impl Core {
     pub fn set_proxy_settings(&mut self, settings: ProxySettings) -> Result<(), String> {
         let settings = settings.normalized();
         settings.validate()?;
-        self.proxy_settings = settings.clone();
-        self.http.apply_proxy_settings(&settings);
+        self.http.apply_proxy_settings(&settings)?;
+        self.proxy_settings = settings;
         self.persist_queue_now()
     }
 
@@ -2121,12 +2358,15 @@ impl Core {
 
     /// Capture everything a probe needs (settings, toolchain, cancel flag).
     pub fn plan_probe(&mut self, url: &str) -> Result<ProbePlan, String> {
+        let cookies = normalize_url(url)
+            .and_then(|key| self.probe_cookie_sessions.get(&key).cloned())
+            .unwrap_or_else(|| self.cookie_channel.clone());
         let plan = ProbePlan::standalone(
             url,
             Arc::clone(&self.extractor),
             Arc::clone(&self.sniffer),
             self.probe_tier_settings,
-            self.cookie_channel.clone(),
+            cookies,
             self.proxy_settings.clone(),
         )?;
         self.probe_cancels
@@ -2243,6 +2483,11 @@ impl Core {
             .iter()
             .find(|i| i.id == item_id)
             .ok_or_else(|| format!("item '{item_id}' not found in probe result for {url_key}"))?;
+        let cookies = self
+            .probe_cookie_sessions
+            .get(&url_key)
+            .cloned()
+            .unwrap_or_else(|| self.cookie_channel.clone());
         Ok(EnrichPlan {
             url_key,
             item_id: item_id.to_string(),
@@ -2250,7 +2495,7 @@ impl Core {
             fetch_kind: item.fetch_kind,
             existing: item.qualities.clone(),
             extractor: Arc::clone(&self.extractor),
-            cookies: self.cookie_channel.clone(),
+            cookies,
             proxy: self.proxy_settings.clone(),
         })
     }
@@ -2427,6 +2672,7 @@ impl Core {
             job.set_media_identity(item.id.clone(), item.title.clone());
             job.set_extraction_tier(probe.tier);
             job.set_referer(item.referer.clone());
+            job.set_cookie_session(self.probe_cookie_sessions.get(&url_key).cloned());
             match item.fetch_kind {
                 MediaFetchKind::Extractor => {
                     // Media behind an extractor is fetched by yt-dlp, not plain HTTP of the page URL.
@@ -2453,6 +2699,7 @@ impl Core {
         }
 
         self.pending_probes.remove(&url_key);
+        self.probe_cookie_sessions.remove(&url_key);
         self.persist_queue_now()?;
         Ok(job_ids)
     }
@@ -2461,6 +2708,7 @@ impl Core {
     pub fn clear_pending_probe(&mut self, url_str: &str) -> Result<(), String> {
         let url_key = normalize_url(url_str).ok_or_else(|| format!("invalid URL: {url_str}"))?;
         self.pending_probes.remove(&url_key);
+        self.probe_cookie_sessions.remove(&url_key);
         Ok(())
     }
 
@@ -2471,9 +2719,7 @@ impl Core {
     /// Process pending jobs synchronously — each transfer runs to completion
     /// before the next starts.  Prefer [`Self::dispatch_pending`] in shells.
     pub fn process_pending(&mut self) -> Result<(), String> {
-        let global_bucket = self
-            .bandwidth_cap
-            .map(|rate| shared_token_bucket(rate, self.clock.clone()));
+        let global_bucket = self.global_bucket.clone();
 
         let indices: Vec<usize> = self
             .jobs
@@ -2494,7 +2740,8 @@ impl Core {
     /// Start pending transfers up to the Active Job Limit without blocking.
     pub fn dispatch_pending(core: Arc<Mutex<Self>>) -> Result<(), String> {
         let (global_bucket, job_ids) = {
-            let core = core.lock().map_err(|e| e.to_string())?;
+            let mut core = core.lock().map_err(|e| e.to_string())?;
+            core.persist_segment_progress()?;
             let slots = core
                 .active_job_limit
                 .saturating_sub(core.job_signals.active_transfer_count() as u32)
@@ -2502,9 +2749,7 @@ impl Core {
             if slots == 0 {
                 return Ok(());
             }
-            let global_bucket = core
-                .bandwidth_cap
-                .map(|rate| shared_token_bucket(rate, core.clock.clone()));
+            let global_bucket = core.global_bucket.clone();
             let mut job_ids = Vec::new();
             for job in &core.jobs {
                 if !job.is_pending() {
@@ -2513,6 +2758,9 @@ impl Core {
                 if job.transfer_active().load(Ordering::Acquire) {
                     continue;
                 }
+                // Reserve the slot under the lock, so the next round counts
+                // this job before its thread has had time to plan.
+                job.transfer_active().store(true, Ordering::Release);
                 job_ids.push(job.id().to_string());
                 if job_ids.len() >= slots {
                     break;
@@ -2554,15 +2802,19 @@ impl Core {
     }
 
     /// Run a job transfer, releasing the Core mutex during blocking body I/O.
+    ///
+    /// The caller has claimed the job's Active Job Limit slot (its
+    /// `transfer_active` flag) under the lock; every exit releases it.
     fn run_transfer_outside_lock(
         core: Arc<Mutex<Self>>,
         job_id: String,
         global_bucket: Option<SharedTokenBucket>,
     ) -> Result<(), String> {
         loop {
+            let head = Self::fetch_head_unlocked(&core, &job_id)?;
             let plan = {
                 let mut core = core.lock().map_err(|e| e.to_string())?;
-                core.plan_unlocked_transfer(&job_id, &global_bucket)?
+                core.plan_unlocked_transfer(&job_id, &global_bucket, true, head.as_ref())?
             };
             let Some(plan) = plan else {
                 return Ok(());
@@ -2572,12 +2824,60 @@ impl Core {
 
             let retry = {
                 let mut core = core.lock().map_err(|e| e.to_string())?;
-                core.finish_unlocked_transfer(outcome)?
+                let retry = core.finish_unlocked_transfer(outcome)?;
+                if retry {
+                    // Keep the slot across the failover replan.
+                    if let Some(i) = core.job_index(&job_id) {
+                        core.jobs[i]
+                            .transfer_active()
+                            .store(true, Ordering::Release);
+                    }
+                }
+                retry
             };
             if !retry {
                 return Ok(());
             }
         }
+    }
+
+    /// Ask the origin the HEAD questions planning needs, without the Core
+    /// lock: a slow server must not freeze Pause, Discard and queue reads.
+    /// Planning re-validates the answers against the job under the lock.
+    fn fetch_head_unlocked(
+        core: &Arc<Mutex<Self>>,
+        job_id: &str,
+    ) -> Result<Option<PlanningHead>, String> {
+        let (http, url, fresh) = {
+            let core = core.lock().map_err(|e| e.to_string())?;
+            let Some(i) = core.job_index(job_id) else {
+                return Ok(None);
+            };
+            let job = &core.jobs[i];
+            let needs_size = job.is_pending()
+                && job.extractor_format().is_none()
+                && job.segments().is_empty()
+                && (job.total_bytes().is_none() || job.bytes_received() == 0);
+            if !needs_size {
+                return Ok(None);
+            }
+            (
+                core.http.clone(),
+                job.url().to_string(),
+                job.bytes_received() == 0,
+            )
+        };
+        let supports_range = if fresh {
+            http.supports_range(&url)
+        } else {
+            Err("not asked for a resume".to_string())
+        };
+        let file_size = http.file_size(&url);
+        Ok(Some(PlanningHead {
+            url,
+            supports_range,
+            file_size,
+        }))
     }
 
     /// Prepare a transfer that can run without holding the Core mutex.
@@ -2586,10 +2886,34 @@ impl Core {
     /// Toolchain download) is planned under the lock and executed outside it.
     /// Returns `None` when the job is not pending, is already transferring, or
     /// was finalized Failed during planning (disk space, no extractor resume).
+    ///
+    /// `claimed` means the caller already set the job's `transfer_active` flag
+    /// under the lock to reserve an Active Job Limit slot; any outcome other
+    /// than a plan releases that reservation.
     fn plan_unlocked_transfer(
         &mut self,
         job_id: &str,
         global_bucket: &Option<SharedTokenBucket>,
+        claimed: bool,
+        head: Option<&PlanningHead>,
+    ) -> Result<Option<UnlockedTransferPlan>, String> {
+        let planned = self.plan_unlocked_transfer_inner(job_id, global_bucket, claimed, head);
+        if claimed && !matches!(planned, Ok(Some(_))) {
+            if let Some(i) = self.job_index(job_id) {
+                self.jobs[i]
+                    .transfer_active()
+                    .store(false, Ordering::Release);
+            }
+        }
+        planned
+    }
+
+    fn plan_unlocked_transfer_inner(
+        &mut self,
+        job_id: &str,
+        global_bucket: &Option<SharedTokenBucket>,
+        claimed: bool,
+        head: Option<&PlanningHead>,
     ) -> Result<Option<UnlockedTransferPlan>, String> {
         let i = self
             .jobs
@@ -2599,7 +2923,15 @@ impl Core {
         if !self.jobs[i].is_pending() {
             return Ok(None);
         }
-        if self.jobs[i].transfer_active().load(Ordering::Acquire) {
+        if !claimed && self.jobs[i].transfer_active().load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        // Pause or Discard arrived after the job was picked: honour it now
+        // instead of starting a transfer that would stop at its first write.
+        if self.jobs[i].pause_requested().load(Ordering::Acquire)
+            || self.jobs[i].is_discard_requested()
+        {
+            self.finalize_stop_after_transfer(job_id)?;
             return Ok(None);
         }
 
@@ -2614,7 +2946,7 @@ impl Core {
             spec
         });
 
-        if !self.guard_disk_space_for_transfer(i, job_id, &dest, &url, bytes_received)? {
+        if !self.guard_disk_space_for_transfer(i, job_id, &dest, &url, bytes_received, head)? {
             return Ok(None);
         }
 
@@ -2655,7 +2987,10 @@ impl Core {
                 dest,
                 output_spec,
                 media_extras: self.jobs[i].media_extras(),
-                cookies: self.cookie_channel.clone(),
+                cookies: self.jobs[i]
+                    .cookie_session()
+                    .cloned()
+                    .unwrap_or_else(|| self.cookie_channel.clone()),
                 proxy: self.proxy_settings.clone(),
                 extractor: Arc::clone(&self.extractor),
                 stop: pause_requested,
@@ -2668,55 +3003,24 @@ impl Core {
         }
 
         let filename = self.jobs[i].filename().to_string();
-        let job_cap = self.jobs[i].bandwidth_cap();
-        let job_bucket = job_cap.map(|rate| make_job_bucket(rate, self.clock.clone()));
+        let job_bucket = self.jobs[i].bandwidth_bucket(&self.clock);
 
-        if bytes_received == 0 {
-            let supports_range = matches!(self.http.supports_range(&url), Ok(true));
-            let rate_limited = global_bucket.is_some() || job_bucket.is_some();
-            if supports_range && !rate_limited {
-                std::fs::create_dir_all(&dest)
-                    .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
-                let file_path = dest.join(&filename);
-                let part_path = Self::part_path_for(&file_path);
-
-                let known_total = self.http.file_size(&url).ok().filter(|&n| n > 0);
-                if let Some(total) = known_total {
-                    self.jobs[i].set_total_bytes(Some(total));
-                }
-                let live_bytes = self.jobs[i].live_downloaded();
-                live_bytes.store(0, Ordering::Release);
-                let progress = TransferProgress {
-                    job_id: job_id.to_string(),
-                    event_tx: self.event_tx.clone(),
-                    total_bytes: self.jobs[i].total_bytes(),
-                    live_bytes,
-                };
-                self.event_tx
-                    .send(CoreEvent::JobProgress {
-                        job_id: job_id.to_string(),
-                        bytes_downloaded: 0,
-                        total_bytes: self.jobs[i].total_bytes(),
-                    })
-                    .map_err(|_| "event channel closed".to_string())?;
-
-                transfer_active.store(true, Ordering::Release);
-                return Ok(Some(UnlockedTransferPlan::Segmented {
-                    job_id: job_id.to_string(),
-                    url,
-                    part_path,
-                    file_path,
-                    http: self.http.clone(),
-                    global_bucket: global_bucket.clone(),
-                    job_bucket,
-                    pause_requested,
-                    transfer_active,
-                    progress,
-                }));
-            }
+        match self.plan_segmented_transfer(
+            i,
+            job_id,
+            &url,
+            &dest,
+            &filename,
+            &job_bucket,
+            global_bucket,
+            head,
+        )? {
+            SegmentedPlanning::NotApplicable => {}
+            SegmentedPlanning::Plan(plan) => return Ok(Some(*plan)),
+            SegmentedPlanning::Finalized => return Ok(None),
         }
 
-        let known_total = self.http.file_size(&url).ok().filter(|&n| n > 0);
+        let known_total = self.head_file_size(&url, head).ok().filter(|&n| n > 0);
         if let Some(total) = known_total {
             self.jobs[i].set_total_bytes(Some(total));
         }
@@ -2740,6 +3044,28 @@ impl Core {
                 .map_err(|e| format!("migrate partial {file_path:?} -> {part_path:?}: {e}"))?;
         }
 
+        // The `.part` length is the truth for where to resume; the counter can
+        // lag a failed attempt or lead a file that was removed.
+        let mut bytes_received = bytes_received;
+        if bytes_received > 0 {
+            let part_len = std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
+            let total = self.jobs[i].total_bytes();
+            if part_len > 0 && Some(part_len) == total {
+                // A crash between the last byte and the rename leaves a
+                // complete `.part`; asking for `bytes=total-` would get a 416.
+                self.complete_job_file(job_id, i, &part_path, &file_path, part_len)?;
+                return Ok(None);
+            }
+            if part_len == 0 || total.is_some_and(|t| part_len > t) {
+                std::fs::File::create(&part_path)
+                    .map_err(|e| format!("truncate partial {part_path:?}: {e}"))?;
+                bytes_received = 0;
+            } else {
+                bytes_received = part_len;
+            }
+            self.jobs[i].set_bytes_received(bytes_received);
+        }
+
         let live_bytes = self.jobs[i].live_downloaded();
         live_bytes.store(bytes_received, Ordering::Release);
         let progress = TransferProgress {
@@ -2754,6 +3080,11 @@ impl Core {
         } else {
             None
         };
+        let if_range = if range.is_some() {
+            self.jobs[i].validator().map(str::to_string)
+        } else {
+            None
+        };
 
         transfer_active.store(true, Ordering::Release);
         Ok(Some(UnlockedTransferPlan::SingleFetch {
@@ -2763,6 +3094,7 @@ impl Core {
             part_path,
             file_path,
             range,
+            if_range,
             append: bytes_received > 0,
             truncate: bytes_received == 0,
             http: self.http.clone(),
@@ -2772,6 +3104,140 @@ impl Core {
             transfer_active,
             progress,
         }))
+    }
+
+    /// Plan a Segmented Transfer: continue the job's segment table, or start a
+    /// new one for a fresh job whose server supports ranges and that has no
+    /// Bandwidth Cap. The table is persisted before any byte is written, so a
+    /// crash never leaves a preallocated `.part` without it.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_segmented_transfer(
+        &mut self,
+        i: usize,
+        job_id: &str,
+        url: &str,
+        dest: &Path,
+        filename: &str,
+        job_bucket: &Option<SharedTokenBucket>,
+        global_bucket: &Option<SharedTokenBucket>,
+        head: Option<&PlanningHead>,
+    ) -> Result<SegmentedPlanning, String> {
+        let file_path = dest.join(filename);
+        let part_path = Self::part_path_for(&file_path);
+
+        let mut resumed = !self.jobs[i].segments().is_empty();
+        if resumed {
+            let table = self.jobs[i].segments().to_vec();
+            let total = table.last().map_or(0, |s| s.end);
+            let part_len = std::fs::metadata(&part_path).map(|m| m.len()).ok();
+            if storage::Segment::table_is_valid(&table, total) && part_len == Some(total) {
+                self.jobs[i].set_total_bytes(Some(total));
+            } else {
+                // The file no longer matches the table; start over.
+                self.jobs[i].clear_segments();
+                self.jobs[i].set_bytes_received(0);
+                resumed = false;
+            }
+        }
+
+        if !resumed {
+            let rate_limited = global_bucket.is_some() || job_bucket.is_some();
+            if self.jobs[i].bytes_received() != 0
+                || self.jobs[i].range_ignored()
+                || rate_limited
+                || !matches!(self.head_supports_range(url, head), Ok(true))
+            {
+                return Ok(SegmentedPlanning::NotApplicable);
+            }
+            let total = match self.head_file_size(url, head) {
+                Ok(0) => {
+                    self.finalize_failed_job(
+                        job_id,
+                        i,
+                        "empty file, nothing to download".to_string(),
+                    )?;
+                    return Ok(SegmentedPlanning::Finalized);
+                }
+                Ok(total) => total,
+                Err(_) => return Ok(SegmentedPlanning::NotApplicable),
+            };
+            std::fs::create_dir_all(dest).map_err(|e| format!("create job dir {dest:?}: {e}"))?;
+            self.jobs[i].set_total_bytes(Some(total));
+            self.jobs[i].begin_segments(storage::Segment::split(total, DEFAULT_SEGMENT_COUNT));
+            self.persist_queue_now()?;
+            let part = std::fs::File::create(&part_path)
+                .map_err(|e| format!("open partial {part_path:?}: {e}"))?;
+            if let Err(err) = preallocate(&part, total) {
+                // Out of space now, not midway through the transfer.
+                let _ = std::fs::remove_file(&part_path);
+                self.jobs[i].clear_segments();
+                self.finalize_failed_job(job_id, i, err)?;
+                return Ok(SegmentedPlanning::Finalized);
+            }
+            self.jobs[i].freeze_segments();
+        }
+
+        let table = self.jobs[i].segments().to_vec();
+        let total_size = table.last().map_or(0, |s| s.end);
+        let done: u64 = table.iter().map(|s| s.written).sum();
+        if done >= total_size {
+            self.jobs[i].clear_segments();
+            self.jobs[i].set_bytes_received(total_size);
+            self.complete_job_file(job_id, i, &part_path, &file_path, total_size)?;
+            return Ok(SegmentedPlanning::Finalized);
+        }
+
+        let counters = self.jobs[i].begin_segments(table.clone());
+        let work = table
+            .iter()
+            .zip(counters)
+            .filter_map(|(seg, written)| {
+                seg.remaining().map(|range| SegmentWork { range, written })
+            })
+            .collect();
+        let if_range = if resumed {
+            self.jobs[i].validator().map(str::to_string)
+        } else {
+            None
+        };
+
+        let live_bytes = self.jobs[i].live_downloaded();
+        live_bytes.store(done, Ordering::Release);
+        let progress = TransferProgress {
+            job_id: job_id.to_string(),
+            event_tx: self.event_tx.clone(),
+            total_bytes: Some(total_size),
+            live_bytes,
+        };
+        self.event_tx
+            .send(CoreEvent::JobProgress {
+                job_id: job_id.to_string(),
+                bytes_downloaded: done,
+                total_bytes: Some(total_size),
+            })
+            .map_err(|_| "event channel closed".to_string())?;
+
+        self.jobs[i]
+            .transfer_active()
+            .store(true, Ordering::Release);
+        Ok(SegmentedPlanning::Plan(Box::new(
+            UnlockedTransferPlan::Segmented {
+                job_id: job_id.to_string(),
+                url: url.to_string(),
+                part_path,
+                file_path,
+                total_size,
+                work,
+                if_range,
+                resumed,
+                http: self.http.clone(),
+                global_bucket: global_bucket.clone(),
+                job_bucket: job_bucket.clone(),
+                pause_requested: self.jobs[i].pause_requested().clone(),
+                transfer_active: self.jobs[i].transfer_active().clone(),
+                progress,
+            },
+        )))
     }
 
     /// Apply the result of an unlocked transfer.  Returns `true` when the
@@ -2805,18 +3271,33 @@ impl Core {
 
                 match outcome.fetch {
                     Ok(result) => {
+                        if bytes_received > 0
+                            && (result.range_ignored(bytes_received)
+                                || self.validators_changed(job_index, &result))
+                        {
+                            // The server did not continue the object we hold:
+                            // it ignored the Range (status 200), or the object
+                            // changed. Appending would corrupt the file.
+                            let ignored = result.range_ignored(bytes_received);
+                            self.restart_from_zero(job_index, &part_path, ignored)?;
+                            return Ok(true);
+                        }
+                        if self.jobs[job_index].etag().is_none()
+                            && self.jobs[job_index].last_modified().is_none()
+                        {
+                            self.jobs[job_index]
+                                .set_validators(result.etag.clone(), result.last_modified.clone());
+                        }
                         let reported = result.total_length;
                         let on_disk = self.sync_job_progress(job_id, bytes_received)?;
-                        let total_opt = self.jobs[job_index].total_bytes().or_else(|| {
-                            if reported > 0 {
-                                Some(reported)
-                            } else {
-                                None
-                            }
-                        });
-                        if self.jobs[job_index].total_bytes().is_none() {
-                            self.jobs[job_index].set_total_bytes(total_opt);
-                        }
+                        // `total_length` is the object size (Content-Range
+                        // total on a 206), so it beats a HEAD from earlier.
+                        let total_opt = if reported > 0 {
+                            Some(reported)
+                        } else {
+                            self.jobs[job_index].total_bytes()
+                        };
+                        self.jobs[job_index].set_total_bytes(total_opt);
 
                         self.event_tx
                             .send(CoreEvent::JobProgress {
@@ -2827,9 +3308,18 @@ impl Core {
                             .map_err(|_| "event channel closed".to_string())?;
 
                         match total_opt {
-                            Some(total) if on_disk >= total => {
+                            Some(total) if on_disk == total => {
                                 self.complete_job_file(
                                     job_id, job_index, &part_path, &file_path, total,
+                                )?;
+                            }
+                            Some(total) if on_disk > total => {
+                                self.finalize_failed_job(
+                                    job_id,
+                                    job_index,
+                                    format!(
+                                        "received {on_disk} bytes but the server reported {total}; use Retry"
+                                    ),
                                 )?;
                             }
                             Some(_) => {
@@ -2844,51 +3334,91 @@ impl Core {
                         }
                         Ok(false)
                     }
-                    Err(err) => self.fail_or_failover(job_id, failed_url, err),
+                    Err(err) => {
+                        // Keep what the failed attempt wrote: the next mirror
+                        // resumes from the `.part` length, not a stale offset.
+                        let _ = self.sync_job_progress(job_id, bytes_received);
+                        self.fail_or_failover(job_id, failed_url, err)
+                    }
                 }
             }
             UnlockedTransferOutcome::Segmented {
                 part_path,
                 file_path,
                 failed_url,
+                total_size,
+                resumed,
                 result,
                 ..
-            } => match result {
-                Err(err) => {
-                    let _ = std::fs::remove_file(&part_path);
-                    self.fail_or_failover(job_id, failed_url, err)
-                }
-                Ok((total_size, _bytes_written, paused)) => {
-                    self.jobs[job_index].set_total_bytes(Some(total_size));
-                    if paused {
-                        // Segments write at independent offsets, so an interrupted
-                        // `.part` has holes and its length is not a resumable byte
-                        // count. Drop it; Resume restarts the transfer from zero.
-                        let _ = std::fs::remove_file(&part_path);
-                        self.jobs[job_index].set_bytes_received(0);
-                        self.finalize_stop_after_transfer(job_id)?;
-                        return Ok(false);
+            } => {
+                // Whatever the segments wrote is on disk and counted; keep it
+                // in the table so a pause, failover or relaunch continues there.
+                self.jobs[job_index].freeze_segments();
+                let on_disk = self.jobs[job_index].segments_written();
+                self.jobs[job_index].set_bytes_received(on_disk);
+                let mut result = result;
+                match result.error.take() {
+                    Some(SegmentError::RangeIgnored) => {
+                        // A resume that gets the whole body means the object
+                        // changed; a fresh fetch that does means the server
+                        // advertised ranges it does not serve.
+                        self.restart_segmented(job_index, &part_path, !resumed)?;
+                        Ok(true)
                     }
-
-                    let on_disk = self.sync_job_progress(job_id, 0)?;
-                    self.event_tx
-                        .send(CoreEvent::JobProgress {
-                            job_id: job_id.to_string(),
-                            bytes_downloaded: on_disk,
-                            total_bytes: Some(total_size),
-                        })
-                        .map_err(|_| "event channel closed".to_string())?;
-
-                    if on_disk >= total_size {
-                        self.complete_job_file(
-                            job_id, job_index, &part_path, &file_path, total_size,
-                        )?;
-                    } else {
-                        self.flush_pending_progress()?;
+                    other => {
+                        if resumed && self.segment_validators_changed(job_index, &result) {
+                            self.restart_segmented(job_index, &part_path, false)?;
+                            return Ok(true);
+                        }
+                        if self.jobs[job_index].etag().is_none()
+                            && self.jobs[job_index].last_modified().is_none()
+                        {
+                            self.jobs[job_index]
+                                .set_validators(result.etag.clone(), result.last_modified.clone());
+                        }
+                        if let Some(SegmentError::Failed(err)) = other {
+                            return self.fail_or_failover(job_id, failed_url, err);
+                        }
+                        if result.paused {
+                            self.finalize_stop_after_transfer(job_id)?;
+                            return Ok(false);
+                        }
+                        self.event_tx
+                            .send(CoreEvent::JobProgress {
+                                job_id: job_id.to_string(),
+                                bytes_downloaded: on_disk,
+                                total_bytes: Some(total_size),
+                            })
+                            .map_err(|_| "event channel closed".to_string())?;
+                        if on_disk == total_size {
+                            self.jobs[job_index].clear_segments();
+                            self.complete_job_file(
+                                job_id, job_index, &part_path, &file_path, total_size,
+                            )?;
+                        } else {
+                            self.finalize_failed_job(
+                                job_id,
+                                job_index,
+                                format!("received {on_disk} of {total_size} bytes; use Retry"),
+                            )?;
+                        }
+                        Ok(false)
                     }
-                    Ok(false)
                 }
-            },
+            }
+            UnlockedTransferOutcome::Panicked { message, .. } => {
+                self.jobs[job_index].freeze_segments();
+                let on_disk = self.jobs[job_index].segments_written();
+                if on_disk > 0 {
+                    self.jobs[job_index].set_bytes_received(on_disk);
+                }
+                self.finalize_failed_job(
+                    job_id,
+                    job_index,
+                    format!("transfer stopped unexpectedly: {message}"),
+                )?;
+                Ok(false)
+            }
             UnlockedTransferOutcome::Extracted {
                 dest,
                 stop,
@@ -2948,6 +3478,68 @@ impl Core {
         }
     }
 
+    /// True when the object's validators differ from those stored on the job,
+    /// so the `.part` holds a different version than the server now serves.
+    fn validators_changed(&self, job_index: usize, result: &FetchResult) -> bool {
+        let job = &self.jobs[job_index];
+        let differs = |stored: Option<&str>, seen: Option<&str>| match (stored, seen) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        };
+        differs(job.etag(), result.etag.as_deref())
+            || differs(job.last_modified(), result.last_modified.as_deref())
+    }
+
+    /// True when a resumed segment's reply carried validators that differ
+    /// from the ones stored for the bytes already on disk.
+    fn segment_validators_changed(&self, job_index: usize, done: &SegmentedDone) -> bool {
+        let job = &self.jobs[job_index];
+        let differs = |stored: Option<&str>, seen: Option<&str>| match (stored, seen) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        };
+        differs(job.etag(), done.etag.as_deref())
+            || differs(job.last_modified(), done.last_modified.as_deref())
+    }
+
+    /// Drop a segment table and its `.part` so the next plan starts again.
+    /// `range_ignored` marks the job for a single plain connection.
+    fn restart_segmented(
+        &mut self,
+        job_index: usize,
+        part_path: &Path,
+        range_ignored: bool,
+    ) -> Result<(), String> {
+        let _ = std::fs::remove_file(part_path);
+        let job = &mut self.jobs[job_index];
+        job.clear_segments();
+        job.set_bytes_received(0);
+        job.set_validators(None, None);
+        if range_ignored {
+            job.set_range_ignored(true);
+        }
+        self.persist_queue_now()
+    }
+
+    /// Truncate the `.part` and forget its progress and validators so the next
+    /// plan starts a plain fetch from byte zero.
+    fn restart_from_zero(
+        &mut self,
+        job_index: usize,
+        part_path: &Path,
+        range_ignored: bool,
+    ) -> Result<(), String> {
+        std::fs::File::create(part_path)
+            .map_err(|e| format!("truncate partial {part_path:?}: {e}"))?;
+        let job = &mut self.jobs[job_index];
+        job.set_bytes_received(0);
+        job.set_validators(None, None);
+        if range_ignored {
+            job.set_range_ignored(true);
+        }
+        Ok(())
+    }
+
     /// On transfer error: advance to the next mirror (returns `true` to retry)
     /// or finalize the job Failed.
     fn fail_or_failover(
@@ -2988,7 +3580,8 @@ impl Core {
     ) -> Result<(), String> {
         let job_id = self.jobs[i].id().to_string();
         loop {
-            let Some(plan) = self.plan_unlocked_transfer(&job_id, global_bucket)? else {
+            let Some(plan) = self.plan_unlocked_transfer(&job_id, global_bucket, false, None)?
+            else {
                 return Ok(());
             };
             let outcome = plan.run();
@@ -3067,7 +3660,7 @@ impl Core {
         file_path: &Path,
         total: u64,
     ) -> Result<(), String> {
-        std::fs::rename(part_path, file_path)
+        fsutil::rename_durable(part_path, file_path)
             .map_err(|e| format!("rename {part_path:?} -> {file_path:?}: {e}"))?;
 
         self.finalize_completed_job(job_id, job_index, file_path, total)
@@ -3081,6 +3674,9 @@ impl Core {
         file_path: &Path,
         bytes_written: u64,
     ) -> Result<(), String> {
+        if !self.jobs[job_index].is_pending() {
+            return Ok(());
+        }
         if let Some(expected) = self.jobs[job_index].expected_hash().cloned() {
             if let Err(err) = expected.verify_file(file_path) {
                 return self.finalize_failed_job(job_id, job_index, err);

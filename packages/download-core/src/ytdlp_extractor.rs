@@ -178,9 +178,6 @@ pub struct YtDlpExtractorToolchain {
     sidecar_binary: Mutex<Option<PathBuf>>,
     /// Extra `--plugin-dirs` from the app-managed sidecar root.
     sidecar_plugin_dirs: Mutex<Vec<PathBuf>>,
-    /// Maps known site domains to their expected extractor_key prefixes.
-    /// e.g. "youtube.com" → "Youtube"
-    expected_extractors: HashMap<&'static str, &'static [&'static str]>,
     /// Lazily probed `--help` flag support (`--js-runtimes`, `--impersonate`, ...).
     supported_flags: Mutex<Option<HashSet<String>>>,
     /// Lazily probed `--list-impersonate-targets` result.
@@ -190,36 +187,10 @@ pub struct YtDlpExtractorToolchain {
 impl YtDlpExtractorToolchain {
     /// Create a new toolchain with the given config.
     pub fn new(config: YtDlpConfig) -> Self {
-        let mut expected_extractors: HashMap<&'static str, &'static [&'static str]> =
-            HashMap::new();
-
-        // YouTube: primary + playlist + channel + tab extractors
-        expected_extractors.insert("youtube.com", &["Youtube"]);
-        expected_extractors.insert("www.youtube.com", &["Youtube"]);
-        expected_extractors.insert("m.youtube.com", &["Youtube"]);
-        expected_extractors.insert("youtu.be", &["Youtube"]);
-
-        // xHamster
-        expected_extractors.insert("xhamster.com", &["XHamster"]);
-        expected_extractors.insert("www.xhamster.com", &["XHamster"]);
-        expected_extractors.insert("xhamster.desi", &["XHamster"]);
-        expected_extractors.insert("xhamster2.com", &["XHamster"]);
-        expected_extractors.insert("xhamster3.com", &["XHamster"]);
-
-        // luxuretv — Phlegethon Extractor Plugin (LuxureTVIE)
-        expected_extractors.insert("luxuretv.com", &["LuxureTV"]);
-        expected_extractors.insert("www.luxuretv.com", &["LuxureTV"]);
-        expected_extractors.insert("en.luxuretv.com", &["LuxureTV"]);
-
-        // xxxbp.tv — Phlegethon Extractor Plugin (XxxbpTVIE)
-        expected_extractors.insert("xxxbp.tv", &["XxxbpTV"]);
-        expected_extractors.insert("www.xxxbp.tv", &["XxxbpTV"]);
-
         Self {
             config,
             sidecar_binary: Mutex::new(None),
             sidecar_plugin_dirs: Mutex::new(Vec::new()),
-            expected_extractors,
             supported_flags: Mutex::new(None),
             impersonation_available: Mutex::new(None),
         }
@@ -475,20 +446,7 @@ impl YtDlpExtractorToolchain {
     fn expected_extractor_for_url(&self, url: &str) -> Option<&'static [&'static str]> {
         let parsed = url::Url::parse(url).ok()?;
         let host = parsed.host_str()?;
-        // Try exact host match first, then suffix match for subdomains
-        if let Some(keys) = self.expected_extractors.get(host) {
-            return Some(keys);
-        }
-        // Check parent domains (e.g. "music.youtube.com" → youtube.com)
-        for (domain, keys) in &self.expected_extractors {
-            if host.ends_with(domain) && host != *domain {
-                // Must be a subdomain, e.g. "music.youtube.com" ends with ".youtube.com"
-                if host.ends_with(&format!(".{domain}")) {
-                    return Some(keys);
-                }
-            }
-        }
-        None
+        crate::launch_sites::find(host).map(|site| site.extractor_keys)
     }
 
     /// Check whether the resolved extractor key is expected for this URL.
@@ -3764,5 +3722,23 @@ esac
             seen[1].1.duration_since(seen[0].1) >= Duration::from_millis(200),
             "first report must arrive while the child still runs"
         );
+    }
+
+    #[test]
+    fn expected_extractor_covers_launch_site_subdomains() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        for (url, key) in [
+            ("https://m.xhamster.com/videos/x-1", "XHamster"),
+            ("https://de.xhamster.com/videos/x-1", "XHamster"),
+            ("https://music.youtube.com/watch?v=a", "Youtube"),
+            ("https://en.xxxbp.tv/v/1", "XxxbpTV"),
+            ("https://de.luxuretv.com/videos/x-1.html", "LuxureTV"),
+        ] {
+            assert_eq!(
+                extractor.expected_extractor_for_url(url),
+                Some(&[key][..]),
+                "{url}"
+            );
+        }
     }
 }

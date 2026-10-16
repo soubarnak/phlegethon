@@ -4,7 +4,7 @@ import { Add } from "@carbon/icons-react";
 import { t } from "@/lib/i18n";
 import { textFromDataTransfer } from "@/lib/urlInput";
 import { createClipboardWatcher } from "@/lib/clipboardWatcher";
-import { readClipboardText } from "@/tauri/platform";
+import { isOwnClipboardWrite, readClipboardText } from "@/tauri/platform";
 import { api } from "@/tauri/api";
 import { FolderPicker } from "./FolderPicker";
 
@@ -40,7 +40,8 @@ export function UrlBar({
   }, [text, busy, onSubmit]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // Enter that confirms an IME composition must not submit (L-56).
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       void submit();
     }
@@ -81,9 +82,16 @@ export function UrlBar({
       readClipboardText,
       splitUrls: (value) => api.splitUrls(value),
       onUrlsDetected: (urls) => setClipboardHit(urls),
+      isOwnWrite: isOwnClipboardWrite,
     });
     watcher.start();
-    return () => watcher.stop();
+    // Polling pauses while the window is unfocused; look right away when it returns.
+    const onFocus = () => void watcher.tick();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      watcher.stop();
+    };
   }, [clipboardWatch]);
 
   return (

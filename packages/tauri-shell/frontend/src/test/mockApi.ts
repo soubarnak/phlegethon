@@ -47,6 +47,24 @@ export function installFakeIpc(initial: Record<string, CommandHandler> = {}): Fa
   };
 }
 
+/** Mirrors `split_urls_cmd` in Download Core: whitespace, commas and semicolons separate URLs. */
+export function splitUrlsLikeCore(text: string): string[] {
+  const seen = new Set<string>();
+  const urls: string[] = [];
+  for (const token of text.split(/[\s,;]+/)) {
+    if (!/^https?:\/\//i.test(token) || seen.has(token)) continue;
+    seen.add(token);
+    urls.push(token);
+  }
+  return urls;
+}
+
+/** Mirrors `find_active_job_for_url`: any job that is not Completed and has the same URL. */
+export function findActiveJobLikeCore(jobs: JobSnapshot[], url: string) {
+  const found = jobs.find((j) => j.status !== "completed" && j.url === url);
+  return found ? { job_id: found.job_id, url: found.url, status: found.status, title: found.title } : null;
+}
+
 export function quality(id: string, label = id, size: number | null = null): Quality {
   return { id, label, size_bytes: size, container: id === "best" ? null : "mp4" };
 }

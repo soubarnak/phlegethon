@@ -561,6 +561,7 @@ name = "companion-protocol"
 version = "0.1.0"
 dependencies = [
  "interprocess",
+ "log",
  "serde",
  "serde_json",
  "tempfile",

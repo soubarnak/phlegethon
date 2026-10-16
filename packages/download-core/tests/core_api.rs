@@ -28,6 +28,7 @@ fn write_fetch_to_sink(
     Ok(FetchResult {
         total_length: total,
         bytes_written: written as u64,
+        ..Default::default()
     })
 }
 
@@ -647,6 +648,7 @@ fn discard_during_in_flight_transfer_stops_and_deletes_partials() {
             Ok(FetchResult {
                 total_length: total,
                 bytes_written: written,
+                ..Default::default()
             })
         }
 
@@ -1908,6 +1910,22 @@ fn process_until_job_done_with_clock(
     }
 }
 
+/// A capped transfer waits through the clock, so its clock time must cover
+/// `bytes` minus the one-second burst at `rate`, and stay close to it.
+fn assert_paced(clock: &ManualClock, bytes: u64, rate: u64) {
+    use download_core::Clock;
+    let elapsed = clock.now().as_secs_f64();
+    let min = (bytes.saturating_sub(rate)) as f64 / rate as f64;
+    assert!(
+        elapsed >= min - 0.01,
+        "{bytes} bytes at {rate} B/s need at least {min}s, clock only advanced {elapsed}s"
+    );
+    assert!(
+        elapsed <= min + 1.0,
+        "{bytes} bytes at {rate} B/s should take about {min}s, clock advanced {elapsed}s"
+    );
+}
+
 #[test]
 fn default_transfer_is_uncapped() {
     let content = b"this file is long enough to be split by a cap if one were set"
@@ -1950,24 +1968,14 @@ fn global_bandwidth_cap_limits_aggregate_throughput() {
     let job_b = enqueue_direct_job_id(&mut core, "https://example.com/b.zip");
 
     // Global cap: 20 bytes/sec
-    core.set_global_bandwidth_cap(20);
+    core.set_global_bandwidth_cap(20).unwrap();
 
-    // First call — neither job should complete yet
+    // The writer waits for tokens, so one call finishes both jobs, paced by the clock.
     let mut done = std::collections::HashSet::new();
     process_and_accumulate_completions(&mut core, &rx, &mut done);
-    assert!(
-        !done.contains(&job_a) && !done.contains(&job_b),
-        "neither job should complete in one call with 20-byte/sec global cap"
-    );
-
-    // Drain remaining bytes, advancing the injectable clock between rounds
-    while !done.contains(&job_a) || !done.contains(&job_b) {
-        clock.advance(std::time::Duration::from_secs(1));
-        process_and_accumulate_completions(&mut core, &rx, &mut done);
-    }
-
     assert!(done.contains(&job_a), "job_a should complete");
     assert!(done.contains(&job_b), "job_b should complete");
+    assert_paced(&clock, 60, 20);
 
     // Verify file contents on disk
     for (job_id, expected) in [(&job_a, content_a), (&job_b, content_b)] {
@@ -2002,16 +2010,9 @@ fn per_job_bandwidth_cap_limits_that_job_without_global() {
 
     let mut done = std::collections::HashSet::new();
     process_and_accumulate_completions(&mut core, &rx, &mut done);
-    assert!(
-        done.contains(&job_a),
-        "uncapped job should complete in one call"
-    );
-    assert!(
-        !done.contains(&job_b),
-        "capped job should NOT complete in one call"
-    );
-
-    process_until_job_done_with_clock(&mut core, &rx, &clock, &job_b);
+    assert!(done.contains(&job_a), "uncapped job should complete");
+    assert!(done.contains(&job_b), "capped job should complete");
+    assert_paced(&clock, content_b.len() as u64, 10);
 
     // Verify full content on disk
     let dir = tmp.path().join("library").join("jobs").join(&job_b);
@@ -2037,28 +2038,11 @@ fn per_job_cap_more_restrictive_than_global_is_effective() {
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/big.zip");
 
-    core.set_global_bandwidth_cap(100);
+    core.set_global_bandwidth_cap(100).unwrap();
     core.set_job_bandwidth_cap(&job_id, 10).unwrap();
 
-    core.process_pending().unwrap();
-    let events = collect_events(&rx);
-
-    let last_progress = events
-        .iter()
-        .filter_map(|e| match e {
-            CoreEvent::JobProgress {
-                bytes_downloaded, ..
-            } => Some(*bytes_downloaded),
-            _ => None,
-        })
-        .last()
-        .unwrap_or(0);
-    assert_eq!(
-        last_progress, 10,
-        "should transfer exactly 10 bytes (per-job cap is more restrictive)"
-    );
-
     process_until_job_done_with_clock(&mut core, &rx, &clock, &job_id);
+    assert_paced(&clock, 200, 10);
 
     let dir = tmp.path().join("library").join("jobs").join(&job_id);
     let files: Vec<_> = std::fs::read_dir(&dir)
@@ -2068,11 +2052,6 @@ fn per_job_cap_more_restrictive_than_global_is_effective() {
     assert_eq!(files.len(), 1, "should have one file");
     let on_disk = std::fs::read(files[0].path()).unwrap();
     assert_eq!(on_disk, content, "full content should match after cap");
-    assert_eq!(
-        on_disk.len(),
-        content.len(),
-        "file length should match original"
-    );
 }
 
 #[test]
@@ -2088,28 +2067,11 @@ fn global_cap_more_restrictive_than_per_job_is_effective() {
 
     let job_id = enqueue_direct_job_id(&mut core, "https://example.com/big.zip");
 
-    core.set_global_bandwidth_cap(5);
+    core.set_global_bandwidth_cap(5).unwrap();
     core.set_job_bandwidth_cap(&job_id, 100).unwrap();
 
-    core.process_pending().unwrap();
-    let events = collect_events(&rx);
-
-    let last_progress = events
-        .iter()
-        .filter_map(|e| match e {
-            CoreEvent::JobProgress {
-                bytes_downloaded, ..
-            } => Some(*bytes_downloaded),
-            _ => None,
-        })
-        .last()
-        .unwrap_or(0);
-    assert_eq!(
-        last_progress, 5,
-        "should transfer exactly 5 bytes (global cap is more restrictive)"
-    );
-
     process_until_job_done_with_clock(&mut core, &rx, &clock, &job_id);
+    assert_paced(&clock, 200, 5);
 
     let dir = tmp.path().join("library").join("jobs").join(&job_id);
     let files: Vec<_> = std::fs::read_dir(&dir)
@@ -2134,7 +2096,7 @@ fn bandwidth_cap_does_not_affect_small_transfers() {
 
     let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/small.zip");
 
-    core.set_global_bandwidth_cap(100);
+    core.set_global_bandwidth_cap(100).unwrap();
 
     core.process_pending().unwrap();
     let events = collect_events(&rx);
@@ -2162,10 +2124,10 @@ fn set_and_remove_global_bandwidth_cap_restores_uncapped() {
 
     let _job_id = enqueue_direct_job_id(&mut core, "https://example.com/global-switch.zip");
 
-    core.set_global_bandwidth_cap(5);
+    core.set_global_bandwidth_cap(5).unwrap();
     assert_eq!(core.global_bandwidth_cap(), Some(5));
 
-    core.remove_global_bandwidth_cap();
+    core.remove_global_bandwidth_cap().unwrap();
     assert_eq!(core.global_bandwidth_cap(), None);
 
     process_with_clock_until_done(&mut core, &rx, &clock);
@@ -2232,42 +2194,16 @@ fn global_bandwidth_cap_obeys_total_limit_across_multiple_jobs() {
     let job_2 = enqueue_direct_job_id(&mut core, "https://example.com/2.zip");
     let job_3 = enqueue_direct_job_id(&mut core, "https://example.com/3.zip");
 
-    core.set_global_bandwidth_cap(30);
+    core.set_global_bandwidth_cap(30).unwrap();
 
     let mut done = std::collections::HashSet::new();
-    core.process_pending().unwrap();
-    let events = collect_events(&rx);
-
-    let completed_in_first: Vec<&String> = events
-        .iter()
-        .filter_map(|e| match e {
-            CoreEvent::JobCompleted { job_id, .. } => Some(job_id),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        completed_in_first.len() <= 1,
-        "at most 1 job should complete in first call, got {}",
-        completed_in_first.len()
-    );
-
-    assert!(
-        completed_in_first.contains(&&job_1),
-        "first job should complete first"
-    );
-    for job_id in completed_in_first {
-        done.insert(job_id.clone());
-    }
-
-    while done.len() < 3 {
-        clock.advance(std::time::Duration::from_secs(1));
-        process_and_accumulate_completions(&mut core, &rx, &mut done);
-    }
+    process_and_accumulate_completions(&mut core, &rx, &mut done);
 
     assert_eq!(done.len(), 3, "all 3 jobs should complete");
     assert!(done.contains(&job_1), "job_1 should complete");
     assert!(done.contains(&job_2), "job_2 should complete");
     assert!(done.contains(&job_3), "job_3 should complete");
+    assert_paced(&clock, 60, 30);
 
     let job_dir = tmp.path().join("library").join("jobs");
     let job_count = std::fs::read_dir(&job_dir)
@@ -2346,6 +2282,7 @@ fn pause_during_in_flight_transfer_stops_without_full_body() {
             Ok(FetchResult {
                 total_length: total,
                 bytes_written: written,
+                ..Default::default()
             })
         }
 
@@ -4177,6 +4114,7 @@ impl HttpBackend for SlowKnownSizeHttp {
         Ok(FetchResult {
             total_length: total,
             bytes_written: written,
+            ..Default::default()
         })
     }
 
@@ -4217,6 +4155,7 @@ impl HttpBackend for SlowUnknownSizeHttp {
         Ok(FetchResult {
             total_length: 0,
             bytes_written: written,
+            ..Default::default()
         })
     }
 
@@ -6079,40 +6018,41 @@ fn disk_precheck_allows_when_known_size_fits_with_margin() {
     assert_eq!(snap.status, "completed");
 }
 
-#[test]
-fn disk_precheck_allows_when_size_unknown() {
-    let body = vec![b'U'; 64];
+/// Run one unknown-size job against a volume reporting `free` bytes.
+fn run_unknown_size_job(free: u64) -> Vec<CoreEvent> {
     let http = SlowUnknownSizeHttp {
-        body: Arc::new(body.clone()),
+        body: Arc::new(vec![b'U'; 64]),
     };
     let tmp = tempfile::tempdir().unwrap();
-    let (mut core, rx) = make_core_with_free_space(Box::new(http), 0);
+    let (mut core, rx) = make_core_with_free_space(Box::new(http), free);
     core.set_library_root(tmp.path().join("library")).unwrap();
-
-    let url = "https://example.com/unknown.bin";
-    let job_id = {
-        let outcome = core.enqueue(url, None).expect("enqueue should succeed");
-        match outcome {
-            EnqueueOutcome::EnqueueDirect { job_id, .. } => job_id,
-            _ => panic!("expected direct enqueue"),
-        }
-    };
-
+    enqueue_direct_job_id(&mut core, "https://example.com/unknown.bin");
     core.process_pending().unwrap();
-    let events = collect_events(&rx);
+    collect_events(&rx)
+}
+
+#[test]
+fn disk_precheck_requires_the_safety_margin_when_size_unknown() {
+    let events = run_unknown_size_job(0);
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CoreEvent::JobFailed { error, .. } if error.contains("insufficient disk space")
+        )),
+        "a full disk must fail the job before it starts, got: {events:?}"
+    );
+}
+
+#[test]
+fn disk_precheck_allows_unknown_size_when_the_margin_is_free() {
+    let events = run_unknown_size_job(1 << 30);
 
     assert!(
         events
             .iter()
             .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
-        "unknown size should start even with zero reported free space, got: {events:?}"
-    );
-    assert!(
-        !events.iter().any(|e| match e {
-            CoreEvent::JobFailed { job_id: id, .. } => id == &job_id,
-            _ => false,
-        }),
-        "unknown size must not fail disk pre-check"
+        "unknown size starts when the safety margin is free, got: {events:?}"
     );
 }
 
@@ -7530,6 +7470,7 @@ impl HttpBackend for SlowRangeFakeHttp {
         Ok(FetchResult {
             total_length: total,
             bytes_written: written,
+            ..Default::default()
         })
     }
 
@@ -7543,6 +7484,28 @@ impl HttpBackend for SlowRangeFakeHttp {
             .get(url)
             .map(|b| b.len() as u64)
             .ok_or_else(|| format!("no fake response for {url}"))
+    }
+}
+
+/// Block until the job reports at least `bytes` downloaded.
+fn wait_for_progress(core: &Arc<Mutex<Core>>, job_id: &str, bytes: u64) {
+    let started = std::time::Instant::now();
+    loop {
+        let downloaded = core
+            .lock()
+            .unwrap()
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .map_or(0, |j| j.bytes_downloaded);
+        if downloaded >= bytes {
+            return;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "job never reached {bytes} bytes"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 
@@ -7672,7 +7635,7 @@ fn segmented_pause_then_resume_produces_intact_file() {
     Core::dispatch_pending(core.clone()).unwrap();
 
     // Let the four segments write a little, then pause.
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    wait_for_progress(&core, &job_id, 40);
     signals
         .request_pause(&job_id)
         .expect("pause flag registered")
@@ -7682,8 +7645,8 @@ fn segmented_pause_then_resume_produces_intact_file() {
     let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
     let part_path = job_dir.join("seg-pause.bin.part");
     assert!(
-        !part_path.exists(),
-        "interrupted segmented partial has holes and must be dropped, not resumed"
+        part_path.exists(),
+        "a paused segmented transfer keeps its partial"
     );
     let paused_snap = core
         .lock()
@@ -7692,13 +7655,14 @@ fn segmented_pause_then_resume_produces_intact_file() {
         .into_iter()
         .find(|j| j.job_id == job_id)
         .unwrap();
-    assert_eq!(
-        paused_snap.bytes_downloaded, 0,
-        "no resumable bytes after segmented pause"
+    assert!(
+        paused_snap.bytes_downloaded > 0 && paused_snap.bytes_downloaded < 400,
+        "pause keeps the segments' progress, got {}",
+        paused_snap.bytes_downloaded
     );
     collect_events(&rx);
 
-    // Resume: the transfer restarts and must produce byte-identical output.
+    // Resume: the transfer continues and must produce byte-identical output.
     {
         let mut guard = core.lock().unwrap();
         guard.resume_job(&job_id).unwrap();
@@ -7770,6 +7734,32 @@ fn launch_site_probe_still_hard_fails_on_generic_extractor() {
     assert!(events
         .iter()
         .any(|e| matches!(e, CoreEvent::ProbeFailed { .. })));
+}
+
+#[test]
+fn launch_site_subdomains_never_fall_back_to_the_generic_extractor() {
+    for url in [
+        "https://m.xhamster.com/videos/x-1",
+        "https://music.youtube.com/watch?v=generic",
+        "https://en.xxxbp.tv/v/1",
+    ] {
+        let mut toolchain = FakeExtractorToolchain::new();
+        toolchain.insert(url, "Looks Generic", url, vec![("720p", "720p")]);
+        toolchain.mark_generic(url);
+        let calls_handle = toolchain.clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+        core.set_library_root(tmp.path().join("library")).unwrap();
+        core.set_page_sniffer(Arc::new(FakePageSniffer::new()));
+
+        let err = core.probe(url).unwrap_err();
+        assert!(err.contains("Launch Site"), "{url}: {err}");
+        let calls = calls_handle.probe_calls();
+        assert!(
+            calls.iter().all(|(_, allow)| !allow),
+            "{url}: Launch Sites never allow generic: {calls:?}"
+        );
+    }
 }
 
 #[test]
@@ -8152,7 +8142,14 @@ fn enqueue_force_direct_skips_probe_classification() {
     let (mut core, rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
     let outcome = core
-        .enqueue_with_options(url, None, EnqueueOptions { force_direct: true })
+        .enqueue_with_options(
+            url,
+            None,
+            EnqueueOptions {
+                force_direct: true,
+                ..Default::default()
+            },
+        )
         .unwrap();
     let EnqueueOutcome::EnqueueDirect { job_id, .. } = outcome else {
         panic!("force_direct must enqueue a plain job");
@@ -8226,4 +8223,1334 @@ fn clear_history_removes_archive_entries() {
     assert_eq!(core.clear_history(Some(ArchiveOutcome::Failed)).unwrap(), 0);
     assert_eq!(core.clear_history(None).unwrap(), 1);
     assert_eq!(core.history_len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Regression: Range replies, validators and mirror failover (B-2, H-5, M-14)
+// ---------------------------------------------------------------------------
+
+/// How a [`ScriptedHttp`] origin answers one fetch.
+#[derive(Clone, Copy, Debug)]
+enum Reply {
+    /// Serve the requested slice: 206 with `Content-Range` for a Range
+    /// request, 200 otherwise. Answers 200 without a body when `If-Range`
+    /// does not match the current `ETag`.
+    Honor,
+    /// Like `Honor`, but the body stops after this many bytes and the fetch
+    /// returns `Ok` (an interrupted transfer).
+    Truncated(u64),
+    /// Like `Honor`, but the connection drops after this many body bytes.
+    ErrorAfter(u64),
+    /// Answer 200 with the whole body even when a Range was requested.
+    IgnoreRange,
+}
+
+struct OriginState {
+    body: Vec<u8>,
+    etag: Option<String>,
+}
+
+type RangeScript =
+    Arc<Mutex<std::collections::HashMap<(String, u64), std::collections::VecDeque<Reply>>>>;
+
+type RecordedFetch = (String, Option<std::ops::Range<u64>>, Option<String>);
+
+/// Fake origin that records every fetch and answers from a per-URL script.
+#[derive(Clone)]
+struct ScriptedHttp {
+    origins: Arc<Mutex<std::collections::HashMap<String, OriginState>>>,
+    script: Arc<Mutex<std::collections::HashMap<String, std::collections::VecDeque<Reply>>>>,
+    requests: Arc<Mutex<Vec<RecordedFetch>>>,
+    /// Replies for ranged fetches that start at a given offset; consulted
+    /// before `script` so concurrent segment fetches stay deterministic.
+    range_script: RangeScript,
+    default_reply: Reply,
+    advertise_range: bool,
+}
+
+impl ScriptedHttp {
+    fn new(urls: &[(&str, &[u8])]) -> Self {
+        let origins = urls
+            .iter()
+            .map(|(url, body)| {
+                (
+                    (*url).to_string(),
+                    OriginState {
+                        body: body.to_vec(),
+                        etag: Some("\"v1\"".to_string()),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            origins: Arc::new(Mutex::new(origins)),
+            script: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            range_script: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            default_reply: Reply::Honor,
+            advertise_range: false,
+        }
+    }
+
+    fn then(self, url: &str, replies: &[Reply]) -> Self {
+        self.script
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), replies.iter().copied().collect());
+        self
+    }
+
+    /// Script the replies to ranged fetches of `url` that start at `start`.
+    fn then_at(self, url: &str, start: u64, replies: &[Reply]) -> Self {
+        self.range_script
+            .lock()
+            .unwrap()
+            .insert((url.to_string(), start), replies.iter().copied().collect());
+        self
+    }
+
+    fn replace_object(&self, url: &str, body: &[u8], etag: &str) {
+        let mut origins = self.origins.lock().unwrap();
+        let origin = origins.get_mut(url).unwrap();
+        origin.body = body.to_vec();
+        origin.etag = Some(etag.to_string());
+    }
+
+    fn requests(&self) -> Vec<RecordedFetch> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl HttpBackend for ScriptedHttp {
+    fn fetch(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        self.fetch_conditional(url, range, None, sink)
+    }
+
+    fn fetch_conditional(
+        &self,
+        url: &str,
+        range: Option<std::ops::Range<u64>>,
+        if_range: Option<&str>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        self.requests.lock().unwrap().push((
+            url.to_string(),
+            range.clone(),
+            if_range.map(str::to_string),
+        ));
+        let by_range = range.as_ref().and_then(|r| {
+            self.range_script
+                .lock()
+                .unwrap()
+                .get_mut(&(url.to_string(), r.start))
+                .and_then(|q| q.pop_front())
+        });
+        let reply = by_range
+            .or_else(|| {
+                self.script
+                    .lock()
+                    .unwrap()
+                    .get_mut(url)
+                    .and_then(|q| q.pop_front())
+            })
+            .unwrap_or(self.default_reply);
+        let origins = self.origins.lock().unwrap();
+        let origin = origins
+            .get(url)
+            .ok_or_else(|| format!("no fake response for {url}"))?;
+        let total = origin.body.len() as u64;
+        let etag = origin.etag.clone();
+
+        let validator_mismatch = match (if_range, &etag) {
+            (Some(sent), Some(current)) => sent != current,
+            _ => false,
+        };
+        let ranged = range.is_some() && !matches!(reply, Reply::IgnoreRange);
+        if range.is_some() && validator_mismatch {
+            // The object changed: 200 head only, no body.
+            return Ok(FetchResult {
+                total_length: total,
+                status: Some(200),
+                etag,
+                ..Default::default()
+            });
+        }
+
+        let (start, data): (u64, &[u8]) = match (&range, ranged) {
+            (Some(r), true) => {
+                if r.start >= total {
+                    return Err(format!("416 range not satisfiable for {url}"));
+                }
+                let end = r.end.min(total);
+                (r.start, &origin.body[r.start as usize..end as usize])
+            }
+            _ => (0, origin.body.as_slice()),
+        };
+        let (data, fail_after) = match reply {
+            Reply::Truncated(n) => (&data[..(n as usize).min(data.len())], false),
+            Reply::ErrorAfter(n) => (&data[..(n as usize).min(data.len())], true),
+            _ => (data, false),
+        };
+        let mut result = write_fetch_to_sink(sink, data, total)?;
+        if fail_after {
+            return Err(format!("connection reset by {url}"));
+        }
+        result.etag = etag;
+        if ranged {
+            result.status = Some(206);
+            result.content_range = Some(ContentRange {
+                start,
+                end: start + data.len().saturating_sub(1) as u64,
+                total: Some(total),
+            });
+        } else {
+            result.status = Some(200);
+        }
+        Ok(result)
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(self.advertise_range)
+    }
+
+    fn file_size(&self, url: &str) -> Result<u64, String> {
+        self.origins
+            .lock()
+            .unwrap()
+            .get(url)
+            .map(|o| o.body.len() as u64)
+            .ok_or_else(|| format!("no fake response for {url}"))
+    }
+}
+
+const SCRIPTED_URL: &str = "https://example.com/object.bin";
+
+fn object_body(fill: u8) -> Vec<u8> {
+    (0..64u8)
+        .map(|i| i.wrapping_mul(7).wrapping_add(fill))
+        .collect()
+}
+
+fn run_until_idle(core: &mut Core, rx: &crossbeam_channel::Receiver<CoreEvent>) -> Vec<CoreEvent> {
+    core.process_pending().unwrap();
+    collect_events(rx)
+}
+
+fn completed_file(root: &std::path::Path, job_id: &str) -> Vec<u8> {
+    std::fs::read(root.join("jobs").join(job_id).join("object.bin")).unwrap()
+}
+
+#[test]
+fn resume_restarts_from_zero_when_server_answers_range_with_200() {
+    let body = object_body(1);
+    let http = ScriptedHttp::new(&[(SCRIPTED_URL, &body)])
+        .then(SCRIPTED_URL, &[Reply::Truncated(24), Reply::IgnoreRange]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+
+    run_until_idle(&mut core, &rx);
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    let requests = http.requests();
+    assert_eq!(
+        requests[1].1,
+        Some(24..u64::MAX),
+        "resume sends an open range"
+    );
+    assert_eq!(
+        requests[2].1, None,
+        "after a 200 the fetch restarts without Range"
+    );
+}
+
+#[test]
+fn segmented_transfer_falls_back_to_one_connection_when_ranges_are_ignored() {
+    let body = object_body(2);
+    let mut http = ScriptedHttp::new(&[(SCRIPTED_URL, &body)]);
+    http.advertise_range = true;
+    http.default_reply = Reply::IgnoreRange;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    assert_eq!(
+        http.requests().last().unwrap().1,
+        None,
+        "the fallback is a plain single fetch"
+    );
+}
+
+#[test]
+fn resume_sends_stored_validator_and_restarts_when_object_changed() {
+    let old_body = object_body(3);
+    let new_body = object_body(4);
+    let http =
+        ScriptedHttp::new(&[(SCRIPTED_URL, &old_body)]).then(SCRIPTED_URL, &[Reply::Truncated(24)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+    {
+        let (mut core, rx) = make_core(Box::new(http.clone()));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+        run_until_idle(&mut core, &rx);
+    }
+    http.replace_object(SCRIPTED_URL, &new_body, "\"v2\"");
+
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(
+        completed_file(&root, &job_id),
+        new_body,
+        "the stale prefix must not survive a changed object"
+    );
+    let requests = http.requests();
+    assert_eq!(
+        requests[1].2.as_deref(),
+        Some("\"v1\""),
+        "If-Range carries the stored ETag"
+    );
+}
+
+#[test]
+fn failover_resumes_from_part_length_after_partial_body_error() {
+    let body = object_body(5);
+    let mirror_a = "https://a.example.com/object.bin";
+    let mirror_b = "https://b.example.com/object.bin";
+    let http = ScriptedHttp::new(&[(mirror_a, &body), (mirror_b, &body)])
+        .then(mirror_a, &[Reply::Truncated(24), Reply::ErrorAfter(16)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, mirror_a);
+    core.add_job_mirror(&job_id, mirror_b.to_string()).unwrap();
+
+    run_until_idle(&mut core, &rx);
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete on the second mirror, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    let last = http.requests().pop().unwrap();
+    assert_eq!(last.0, mirror_b);
+    assert_eq!(
+        last.1,
+        Some(40..u64::MAX),
+        "failover resumes after the 24 + 16 bytes already on disk"
+    );
+}
+
+#[test]
+fn complete_part_left_by_a_crash_is_finished_without_a_request() {
+    let body = object_body(6);
+    let http =
+        ScriptedHttp::new(&[(SCRIPTED_URL, &body)]).then(SCRIPTED_URL, &[Reply::Truncated(24)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id;
+    {
+        let (mut core, rx) = make_core(Box::new(http.clone()));
+        core.set_library_root(root.clone()).unwrap();
+        job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+        run_until_idle(&mut core, &rx);
+    }
+    // Crash window: every byte is on disk but the rename never happened.
+    let part = root.join("jobs").join(&job_id).join("object.bin.part");
+    std::fs::write(&part, &body).unwrap();
+    let requests_before = http.requests().len();
+
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "a complete .part must not fail with 416"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    assert_eq!(
+        http.requests().len(),
+        requests_before,
+        "no request is needed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: throttled writes and shared Bandwidth Cap buckets (H-2, H-3, M-10)
+// ---------------------------------------------------------------------------
+
+/// Origin that behaves like the production backend under a Bandwidth Cap: no
+/// `Content-Length` (HEAD has no size, the reply reports 0) and a sink that
+/// refuses data ends the fetch with an error.
+#[derive(Clone)]
+struct ThrottledHttp {
+    body: Arc<Vec<u8>>,
+}
+
+impl HttpBackend for ThrottledHttp {
+    fn fetch(
+        &self,
+        _url: &str,
+        _range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        let mut written = 0usize;
+        while written < self.body.len() {
+            let n = sink
+                .write(&self.body[written..])
+                .map_err(|e| format!("sink write: {e}"))?;
+            if n == 0 {
+                return Err("sink stopped accepting data".to_string());
+            }
+            written += n;
+        }
+        Ok(FetchResult {
+            total_length: 0,
+            bytes_written: written as u64,
+            status: Some(200),
+            ..Default::default()
+        })
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn file_size(&self, _url: &str) -> Result<u64, String> {
+        Err("no Content-Length".into())
+    }
+}
+
+#[test]
+fn throttled_write_waits_instead_of_ending_an_unknown_size_body() {
+    let body: Vec<u8> = (0..100u8).collect();
+    let http = ThrottledHttp {
+        body: Arc::new(body.clone()),
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx, clock) = make_capped_core(Box::new(http));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/object.bin");
+    core.set_job_bandwidth_cap(&job_id, 10).unwrap();
+
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(
+        completed_file(&root, &job_id),
+        body,
+        "a throttled body must not be cut at the first burst"
+    );
+    assert_paced(&clock, 100, 10);
+}
+
+#[test]
+fn global_cap_is_shared_by_jobs_started_in_different_rounds() {
+    let content = vec![b'G'; 100];
+    let mut map = std::collections::HashMap::new();
+    map.insert("https://example.com/a.zip".into(), content.clone());
+    map.insert("https://example.com/b.zip".into(), content.clone());
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx, clock) = make_capped_core(Box::new(no_range_http(map)));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_global_bandwidth_cap(100).unwrap();
+
+    let _a = enqueue_direct_job_id(&mut core, "https://example.com/a.zip");
+    run_until_idle(&mut core, &rx);
+    assert_eq!(
+        clock.now(),
+        std::time::Duration::ZERO,
+        "the burst covers job A"
+    );
+
+    let b = enqueue_direct_job_id(&mut core, "https://example.com/b.zip");
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { job_id, .. } if *job_id == b)),
+        "job B should complete, got {events:?}"
+    );
+    assert!(
+        clock.now() >= std::time::Duration::from_millis(990),
+        "job B must wait for tokens the shared bucket does not have yet, clock at {:?}",
+        clock.now()
+    );
+}
+
+#[test]
+fn zero_bandwidth_cap_is_rejected() {
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    let tmp = tempfile::tempdir().unwrap();
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+
+    assert!(core.set_global_bandwidth_cap(0).is_err());
+    assert_eq!(core.global_bandwidth_cap(), None);
+    assert!(core.set_job_bandwidth_cap(&job_id, 0).is_err());
+    assert_eq!(core.job_bandwidth_cap(&job_id).unwrap(), None);
+}
+
+#[test]
+fn pause_interrupts_a_transfer_that_is_waiting_for_tokens() {
+    let http = ThrottledHttp {
+        body: Arc::new(vec![b'P'; 4096]),
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    // Real clock: at 20 B/s the body would take minutes.
+    let (core, rx) = make_core(Box::new(http));
+    let core = Arc::new(Mutex::new(core));
+    let job_id = {
+        let mut guard = core.lock().unwrap();
+        guard.set_library_root(tmp.path().join("library")).unwrap();
+        let id = enqueue_direct_job_id(&mut guard, "https://example.com/object.bin");
+        guard.set_job_bandwidth_cap(&id, 20).unwrap();
+        id
+    };
+    Core::dispatch_pending(Arc::clone(&core)).unwrap();
+    for _ in 0..100 {
+        if core
+            .lock()
+            .unwrap()
+            .job_signals()
+            .is_transfer_active(&job_id)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    core.lock().unwrap().pause_job(&job_id).unwrap();
+
+    let mut paused = false;
+    for _ in 0..100 {
+        if collect_events(&rx)
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobPaused { .. }))
+        {
+            paused = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        paused,
+        "the throttled transfer should stop within about two seconds"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: Segmented Transfer progress is a persisted table (H-4, M-15)
+// ---------------------------------------------------------------------------
+
+/// A 64-byte object served in four 16-byte segments.
+fn segmented_origin(urls: &[&str], body: &[u8]) -> ScriptedHttp {
+    let entries: Vec<(&str, &[u8])> = urls.iter().map(|u| (*u, body)).collect();
+    let mut http = ScriptedHttp::new(&entries);
+    http.advertise_range = true;
+    http
+}
+
+fn run_until_finished(
+    core: &mut Core,
+    rx: &crossbeam_channel::Receiver<CoreEvent>,
+) -> Vec<CoreEvent> {
+    let mut all = Vec::new();
+    for _ in 0..8 {
+        all.extend(run_until_idle(core, rx));
+        if all.iter().any(|e| {
+            matches!(
+                e,
+                CoreEvent::JobCompleted { .. } | CoreEvent::JobFailed { .. }
+            )
+        }) {
+            break;
+        }
+    }
+    all
+}
+
+fn job_bytes(core: &Core, job_id: &str) -> u64 {
+    core.list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .unwrap()
+        .bytes_downloaded
+}
+
+#[test]
+fn segment_that_ends_early_fails_the_job_instead_of_leaving_a_hole() {
+    let body = object_body(7);
+    // The second segment (16..32) stops after five bytes with a clean EOF.
+    let http =
+        segmented_origin(&[SCRIPTED_URL], &body).then_at(SCRIPTED_URL, 16, &[Reply::Truncated(5)]);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobFailed { .. })),
+        "a short segment must fail the job, got {events:?}"
+    );
+    assert!(
+        !root.join("jobs").join(&job_id).join("object.bin").exists(),
+        "the object with a hole must not be published"
+    );
+}
+
+#[test]
+fn failover_after_a_failed_segment_fetches_only_the_unfinished_range() {
+    let body = object_body(8);
+    let mirror_a = "https://a.example.com/object.bin";
+    let mirror_b = "https://b.example.com/object.bin";
+    // Mirror A drops the second segment after five bytes.
+    let http = segmented_origin(&[mirror_a, mirror_b], &body).then_at(
+        mirror_a,
+        16,
+        &[Reply::ErrorAfter(5)],
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, mirror_a);
+    core.add_job_mirror(&job_id, mirror_b.to_string()).unwrap();
+
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete on the second mirror, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    let on_b: Vec<_> = http
+        .requests()
+        .into_iter()
+        .filter(|r| r.0 == mirror_b)
+        .collect();
+    assert_eq!(on_b.len(), 1, "finished segments are not fetched again");
+    assert_eq!(
+        on_b[0].1,
+        Some(21..32),
+        "only the missing tail is requested"
+    );
+    assert_eq!(
+        on_b[0].2.as_deref(),
+        Some("\"v1\""),
+        "the continuation is guarded by If-Range"
+    );
+}
+
+/// Run a transfer in which the second segment dies after five bytes, then
+/// edit `jobs.json` as a crash would leave it: the job still Pending.
+fn crash_with_one_partial_segment(root: &std::path::Path, body: &[u8]) -> String {
+    let http =
+        segmented_origin(&[SCRIPTED_URL], body).then_at(SCRIPTED_URL, 16, &[Reply::ErrorAfter(5)]);
+    let (mut core, rx) = make_core(Box::new(http));
+    core.set_library_root(root.to_path_buf()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+    run_until_finished(&mut core, &rx);
+    drop(core);
+
+    let queue = root.join(".phlegethon").join("jobs.json");
+    let raw = std::fs::read_to_string(&queue).unwrap();
+    assert!(raw.contains("\"failed\""), "setup: job failed, got {raw}");
+    std::fs::write(&queue, raw.replace("\"failed\"", "\"downloading\"")).unwrap();
+    job_id
+}
+
+#[test]
+fn relaunch_continues_a_segmented_download_from_its_persisted_table() {
+    let body = object_body(9);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id = crash_with_one_partial_segment(&root, &body);
+
+    let http = segmented_origin(&[SCRIPTED_URL], &body);
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    assert_eq!(
+        job_bytes(&core, &job_id),
+        16 + 5 + 16 + 16,
+        "progress comes from the segment table, not the preallocated .part length"
+    );
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    let ranges: Vec<_> = http.requests().into_iter().map(|r| r.1).collect();
+    assert_eq!(
+        ranges,
+        vec![Some(21..32)],
+        "only the unfinished segment tail is fetched after a relaunch"
+    );
+}
+
+#[test]
+fn relaunch_restarts_when_the_part_no_longer_matches_the_table() {
+    let body = object_body(10);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id = crash_with_one_partial_segment(&root, &body);
+    let part = root.join("jobs").join(&job_id).join("object.bin.part");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&part)
+        .unwrap()
+        .set_len(30)
+        .unwrap();
+
+    let http = segmented_origin(&[SCRIPTED_URL], &body);
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    assert_eq!(
+        job_bytes(&core, &job_id),
+        0,
+        "an unreadable table is dropped"
+    );
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    assert_eq!(
+        http.requests().len(),
+        4,
+        "every segment is fetched again from its start"
+    );
+}
+
+#[test]
+fn resumed_segment_restarts_when_the_object_changed() {
+    let old_body = object_body(11);
+    let new_body = object_body(12);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id = crash_with_one_partial_segment(&root, &old_body);
+
+    let http = segmented_origin(&[SCRIPTED_URL], &new_body);
+    http.replace_object(SCRIPTED_URL, &new_body, "\"v2\"");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(
+        completed_file(&root, &job_id),
+        new_body,
+        "bytes of the old object must not survive"
+    );
+}
+
+#[test]
+fn complete_segment_table_left_by_a_crash_is_finished_without_a_request() {
+    let body = object_body(13);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let job_id = crash_with_one_partial_segment(&root, &body);
+    // Crash window: every byte is on disk and counted, but the rename never ran.
+    let part = root.join("jobs").join(&job_id).join("object.bin.part");
+    std::fs::write(&part, &body).unwrap();
+    let queue = root.join(".phlegethon").join("jobs.json");
+    let raw = std::fs::read_to_string(&queue).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    for seg in doc["jobs"][0]["segments"].as_array_mut().unwrap() {
+        seg["written"] = seg["end"].clone();
+        seg["written"] =
+            serde_json::json!(seg["end"].as_u64().unwrap() - seg["start"].as_u64().unwrap());
+    }
+    std::fs::write(&queue, serde_json::to_string(&doc).unwrap()).unwrap();
+
+    let http = segmented_origin(&[SCRIPTED_URL], &body);
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let events = run_until_finished(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "job should complete, got {events:?}"
+    );
+    assert_eq!(completed_file(&root, &job_id), body);
+    assert!(http.requests().is_empty(), "nothing is left to fetch");
+}
+
+// ---------------------------------------------------------------------------
+// Regression: transfer planning and thread safety (H-6, M-3, M-13, H-9)
+// ---------------------------------------------------------------------------
+
+/// Origin whose behaviour is switched per test: panics, slow HEAD requests,
+/// an unknown size, and counts of the fetches that ran.
+#[derive(Clone)]
+struct PlanningHttp {
+    body: Vec<u8>,
+    ranges: bool,
+    size_known: bool,
+    head_delay: std::time::Duration,
+    /// Panic inside `fetch`; only for ranged fetches when `Some(true)`.
+    panic_on_fetch: Option<bool>,
+    fetches: Arc<std::sync::atomic::AtomicUsize>,
+    ranged_fetches: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PlanningHttp {
+    fn new(body: &[u8]) -> Self {
+        Self {
+            body: body.to_vec(),
+            ranges: false,
+            size_known: true,
+            head_delay: std::time::Duration::ZERO,
+            panic_on_fetch: None,
+            fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ranged_fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn fetch_count(&self) -> usize {
+        self.fetches.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl HttpBackend for PlanningHttp {
+    fn fetch(
+        &self,
+        _url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if range.is_some() {
+            self.ranged_fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(only_ranged) = self.panic_on_fetch {
+            if !only_ranged || range.is_some() {
+                panic!("fake origin blew up");
+            }
+        }
+        let total = self.body.len() as u64;
+        let data = match range {
+            Some(r) => &self.body[r.start.min(total) as usize..r.end.min(total) as usize],
+            None => &self.body[..],
+        };
+        write_fetch_to_sink(sink, data, total)
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        std::thread::sleep(self.head_delay);
+        Ok(self.ranges)
+    }
+
+    fn file_size(&self, _url: &str) -> Result<u64, String> {
+        std::thread::sleep(self.head_delay);
+        if self.size_known {
+            Ok(self.body.len() as u64)
+        } else {
+            Err("no Content-Length".to_string())
+        }
+    }
+}
+
+#[test]
+fn panic_in_a_single_fetch_fails_the_job_and_frees_its_slot() {
+    let mut http = PlanningHttp::new(&object_body(1));
+    http.panic_on_fetch = Some(false);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/panic.bin");
+    let signals = core.job_signals();
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+
+    wait_for_status(&core, &job_id, "failed", std::time::Duration::from_secs(5));
+    assert!(
+        !signals.is_transfer_active(&job_id),
+        "a panicked transfer must not keep its Active Job Limit slot"
+    );
+}
+
+#[test]
+fn panic_in_a_segment_worker_fails_the_job_instead_of_hanging_it() {
+    let mut http = PlanningHttp::new(&object_body(2));
+    http.ranges = true;
+    http.panic_on_fetch = Some(true);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/panic.bin");
+    let signals = core.job_signals();
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+
+    wait_for_status(&core, &job_id, "failed", std::time::Duration::from_secs(5));
+    assert!(!signals.is_transfer_active(&job_id));
+}
+
+#[test]
+fn unknown_size_falls_back_to_a_single_fetch_even_when_ranges_are_advertised() {
+    let body = object_body(3);
+    let mut http = PlanningHttp::new(&body);
+    http.ranges = true;
+    http.size_known = false;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/object.bin");
+
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "a single GET works without a Content-Length, got {events:?}"
+    );
+    assert_eq!(
+        std::fs::read(root.join("jobs").join(&job_id).join("object.bin")).unwrap(),
+        body
+    );
+    assert_eq!(http.fetch_count(), 1);
+    assert_eq!(
+        http.ranged_fetches
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[test]
+fn pause_requested_before_planning_starts_no_transfer() {
+    let http = PlanningHttp::new(&object_body(4));
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/object.bin");
+    // Pause lands after the job was picked but before its transfer is planned.
+    core.job_signals()
+        .request_pause(&job_id)
+        .unwrap()
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let events = run_until_idle(&mut core, &rx);
+
+    assert_eq!(http.fetch_count(), 0, "no request for a paused job");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobPaused { .. })),
+        "the job ends Paused, got {events:?}"
+    );
+}
+
+#[test]
+fn dispatch_claims_active_job_slots_before_the_transfer_threads_plan() {
+    let mut http = PlanningHttp::new(&object_body(5));
+    // Slow HEAD keeps the transfer threads from planning for a while.
+    http.head_delay = std::time::Duration::from_millis(300);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_active_job_limit(2).unwrap();
+    for n in 0..3 {
+        enqueue_direct_job_id(&mut core, &format!("https://example.com/{n}.bin"));
+    }
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+    Core::dispatch_pending(core.clone()).unwrap();
+
+    let downloading = core
+        .lock()
+        .unwrap()
+        .list_job_snapshots()
+        .iter()
+        .filter(|j| j.status == "downloading")
+        .count();
+    assert_eq!(
+        downloading, 2,
+        "exactly the Active Job Limit is reserved, however many rounds run"
+    );
+}
+
+#[test]
+fn slow_head_requests_do_not_hold_the_core_lock() {
+    let mut http = PlanningHttp::new(&object_body(6));
+    http.ranges = true;
+    http.head_delay = std::time::Duration::from_millis(600);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/object.bin");
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let started = std::time::Instant::now();
+    let snapshots = core.lock().unwrap().list_job_snapshots();
+    let waited = started.elapsed();
+    assert_eq!(snapshots.len(), 1);
+    assert!(
+        waited < std::time::Duration::from_millis(250),
+        "planning held the Core lock for {waited:?} during HEAD requests"
+    );
+    wait_for_status(
+        &core,
+        &job_id,
+        "completed",
+        std::time::Duration::from_secs(10),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Regression: persisted progress, durability and state guards (L-5, L-7, L-14, M-9)
+// ---------------------------------------------------------------------------
+
+/// Single-connection origin that streams one byte per `delay`.
+#[derive(Clone)]
+struct DripHttp {
+    body: Vec<u8>,
+    delay: std::time::Duration,
+}
+
+impl HttpBackend for DripHttp {
+    fn fetch(
+        &self,
+        _url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        let total = self.body.len() as u64;
+        let start = range.map_or(0, |r| r.start.min(total)) as usize;
+        let mut written = 0u64;
+        for byte in &self.body[start..] {
+            let n = sink
+                .write(std::slice::from_ref(byte))
+                .map_err(|e| format!("sink write: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            written += n as u64;
+            std::thread::sleep(self.delay);
+        }
+        Ok(FetchResult {
+            total_length: total,
+            bytes_written: written,
+            ..Default::default()
+        })
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn file_size(&self, _url: &str) -> Result<u64, String> {
+        Ok(self.body.len() as u64)
+    }
+}
+
+#[test]
+fn queue_file_tracks_progress_while_a_transfer_runs() {
+    let http = DripHttp {
+        body: vec![b'd'; 40],
+        delay: std::time::Duration::from_millis(80),
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/drip.bin");
+
+    let core = Arc::new(Mutex::new(core));
+    let queue = root.join(".phlegethon").join("jobs.json");
+    let started = std::time::Instant::now();
+    let mut persisted = 0u64;
+    while started.elapsed() < std::time::Duration::from_millis(2500) {
+        Core::dispatch_pending(core.clone()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&queue).unwrap()).unwrap();
+        persisted = doc["jobs"][0]["bytes_received"].as_u64().unwrap_or(0);
+        let status = core
+            .lock()
+            .unwrap()
+            .list_job_snapshots()
+            .into_iter()
+            .find(|j| j.job_id == job_id)
+            .unwrap()
+            .status;
+        if persisted > 0 && status == "downloading" {
+            return;
+        }
+    }
+    panic!("jobs.json never showed progress of the running transfer (last: {persisted})");
+}
+
+#[test]
+fn segmented_part_is_preallocated_on_disk() {
+    let body = vec![7u8; 64 * 1024];
+    let mut http = ScriptedHttp::new(&[(SCRIPTED_URL, &body)]).then_at(
+        SCRIPTED_URL,
+        16 * 1024,
+        &[Reply::ErrorAfter(10)],
+    );
+    http.advertise_range = true;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, SCRIPTED_URL);
+
+    run_until_finished(&mut core, &rx);
+
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(root.join("jobs").join(&job_id).join("object.bin.part")).unwrap();
+    assert_eq!(meta.len(), body.len() as u64);
+    assert!(
+        meta.blocks() * 512 >= body.len() as u64,
+        "the .part must reserve its blocks, not stay sparse ({} blocks)",
+        meta.blocks()
+    );
+}
+// M-51: per-job cookie session (Chrome Companion hand-off)
+// ---------------------------------------------------------------------------
+
+fn companion_session(root: &std::path::Path) -> CookieChannel {
+    CookieChannel {
+        cookies_from_browser: None,
+        cookie_file: Some(root.join("companion-cookies.txt")),
+    }
+}
+
+#[test]
+fn cookie_session_applies_to_one_enqueue_and_leaves_global_channel_alone() {
+    let url = "https://www.youtube.com/watch?v=session-1";
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        url,
+        "Session Video",
+        "https://cdn.youtube.com/session-1.mp4",
+        vec![("720p", "720p")],
+    );
+    let spy = toolchain.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(root.clone()).unwrap();
+
+    let global = CookieChannel {
+        cookies_from_browser: Some("firefox".to_string()),
+        cookie_file: None,
+    };
+    core.set_cookie_channel(global.clone()).unwrap();
+    let session = companion_session(tmp.path());
+
+    let outcome = core
+        .enqueue_with_options(
+            url,
+            None,
+            EnqueueOptions {
+                cookie_session: Some(session.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(outcome, EnqueueOutcome::ProbeThenConfirm { .. }));
+    assert_eq!(core.cookie_channel(), global, "global channel is untouched");
+
+    core.probe(url).unwrap();
+    let selection = ProbeSelection {
+        url: url.to_string(),
+        items: vec![ItemSelection {
+            item_id: "item-1".to_string(),
+            quality_id: "720p".to_string(),
+        }],
+        media_extras: None,
+    };
+    let job_ids = core.confirm_probe_selection(&selection, None).unwrap();
+    assert_eq!(
+        core.job_cookie_session(&job_ids[0]).unwrap(),
+        Some(session.clone())
+    );
+    core.process_pending().unwrap();
+
+    let calls = spy.cookie_calls();
+    assert!(calls.len() >= 2, "probe and download both ran: {calls:?}");
+    for (called_url, cookies) in &calls {
+        assert_eq!(cookies, &session, "{called_url} must use the job session");
+    }
+    assert_eq!(core.cookie_channel(), global, "global channel is untouched");
+
+    // The session survives a restart with the job.
+    let (mut core2, _rx2) = make_core(Box::new(fake_http()));
+    core2.set_library_root(root).unwrap();
+    assert_eq!(
+        core2.job_cookie_session(&job_ids[0]).unwrap(),
+        Some(session)
+    );
+    assert_eq!(core2.cookie_channel(), global);
+}
+
+#[test]
+fn cookie_session_is_dropped_when_the_pending_probe_is_cleared() {
+    let url = "https://www.youtube.com/watch?v=session-2";
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.insert(
+        url,
+        "Session Video",
+        "https://cdn.youtube.com/session-2.mp4",
+        vec![("720p", "720p")],
+    );
+    let spy = toolchain.clone();
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    core.enqueue_with_options(
+        url,
+        None,
+        EnqueueOptions {
+            cookie_session: Some(companion_session(tmp.path())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    core.clear_pending_probe(url).unwrap();
+    core.probe(url).unwrap();
+
+    let calls = spy.cookie_calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].1.is_configured(),
+        "a cleared session must not leak into a later probe"
+    );
+}
+
+#[test]
+fn cookie_session_on_direct_enqueue_is_stored_on_the_job() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let session = companion_session(tmp.path());
+
+    let outcome = core
+        .enqueue_with_options(
+            "https://example.com/file.zip",
+            None,
+            EnqueueOptions {
+                cookie_session: Some(session.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let EnqueueOutcome::EnqueueDirect { job_id, .. } = outcome else {
+        panic!("expected a direct job");
+    };
+    assert_eq!(core.job_cookie_session(&job_id).unwrap(), Some(session));
+    assert!(!core.cookie_channel().is_configured());
+}
+
+#[test]
+fn cookie_session_with_relative_cookie_file_is_rejected_without_queueing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let err = core
+        .enqueue_with_options(
+            "https://example.com/file.zip",
+            None,
+            EnqueueOptions {
+                cookie_session: Some(CookieChannel {
+                    cookies_from_browser: None,
+                    cookie_file: Some(PathBuf::from("cookies.txt")),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(err.contains("absolute path"), "got: {err}");
+    assert!(core.list_job_snapshots().is_empty());
 }
