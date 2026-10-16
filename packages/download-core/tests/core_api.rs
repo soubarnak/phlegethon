@@ -6907,6 +6907,45 @@ fn rollback_restores_previous_toolchain_version_when_idle() {
     );
 }
 
+struct CountingSource {
+    inner: Arc<dyn SidecarUpdateSource>,
+    invalidations: std::sync::atomic::AtomicUsize,
+}
+
+impl SidecarUpdateSource for CountingSource {
+    fn load_catalog(&self, root: &std::path::Path) -> Result<UpdateCatalog, String> {
+        self.inner.load_catalog(root)
+    }
+    fn invalidate_cache(&self) {
+        self.invalidations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn manual_check_drops_the_cached_release_lookup() {
+    // L-25: the panel's Check button used to be served a lookup up to an hour old.
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    let counting = Arc::new(CountingSource {
+        inner: source,
+        invalidations: std::sync::atomic::AtomicUsize::new(0),
+    });
+    core.set_sidecar_update_source(counting.clone());
+    let core = Arc::new(std::sync::Mutex::new(core));
+
+    Core::check_sidecar_updates_outside_lock(core).unwrap();
+
+    assert_eq!(
+        counting
+            .invalidations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
 #[test]
 fn rollback_rebinds_extractor_via_apply_sidecar_root() {
     let tmp = tempfile::tempdir().unwrap();

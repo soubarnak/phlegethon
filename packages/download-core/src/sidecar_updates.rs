@@ -65,6 +65,10 @@ pub struct SidecarComponentStatus {
     pub available_version: Option<String>,
     pub pinned_version: Option<String>,
     pub update_available: bool,
+    /// Why the available version is unknown (release lookup failed, catalog
+    /// unreadable). `None` when the lookup worked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup_error: Option<String>,
 }
 
 /// Result of a manual or on-launch update check.
@@ -159,6 +163,13 @@ pub struct UpdateCatalog {
     pub plugin_latest: Option<String>,
     #[serde(default)]
     pub plugin_versions: std::collections::HashMap<String, CatalogVersionEntry>,
+    /// Set by a source when the toolchain half could not be loaded, so a failed
+    /// lookup does not hide the plugin half (L-31).
+    #[serde(skip)]
+    pub toolchain_error: Option<String>,
+    /// Set by a source when the plugin catalog file is unreadable.
+    #[serde(skip)]
+    pub plugin_error: Option<String>,
 }
 
 /// Persisted runtime state for deferred apply and rollback.
@@ -186,6 +197,10 @@ pub struct RollbackSnapshot {
 /// and GitHub releases (toolchain); tests use fakes.
 pub trait SidecarUpdateSource: Send + Sync {
     fn load_catalog(&self, sidecar_root: &Path) -> Result<UpdateCatalog, String>;
+
+    /// Drop any cached lookup so the next [`Self::load_catalog`] asks upstream
+    /// again. A manual Check calls this (L-25).
+    fn invalidate_cache(&self) {}
 
     /// Make `entry` available as a local path (download + verify for network
     /// sources). Default: the entry already points at a local path.
@@ -362,6 +377,7 @@ fn component_status(
     installed: Option<String>,
     available: Option<String>,
     settings: &SidecarUpdateSettings,
+    lookup_error: Option<String>,
 ) -> SidecarComponentStatus {
     let pinned = pinned_version(settings, component).map(str::to_string);
     let update_available = match (&installed, &available, &pinned) {
@@ -381,6 +397,7 @@ fn component_status(
         },
         pinned_version: pinned,
         update_available,
+        lookup_error,
     }
 }
 
@@ -399,12 +416,14 @@ pub fn check_sidecar_updates(
             installed_toolchain_version(sidecar_root),
             toolchain_target,
             settings,
+            catalog.toolchain_error.clone(),
         ),
         plugin: component_status(
             SidecarComponent::Plugin,
             installed_plugin_version(sidecar_root),
             plugin_target,
             settings,
+            catalog.plugin_error.clone(),
         ),
     })
 }
@@ -604,7 +623,10 @@ pub fn prefetch_toolchain_update(
 ) -> Result<Option<(String, PathBuf)>, String> {
     let check = check_sidecar_updates(sidecar_root, settings, source)?;
     if !check.toolchain.update_available {
-        return Ok(None);
+        return match check.toolchain.lookup_error {
+            Some(err) => Err(err),
+            None => Ok(None),
+        };
     }
     let version = check
         .toolchain

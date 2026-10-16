@@ -143,6 +143,8 @@ export interface SidecarComponentStatus {
   available_version: string | null;
   pinned_version: string | null;
   update_available: boolean;
+  /** Why the available version is unknown (lookup failed); absent when it worked. */
+  lookup_error?: string | null;
 }
 
 export interface SidecarUpdateCheckResult {
