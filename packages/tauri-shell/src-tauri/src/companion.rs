@@ -6,14 +6,14 @@ use companion_protocol::{
 };
 use download_core::{CookieChannel, EnqueueOutcome};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::AppState;
 
 #[derive(Serialize, Clone)]
-struct CompanionIntentEvent {
-    url: String,
-    result: CompanionResult,
+pub(crate) struct CompanionIntentEvent {
+    pub(crate) url: String,
+    pub(crate) result: CompanionResult,
 }
 
 /// Start the background companion listener (NMH → local socket → enqueue).
@@ -70,9 +70,7 @@ fn handle_companion_intent(app: &AppHandle, request: CompanionRequest) -> Compan
         result: result.clone(),
     };
 
-    if let Err(err) = app.emit("companion-intent", &event) {
-        log::warn!("failed to emit companion-intent: {err}");
-    }
+    crate::deliver_companion_intent(app, event);
 
     let _ = app.run_on_main_thread({
         let app = app.clone();
@@ -87,7 +85,10 @@ fn handle_companion_intent(app: &AppHandle, request: CompanionRequest) -> Compan
     CompanionResponse::ok(request_id, result)
 }
 
-fn companion_result_from_outcome(_url: &str, outcome: EnqueueOutcome) -> CompanionResult {
+pub(crate) fn companion_result_from_outcome(
+    _url: &str,
+    outcome: EnqueueOutcome,
+) -> CompanionResult {
     match outcome {
         EnqueueOutcome::EnqueueDirect {
             job_id,
