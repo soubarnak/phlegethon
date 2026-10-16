@@ -21,6 +21,7 @@ mod integrity;
 mod job;
 mod job_signals;
 mod media_extras;
+mod metalink;
 mod mirror_set;
 pub mod page_sniffer;
 pub mod plugin_sidecar;
@@ -2030,12 +2031,12 @@ impl Core {
     ) -> Result<(), String> {
         let text = std::fs::read_to_string(sidecar_path)
             .map_err(|e| format!("read sidecar {}: {e}", sidecar_path.display()))?;
-        let hash = ExpectedHash::from_sidecar_contents(&text)?;
         let job = self
             .jobs
             .iter_mut()
             .find(|j| j.id() == job_id)
             .ok_or_else(|| format!("job {job_id} not found"))?;
+        let hash = ExpectedHash::from_sidecar_for_file(&text, job.filename())?;
         job.set_expected_hash(hash);
         self.persist_queue_now()?;
         Ok(())

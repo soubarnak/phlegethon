@@ -5793,6 +5793,52 @@ fn set_job_expected_hash_from_sidecar_loads_checksum_file() {
     );
 }
 
+#[test]
+fn set_job_expected_hash_from_sidecar_uses_the_row_for_the_job_filename() {
+    // M-17: a multi-file SHA256SUMS must be matched by filename column.
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    let sidecar = tmp.path().join("SHA256SUMS");
+    std::fs::write(
+        &sidecar,
+        format!(
+            "{}  other.zip\n{HELLO_FILE_SHA256} *file.zip\n",
+            "a".repeat(64)
+        ),
+    )
+    .unwrap();
+    core.set_job_expected_hash_from_sidecar(&job_id, &sidecar)
+        .unwrap();
+
+    core.process_pending().unwrap();
+    let events = collect_events(&rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "row for file.zip should be used, got: {events:?}"
+    );
+}
+
+#[test]
+fn set_job_expected_hash_from_sidecar_errors_when_no_row_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    let sidecar = tmp.path().join("SHA256SUMS");
+    std::fs::write(&sidecar, format!("{HELLO_FILE_SHA256}  other.zip\n")).unwrap();
+    let err = core
+        .set_job_expected_hash_from_sidecar(&job_id, &sidecar)
+        .unwrap_err();
+    assert!(err.contains("file.zip"), "got: {err}");
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance: Disk-space pre-check (issue #52)
 // ---------------------------------------------------------------------------

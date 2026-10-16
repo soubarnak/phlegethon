@@ -10,6 +10,8 @@
 //! - User-added URLs
 //! - Web-wide mirror search is OUT for v1.
 
+use crate::metalink;
+
 /// An ordered set of equivalent URLs for one download job.
 ///
 /// Always has at least one URL (the primary).  Additional mirrors are
@@ -39,30 +41,21 @@ impl MirrorSet {
 
     /// Parse a Metalink / `.meta4` XML document and extract mirror URLs.
     ///
-    /// v1 parser: extracts `<url>` element text content.  No XML namespace
-    /// handling, no hash/piece verification — just URL discovery.
+    /// Reads `<url>` elements with an XML parser, so entities such as `&amp;`
+    /// are decoded and self-closing `<url/>` tags are skipped. Only `http` and
+    /// `https` mirrors are kept; `ftp`, `file` and other schemes are dropped.
+    /// No hash/piece verification — just URL discovery.
     /// Returns the discovered URLs (may be empty).
     pub fn from_metalink(xml: &str) -> Vec<String> {
-        let mut urls = Vec::new();
-        // Simple extraction of <url>…</url> — no XML dep for v1.
-        // Handles <url>https://...</url> and <url location="…">https://...</url>
-        for tag_start in xml.match_indices("<url").map(|(i, _)| i) {
-            // Find closing >
-            let content_start = match xml[tag_start..].find('>') {
-                Some(pos) => tag_start + pos + 1,
-                None => continue,
-            };
-            // Find </url>
-            let end_tag = match xml[content_start..].find("</url>") {
-                Some(pos) => content_start + pos,
-                None => continue,
-            };
-            let url = xml[content_start..end_tag].trim().to_string();
-            if !url.is_empty() {
-                urls.push(url);
-            }
-        }
-        urls
+        metalink::parse(xml)
+            .urls
+            .into_iter()
+            .filter(|u| {
+                url::Url::parse(u)
+                    .map(|p| matches!(p.scheme(), "http" | "https") && p.host_str().is_some())
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 
     /// Append a mirror URL.  Ignores duplicates (string equality).
@@ -289,5 +282,47 @@ mod tests {
         let urls = MirrorSet::from_metalink(xml);
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0], "https://mirror.example.com/test.zip");
+    }
+
+    #[test]
+    fn from_metalink_decodes_xml_entities() {
+        // M-16: `&amp;` used to stay literal and corrupt the query string.
+        let xml = r#"<metalink><file name="a">
+            <url>https://m.example/dl?a=1&amp;b=2</url>
+        </file></metalink>"#;
+        assert_eq!(
+            MirrorSet::from_metalink(xml),
+            vec!["https://m.example/dl?a=1&b=2".to_string()]
+        );
+    }
+
+    #[test]
+    fn from_metalink_self_closing_url_does_not_swallow_next_url() {
+        // M-16: `<url/>` used to pair with the next `</url>`.
+        let xml = r#"<metalink><file name="a">
+            <url location="us"/>
+            <url>https://m.example/a.zip</url>
+        </file></metalink>"#;
+        assert_eq!(
+            MirrorSet::from_metalink(xml),
+            vec!["https://m.example/a.zip".to_string()]
+        );
+    }
+
+    #[test]
+    fn from_metalink_accepts_only_http_and_https() {
+        let xml = r#"<metalink><file name="a">
+            <url type="ftp">ftp://m.example/a.zip</url>
+            <url>file:///etc/passwd</url>
+            <url>http://m.example/b.zip</url>
+            <url>https://m.example/c.zip</url>
+        </file></metalink>"#;
+        assert_eq!(
+            MirrorSet::from_metalink(xml),
+            vec![
+                "http://m.example/b.zip".to_string(),
+                "https://m.example/c.zip".to_string()
+            ]
+        );
     }
 }
