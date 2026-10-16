@@ -15,12 +15,12 @@ const CANNED_YOUTUBE_JSON: &str = r#"{
   "original_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   "duration": 212.0,
   "formats": [
-    {"format_id":"18","format_note":"360p","ext":"mp4","height":360,"width":640,"tbr":250000.0,"vcodec":"avc1.42001E","acodec":"mp4a.40.2","resolution":"640x360"},
-    {"format_id":"22","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1150000.0,"vcodec":"avc1.64001F","acodec":"mp4a.40.2","resolution":"1280x720"},
-    {"format_id":"137","format_note":"1080p","ext":"mp4","height":1080,"width":1920,"tbr":4500000.0,"vcodec":"avc1.640028","acodec":"none","resolution":"1920x1080"},
-    {"format_id":"140","format_note":"medium","ext":"m4a","tbr":130000.0,"vcodec":"none","acodec":"mp4a.40.2"},
-    {"format_id":"247","format_note":"720p (60fps)","ext":"webm","height":720,"width":1280,"tbr":2000000.0,"vcodec":"vp9","acodec":"none","resolution":"1280x720","fps":60.0},
-    {"format_id":"251","format_note":"medium","ext":"webm","tbr":160000.0,"vcodec":"none","acodec":"opus"}
+    {"format_id":"18","format_note":"360p","ext":"mp4","height":360,"width":640,"tbr":250.0,"vcodec":"avc1.42001E","acodec":"mp4a.40.2","resolution":"640x360"},
+    {"format_id":"22","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1150.0,"vcodec":"avc1.64001F","acodec":"mp4a.40.2","resolution":"1280x720"},
+    {"format_id":"137","format_note":"1080p","ext":"mp4","height":1080,"width":1920,"tbr":4500.0,"vcodec":"avc1.640028","acodec":"none","resolution":"1920x1080"},
+    {"format_id":"140","format_note":"medium","ext":"m4a","tbr":130.0,"vcodec":"none","acodec":"mp4a.40.2"},
+    {"format_id":"247","format_note":"720p (60fps)","ext":"webm","height":720,"width":1280,"tbr":2000.0,"vcodec":"vp9","acodec":"none","resolution":"1280x720","fps":60.0},
+    {"format_id":"251","format_note":"medium","ext":"webm","tbr":160.0,"vcodec":"none","acodec":"opus"}
   ]
 }"#;
 
@@ -47,9 +47,9 @@ const CANNED_XHAMSTER_JSON: &str = r#"{
   "webpage_url": "https://xhamster.com/videos/example-xh-video-12345",
   "original_url": "https://xhamster.com/videos/example-xh-video-12345",
   "formats": [
-    {"format_id":"240p","format_note":"240p","ext":"mp4","height":240,"width":426,"tbr":300000.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"426x240"},
-    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1500000.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"1280x720"},
-    {"format_id":"hls-1080","format_note":"1080p","ext":"mp4","height":1080,"width":1920,"tbr":4000000.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"1920x1080"}
+    {"format_id":"240p","format_note":"240p","ext":"mp4","height":240,"width":426,"tbr":300.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"426x240"},
+    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1500.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"1280x720"},
+    {"format_id":"hls-1080","format_note":"1080p","ext":"mp4","height":1080,"width":1920,"tbr":4000.0,"vcodec":"avc1","acodec":"mp4a.40.2","resolution":"1920x1080"}
   ]
 }"#;
 
@@ -75,7 +75,7 @@ const CANNED_GENERIC_JSON: &str = r#"{
   "webpage_url": "https://example.com/video/12345",
   "original_url": "https://example.com/video/12345",
   "formats": [
-    {"format_id":"default","format_note":"default","ext":"mp4","height":720,"width":1280,"tbr":1000000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"}
+    {"format_id":"default","format_note":"default","ext":"mp4","height":720,"width":1280,"tbr":1000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"}
   ]
 }"#;
 
@@ -87,9 +87,9 @@ const CANNED_LUXURETV_JSON: &str = r#"{
   "webpage_url": "https://www.luxuretv.com/videos/sample-video-16982.html",
   "original_url": "https://www.luxuretv.com/videos/sample-video-16982.html",
   "formats": [
-    {"format_id":"480p","format_note":"480p","ext":"mp4","height":480,"width":854,"tbr":800000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"854x480"},
-    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1600000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"},
-    {"format_id":"1080p","format_note":"1080p","ext":"mp4","height":1080,"width":1920,"tbr":3200000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1920x1080"}
+    {"format_id":"480p","format_note":"480p","ext":"mp4","height":480,"width":854,"tbr":800.0,"vcodec":"avc1","acodec":"mp4a","resolution":"854x480"},
+    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1600.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"},
+    {"format_id":"1080p","format_note":"1080p","ext":"mp4","height":1080,"width":1920,"tbr":3200.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1920x1080"}
   ]
 }"#;
 
@@ -101,8 +101,8 @@ const CANNED_XXXBP_JSON: &str = r#"{
   "webpage_url": "https://www.xxxbp.tv/v/12345",
   "original_url": "https://www.xxxbp.tv/v/12345",
   "formats": [
-    {"format_id":"360p","format_note":"360p","ext":"mp4","height":360,"width":640,"tbr":500000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"640x360"},
-    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1500000.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"}
+    {"format_id":"360p","format_note":"360p","ext":"mp4","height":360,"width":640,"tbr":500.0,"vcodec":"avc1","acodec":"mp4a","resolution":"640x360"},
+    {"format_id":"720p","format_note":"720p","ext":"mp4","height":720,"width":1280,"tbr":1500.0,"vcodec":"avc1","acodec":"mp4a","resolution":"1280x720"}
   ]
 }"#;
 

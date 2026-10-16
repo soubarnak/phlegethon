@@ -42,6 +42,7 @@ pub use toolchain_discovery::{
     classify_ytdlp_failure, detect_libc, error_code, error_code_hint, tag_error, EjsStatus,
     JsRuntime, JsRuntimeKind, Libc, PlatformInfo, ToolInfo, ToolchainStatus, YtDlpLauncher,
     YtDlpSource, ERROR_CODE_NEEDS_BROWSER_COOKIES, ERROR_CODE_NEEDS_JS_RUNTIME, ERROR_CODE_TIMEOUT,
+    ERROR_CODE_TOOLCHAIN_MISSING,
 };
 pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
@@ -388,10 +389,16 @@ impl ProbePlan {
             }
         }
 
-        Err(format!(
+        // Keep yt-dlp's `[code]` at the front so shells still show the cookie, timeout,
+        // JS-runtime or geo hint for it.
+        let message = format!(
             "no downloadable media found for {}. yt-dlp: {ytdlp_error}{sniff_note}",
             self.url
-        ))
+        );
+        Err(match error_code(&ytdlp_error) {
+            Some(code) => tag_error(code, message),
+            None => message,
+        })
     }
 }
 

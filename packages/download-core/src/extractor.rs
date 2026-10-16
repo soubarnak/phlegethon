@@ -417,6 +417,8 @@ pub struct FakeExtractorToolchain {
     sidecar_root_applies: std::sync::Arc<std::sync::Mutex<u32>>,
     /// URLs whose probe reports yt-dlp's `Generic` extractor key.
     generic_urls: HashSet<String>,
+    /// URLs whose probe fails with this exact message.
+    probe_errors: std::collections::HashMap<String, String>,
     /// Record of `(url, allow_generic)` for every probe call (tests).
     probe_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
 }
@@ -505,6 +507,12 @@ impl FakeExtractorToolchain {
     /// `allow_generic = true` it returns the items tagged `GenericExtractor`.
     pub fn mark_generic(&mut self, url: &str) {
         self.generic_urls.insert(url.to_string());
+    }
+
+    /// Make the probe of `url` fail with `message` (tag it with `[code]` like yt-dlp).
+    pub fn fail_probe(&mut self, url: &str, message: &str) {
+        self.probe_errors
+            .insert(url.to_string(), message.to_string());
     }
 
     /// `(url, allow_generic)` for every probe call so far.
@@ -692,6 +700,9 @@ impl ExtractorToolchain for FakeExtractorToolchain {
     ) -> Result<ProbeResult, String> {
         if let Ok(mut calls) = self.probe_calls.lock() {
             calls.push((url.to_string(), policy.allow_generic));
+        }
+        if let Some(message) = self.probe_errors.get(url) {
+            return Err(message.clone());
         }
         let response = self
             .responses

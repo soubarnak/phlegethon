@@ -8096,6 +8096,28 @@ fn probe_with_nothing_found_reports_both_tiers() {
     );
 }
 
+/// M-25: the tier-3 wrapper buried yt-dlp's `[code]` mid-string, so shells lost the hint.
+#[test]
+fn probe_failure_keeps_the_ytdlp_error_code_at_the_front() {
+    let url = "https://walled.example.org/page";
+    let tmp = tempfile::tempdir().unwrap();
+    let mut toolchain = FakeExtractorToolchain::new();
+    toolchain.fail_probe(
+        url,
+        "[needs_browser_cookies] yt-dlp probe failed (exit Some(1)): HTTP Error 403",
+    );
+    let (mut core, _rx) = Core::new(Box::new(fake_http()), Box::new(toolchain));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_page_sniffer(Arc::new(FakePageSniffer::new()));
+    let err = core.probe(url).unwrap_err();
+    assert_eq!(
+        download_core::error_code(&err),
+        Some("needs_browser_cookies"),
+        "got: {err}"
+    );
+    assert!(err.contains("no downloadable media found"), "got: {err}");
+}
+
 #[test]
 fn cancel_probe_aborts_between_tiers() {
     let url = "https://slow.example.org/page";

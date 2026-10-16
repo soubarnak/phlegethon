@@ -26,18 +26,19 @@ use crate::media_extras::{ffmpeg_available, ytdlp_media_extras_args, MediaExtras
 use crate::proxy_settings::{ytdlp_proxy_args, ProxySettings};
 use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
 use crate::toolchain_discovery::{
-    classify_ytdlp_failure, detect_js_runtime, discover_ytdlp, find_in_path, path_dirs_from_env,
-    python_has_module, run_command_observing, run_command_with_deadline_polling, tag_error,
-    tool_version, ytdlp_js_runtime_args, CommandOutcome, DiscoveryEnv, EjsStatus, JsRuntime,
-    PlatformInfo, ToolInfo, ToolchainStatus, YtDlpLauncher, YtDlpSource, ERROR_CODE_TIMEOUT,
+    classify_ytdlp_failure, detect_js_runtime, discover_ytdlp, error_code, find_in_path,
+    is_executable_file, path_dirs_from_env, python_has_module, run_command_watched,
+    run_command_with_deadline_polling, tag_error, tool_version, ytdlp_js_runtime_args,
+    CommandOutcome, DiscoveryEnv, EjsStatus, JsRuntime, PlatformInfo, ToolInfo, ToolchainStatus,
+    YtDlpLauncher, YtDlpSource, ERROR_CODE_TIMEOUT,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -182,9 +183,45 @@ pub struct YtDlpExtractorToolchain {
     /// e.g. "youtube.com" → "Youtube"
     expected_extractors: HashMap<&'static str, &'static [&'static str]>,
     /// Lazily probed `--help` flag support (`--js-runtimes`, `--impersonate`, ...).
-    supported_flags: Mutex<Option<HashSet<String>>>,
-    /// Lazily probed `--list-impersonate-targets` result.
-    impersonation_available: Mutex<Option<bool>>,
+    /// Only a successful probe is stored, tagged with the binary it came from.
+    supported_flags: Mutex<Option<Cached<Arc<HashSet<String>>>>>,
+    /// Lazily probed `--list-impersonate-targets` result, stored like `supported_flags`.
+    impersonation_available: Mutex<Option<Cached<bool>>>,
+    /// JS runtime found on PATH when the startup config had none.
+    detected_js_runtime: Mutex<Option<JsRuntime>>,
+}
+
+/// Identity of the yt-dlp launcher a cached probe answer belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinaryFingerprint {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+}
+
+impl BinaryFingerprint {
+    fn of(launcher: &YtDlpLauncher) -> Self {
+        let path = match launcher {
+            YtDlpLauncher::Binary { path } => path.clone(),
+            YtDlpLauncher::PythonModule { python } => python.clone(),
+        };
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        Self { path, modified }
+    }
+}
+
+/// A cached probe answer. `binary` is `None` for a value pinned by a test.
+struct Cached<T> {
+    binary: Option<BinaryFingerprint>,
+    value: T,
+}
+
+impl<T: Clone> Cached<T> {
+    fn get(&self, current: &BinaryFingerprint) -> Option<T> {
+        match &self.binary {
+            Some(binary) if binary != current => None,
+            _ => Some(self.value.clone()),
+        }
+    }
 }
 
 impl YtDlpExtractorToolchain {
@@ -222,6 +259,7 @@ impl YtDlpExtractorToolchain {
             expected_extractors,
             supported_flags: Mutex::new(None),
             impersonation_available: Mutex::new(None),
+            detected_js_runtime: Mutex::new(None),
         }
     }
 
@@ -238,7 +276,15 @@ impl YtDlpExtractorToolchain {
 
     /// Effective launcher: sidecar manifest binary → configured launcher → `binary_path`.
     pub fn effective_launcher(&self) -> YtDlpLauncher {
-        if let Some(path) = self.sidecar_binary.lock().ok().and_then(|g| g.clone()) {
+        // A sidecar binary that was deleted or lost its execute bit since it was bound
+        // must not shadow a working yt-dlp elsewhere.
+        if let Some(path) = self
+            .sidecar_binary
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .filter(|p| is_executable_file(p))
+        {
             return YtDlpLauncher::binary(path);
         }
         self.config
@@ -247,86 +293,158 @@ impl YtDlpExtractorToolchain {
             .unwrap_or_else(|| YtDlpLauncher::binary(self.config.binary_path.clone()))
     }
 
-    /// Does the active yt-dlp accept `flag` (from `--help`)? Cached per toolchain.
-    fn supports_flag(&self, flag: &str) -> bool {
-        let mut guard = match self.supported_flags.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        if guard.is_none() {
-            let mut cmd = self.effective_launcher().command();
-            cmd.arg("--help");
-            let flags = match run_command_with_deadline_polling(
-                &mut cmd,
-                None,
-                Some(Instant::now() + Duration::from_secs(15)),
-                Duration::from_millis(20),
-            ) {
-                Ok(CommandOutcome::Finished { stdout, .. }) => {
-                    let help = String::from_utf8_lossy(&stdout);
-                    help.split(|c: char| c.is_whitespace() || c == ',' || c == '=')
-                        .filter(|t| t.starts_with("--"))
-                        .map(|t| {
-                            t.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                                .to_string()
-                        })
-                        .collect::<HashSet<String>>()
-                }
-                _ => HashSet::new(),
-            };
-            *guard = Some(flags);
+    /// Flags the active yt-dlp lists in `--help`.
+    ///
+    /// A successful answer is cached for this binary (path and mtime). A failed or timed
+    /// out `--help`, such as the first start of a cold PyInstaller binary, is not cached:
+    /// it yields an empty set now and is retried by the next probe. `--help` runs outside
+    /// the cache lock so concurrent probes never queue behind it.
+    fn supported_flag_set(&self) -> Arc<HashSet<String>> {
+        let launcher = self.effective_launcher();
+        let fingerprint = BinaryFingerprint::of(&launcher);
+        if let Some(flags) = self
+            .supported_flags
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.get(&fingerprint)))
+        {
+            return flags;
         }
-        guard.as_ref().is_some_and(|f| f.contains(flag))
+        let mut cmd = launcher.command();
+        cmd.arg("--help");
+        match run_command_with_deadline_polling(
+            &mut cmd,
+            None,
+            Some(Instant::now() + Duration::from_secs(15)),
+            Duration::from_millis(20),
+        ) {
+            Ok(CommandOutcome::Finished { status, stdout, .. }) if status.success() => {
+                let help = String::from_utf8_lossy(&stdout);
+                let flags: HashSet<String> = help
+                    .split(|c: char| c.is_whitespace() || c == ',' || c == '=')
+                    .filter(|t| t.starts_with("--"))
+                    .map(|t| {
+                        t.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                            .to_string()
+                    })
+                    .collect();
+                if flags.is_empty() {
+                    return Arc::new(flags);
+                }
+                let flags = Arc::new(flags);
+                if let Ok(mut guard) = self.supported_flags.lock() {
+                    *guard = Some(Cached {
+                        binary: Some(fingerprint),
+                        value: Arc::clone(&flags),
+                    });
+                }
+                flags
+            }
+            _ => Arc::new(HashSet::new()),
+        }
+    }
+
+    /// Does the active yt-dlp accept `flag` (from `--help`)?
+    fn supports_flag(&self, flag: &str) -> bool {
+        self.supported_flag_set().contains(flag)
     }
 
     /// Test seam: declare which flags the (fake) yt-dlp accepts.
     pub fn set_supported_flags_for_test(&self, flags: &[&str]) {
         if let Ok(mut guard) = self.supported_flags.lock() {
-            *guard = Some(flags.iter().map(|f| (*f).to_string()).collect());
+            *guard = Some(Cached {
+                binary: None,
+                value: Arc::new(flags.iter().map(|f| (*f).to_string()).collect()),
+            });
         }
         if let Ok(mut guard) = self.impersonation_available.lock() {
-            *guard = Some(flags.contains(&"--impersonate"));
+            *guard = Some(Cached {
+                binary: None,
+                value: flags.contains(&"--impersonate"),
+            });
         }
     }
 
-    /// Can yt-dlp impersonate a browser (curl_cffi installed)? Cached.
+    /// Forget every cached probe answer. Call it when the yt-dlp binary or its
+    /// environment may have changed.
+    fn clear_capability_caches(&self) {
+        if let Ok(mut guard) = self.supported_flags.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.impersonation_available.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.detected_js_runtime.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Can yt-dlp impersonate a browser (curl_cffi installed)? Cached for a successful
+    /// listing only, like [`Self::supported_flag_set`].
     fn impersonation_available(&self) -> bool {
         if !self.supports_flag("--impersonate") {
             return false;
         }
-        let mut guard = match self.impersonation_available.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        if guard.is_none() {
-            let mut cmd = self.effective_launcher().command();
-            cmd.arg("--list-impersonate-targets");
-            let available = match run_command_with_deadline_polling(
-                &mut cmd,
-                None,
-                Some(Instant::now() + Duration::from_secs(15)),
-                Duration::from_millis(20),
-            ) {
-                Ok(CommandOutcome::Finished { status, stdout, .. }) if status.success() => {
-                    chrome_impersonation_listed(&String::from_utf8_lossy(&stdout))
-                }
-                _ => false,
-            };
-            *guard = Some(available);
+        let launcher = self.effective_launcher();
+        let fingerprint = BinaryFingerprint::of(&launcher);
+        if let Some(available) = self
+            .impersonation_available
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.get(&fingerprint)))
+        {
+            return available;
         }
-        guard.unwrap_or(false)
+        let mut cmd = launcher.command();
+        cmd.arg("--list-impersonate-targets");
+        match run_command_with_deadline_polling(
+            &mut cmd,
+            None,
+            Some(Instant::now() + Duration::from_secs(15)),
+            Duration::from_millis(20),
+        ) {
+            Ok(CommandOutcome::Finished { status, stdout, .. }) if status.success() => {
+                let available = chrome_impersonation_listed(&String::from_utf8_lossy(&stdout));
+                if let Ok(mut guard) = self.impersonation_available.lock() {
+                    *guard = Some(Cached {
+                        binary: Some(fingerprint),
+                        value: available,
+                    });
+                }
+                available
+            }
+            _ => false,
+        }
+    }
+
+    /// The JS runtime to pass to yt-dlp: the startup config's, else one found on PATH
+    /// now. `status()` and probes both use this, so the panel and the probe agree.
+    fn js_runtime(&self) -> Option<JsRuntime> {
+        if let Some(runtime) = &self.config.js_runtime {
+            return Some(runtime.clone());
+        }
+        if let Some(runtime) = self.detected_js_runtime.lock().ok().and_then(|g| g.clone()) {
+            return Some(runtime);
+        }
+        let found = detect_js_runtime(&path_dirs_from_env(), &|p| tool_version(p, &["--version"]));
+        if let (Some(runtime), Ok(mut guard)) = (&found, self.detected_js_runtime.lock()) {
+            *guard = Some(runtime.clone());
+        }
+        found
     }
 
     /// Runtime arguments shared by probe and download: JS runtime, remote
     /// components and browser impersonation (each only when supported).
     fn runtime_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        if self.config.js_runtime.is_some() && self.supports_flag("--js-runtimes") {
+        let flags = self.supported_flag_set();
+        let js_runtime = self.js_runtime();
+        if js_runtime.is_some() && flags.contains("--js-runtimes") {
             args.extend(ytdlp_js_runtime_args(
-                self.config.js_runtime.as_ref(),
-                self.config.remote_components && self.supports_flag("--remote-components"),
+                js_runtime.as_ref(),
+                self.config.remote_components && flags.contains("--remote-components"),
             ));
-        } else if self.config.remote_components && self.supports_flag("--remote-components") {
+        } else if self.config.remote_components && flags.contains("--remote-components") {
             args.push("--remote-components".to_string());
             args.push("ejs:github".to_string());
         }
@@ -408,11 +526,7 @@ impl YtDlpExtractorToolchain {
             ytdlp,
             ffmpeg: find_tool("ffmpeg"),
             ffprobe: find_tool("ffprobe"),
-            js_runtime: self
-                .config
-                .js_runtime
-                .clone()
-                .or_else(|| detect_js_runtime(&path_dirs, &|p| tool_version(p, &["--version"]))),
+            js_runtime: self.js_runtime(),
             ejs,
             platform: PlatformInfo::current(),
             sidecar_root: None,
@@ -442,14 +556,18 @@ impl YtDlpExtractorToolchain {
 
     /// Bind toolchain binary + plugin dirs from an installed sidecar root.
     pub fn bind_sidecar_root(&self, root: &Path) {
-        if let Ok(Some(manifest)) = load_toolchain_manifest(root) {
-            let path = toolchain_binary_path(root, &manifest);
-            if path.is_file() {
-                if let Ok(mut slot) = self.sidecar_binary.lock() {
-                    *slot = Some(path);
-                }
+        // The same health check as discovery: a file without an execute bit would fail
+        // every probe with EACCES, and a missing one clears the old binding.
+        let healthy = match load_toolchain_manifest(root) {
+            Ok(Some(manifest)) => {
+                Some(toolchain_binary_path(root, &manifest)).filter(|p| is_executable_file(p))
             }
+            _ => None,
+        };
+        if let Ok(mut slot) = self.sidecar_binary.lock() {
+            *slot = healthy;
         }
+        self.clear_capability_caches();
         if let Ok(mut dirs) = self.sidecar_plugin_dirs.lock() {
             dirs.clear();
             if let Some(plugin_dir) = crate::plugin_sidecar::plugin_dirs_path(root) {
@@ -650,7 +768,8 @@ impl YtDlpExtractorToolchain {
         proxy: &ProxySettings,
         policy: &ProbePolicy,
     ) -> Result<String, String> {
-        let args = self.probe_args_for(url, flat_playlist, cookies, proxy);
+        let (cookies, _cookie_copy) = cookies.with_private_cookie_file()?;
+        let args = self.probe_args_for(url, flat_playlist, &cookies, proxy);
         let launcher = self.effective_launcher();
         let (mut cmd, _doh_guard) =
             ytdlp_command_with_optional_doh_dns(&launcher, &args, url, proxy)?;
@@ -667,7 +786,14 @@ impl YtDlpExtractorToolchain {
             Some(deadline),
             Duration::from_millis(50),
         )
-        .map_err(|e| format!("failed to execute yt-dlp: {e}"))?;
+        .map_err(|e| {
+            // Keep a `[code]` (such as toolchain_missing) at the front.
+            if error_code(&e).is_some() {
+                e
+            } else {
+                format!("failed to execute yt-dlp: {e}")
+            }
+        })?;
 
         let (status, stdout, stderr) = match outcome {
             CommandOutcome::Finished {
@@ -697,8 +823,8 @@ impl YtDlpExtractorToolchain {
             });
         }
 
-        let stdout = String::from_utf8(stdout)
-            .map_err(|e| format!("yt-dlp output is not valid UTF-8: {e}"))?;
+        // A title with bytes from a legacy encoding must not fail the whole probe.
+        let stdout = String::from_utf8_lossy(&stdout).into_owned();
 
         if stdout.trim().is_empty() {
             return Err("yt-dlp produced empty output for probe".into());
@@ -909,8 +1035,12 @@ impl YtDlpExtractorToolchain {
         if has_video(format) && has_audio(format) {
             if let Some(h) = format.height {
                 format!("{}p", h)
-            } else if let Some(res) = format.resolution.as_deref() {
-                res.replace('x', "p")
+            } else if let Some(height) = format
+                .resolution
+                .as_deref()
+                .and_then(height_from_resolution)
+            {
+                format!("{height}p")
             } else {
                 format.format_id.clone()
             }
@@ -922,7 +1052,7 @@ impl YtDlpExtractorToolchain {
             }
         } else if has_audio(format) {
             if let Some(tbr) = format.tbr {
-                let kbps = (tbr / 1000.0).round() as u64;
+                let kbps = tbr.round() as u64;
                 format!("{}k-audio", kbps.max(1))
             } else {
                 format!("{}-audio", format.format_id)
@@ -969,7 +1099,7 @@ impl YtDlpExtractorToolchain {
         } else if let Some(note) = &format.format_note {
             note.clone()
         } else if let Some(tbr) = format.tbr {
-            let kbps = (tbr / 1000.0).round() as u64;
+            let kbps = tbr.round() as u64;
             format!("{} kb/s", kbps.max(1))
         } else {
             format.format_id.clone()
@@ -1124,12 +1254,13 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
         std::fs::create_dir_all(dest_dir)
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
+        let (cookies, _cookie_copy) = cookies.with_private_cookie_file()?;
         let args = self.download_args(
             url,
             format,
             dest_dir,
             media_extras,
-            cookies,
+            &cookies,
             proxy,
             output_template,
             referer,
@@ -1143,7 +1274,13 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
                 progress(p);
             }
         };
-        let result = run_command_interruptible(cmd, stop, Duration::from_millis(50), &mut observe);
+        let result = run_command_interruptible(
+            cmd,
+            stop,
+            DOWNLOAD_STALL_TIMEOUT,
+            Duration::from_millis(50),
+            &mut observe,
+        );
 
         match result? {
             InterruptibleOutput::Stopped => Ok(ExtractorDownloadOutcome::Stopped),
@@ -1304,16 +1441,30 @@ fn chrome_impersonation_listed(listing: &str) -> bool {
     })
 }
 
-/// Spawn `cmd`, poll `stop`, and hard-kill the child when stop is requested.
+/// A download that prints nothing for this long is treated as hung and killed. yt-dlp
+/// prints progress about once a second and retries a dead socket with messages, so only a
+/// hang of the process itself is silent this long; a long merge still finishes in time.
+const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Spawn `cmd`, poll `stop`, and hard-kill the child when stop is requested or `stall`
+/// passes without output.
 fn run_command_interruptible(
     mut cmd: Command,
     stop: &AtomicBool,
+    stall: Duration,
     poll_interval: Duration,
     observer: &mut dyn FnMut(&[u8]),
 ) -> Result<InterruptibleOutput, String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    match run_command_observing(&mut cmd, Some(stop), None, poll_interval, Some(observer))
-        .map_err(|e| e.replace("failed to spawn", "failed to spawn yt-dlp download:"))?
+    match run_command_watched(
+        &mut cmd,
+        Some(stop),
+        None,
+        Some(stall),
+        poll_interval,
+        Some(observer),
+    )
+    .map_err(|e| e.replace("failed to spawn", "failed to spawn yt-dlp download:"))?
     {
         CommandOutcome::Finished {
             status,
@@ -1324,7 +1475,15 @@ fn run_command_interruptible(
             stdout,
             stderr,
         }),
-        CommandOutcome::Stopped | CommandOutcome::TimedOut => Ok(InterruptibleOutput::Stopped),
+        CommandOutcome::Stopped => Ok(InterruptibleOutput::Stopped),
+        // Only the stall limit can time this run out: there is no overall deadline.
+        CommandOutcome::TimedOut => Err(tag_error(
+            ERROR_CODE_TIMEOUT,
+            format!(
+                "yt-dlp download stalled: no output for {}s",
+                stall.as_secs()
+            ),
+        )),
     }
 }
 
@@ -1374,13 +1533,13 @@ struct YtDlpVideoInfo {
     /// YouTube video ID (or site-specific ID / playlist id).
     id: String,
     /// Video title or playlist/channel title.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     title: String,
     /// Short extractor name (e.g. "youtube").
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     extractor: String,
     /// Capitalised extractor key (e.g. "Youtube", "YoutubePlaylist").
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     extractor_key: String,
     /// yt-dlp result type: `"video"`, `"playlist"`, `"url"`, etc.
     #[serde(default, rename = "_type")]
@@ -1392,7 +1551,7 @@ struct YtDlpVideoInfo {
     #[serde(default)]
     entries: Option<Vec<Option<YtDlpEntry>>>,
     /// The webpage URL.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     webpage_url: String,
     /// The originally requested URL.
     #[serde(default)]
@@ -1401,10 +1560,10 @@ struct YtDlpVideoInfo {
     #[serde(default)]
     playlist_title: Option<String>,
     /// Playlist index within a playlist.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u64")]
     playlist_index: Option<u64>,
     /// Duration in seconds.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_f64")]
     duration: Option<f64>,
     /// Thumbnail URL.
     #[serde(default)]
@@ -1439,7 +1598,7 @@ struct YtDlpEntry {
     formats: Option<Vec<YtDlpFormat>>,
     #[serde(default)]
     ie_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_f64")]
     duration: Option<f64>,
 }
 
@@ -1493,6 +1652,13 @@ fn usable_format_size(format: &YtDlpFormat) -> Option<u64> {
 }
 
 /// Derive a stable entry id when yt-dlp flat-playlist output omits `id`.
+/// Height from a yt-dlp `resolution` string such as `1920x1080` (`None` for `audio only`).
+fn height_from_resolution(resolution: &str) -> Option<u64> {
+    let (width, height) = resolution.split_once('x')?;
+    width.trim().parse::<u64>().ok()?;
+    height.trim().parse().ok()
+}
+
 /// Is `s` an absolute http or https URL? Extractor output is untrusted, so listing entries
 /// that fail this check are dropped before they can reach a yt-dlp argument vector.
 fn is_http_url(s: &str) -> bool {
@@ -1545,6 +1711,35 @@ fn playlist_entry_title(entry: &YtDlpEntry, id: &str) -> String {
         .unwrap_or_else(|| id.replace('-', " "))
 }
 
+/// Number fields that yt-dlp may print as an integer, a float, or `null`. Anything else
+/// becomes `None` so one odd field does not fail the whole probe.
+fn lenient_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(d)?;
+    Ok(match value {
+        serde_json::Value::Number(n) => n.as_u64().or_else(|| {
+            n.as_f64()
+                .filter(|f| f.is_finite() && *f >= 0.0)
+                .map(|f| f as u64)
+        }),
+        _ => None,
+    })
+}
+
+/// Like [`lenient_u64`] for floats that must be finite.
+fn lenient_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(d)?;
+    Ok(value.as_f64().filter(|f| f.is_finite()))
+}
+
+/// A string field that yt-dlp may print as `null`; `null` and non-strings become "".
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(d)?;
+    Ok(match value {
+        serde_json::Value::String(s) => s,
+        _ => String::new(),
+    })
+}
+
 /// A single format entry from yt-dlp's format list.
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -1559,13 +1754,13 @@ struct YtDlpFormat {
     #[serde(default)]
     ext: Option<String>,
     /// Video height in pixels (if video stream).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u64")]
     height: Option<u64>,
     /// Video width in pixels.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u64")]
     width: Option<u64>,
-    /// Total bitrate in bps.
-    #[serde(default)]
+    /// Total bitrate in kbit/s (yt-dlp's `tbr` unit).
+    #[serde(default, deserialize_with = "lenient_f64")]
     tbr: Option<f64>,
     /// Video codec name, "none" if no video.
     #[serde(default)]
@@ -1580,19 +1775,19 @@ struct YtDlpFormat {
     #[serde(default)]
     url: Option<String>,
     /// Approximate filesize in bytes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u64")]
     filesize: Option<u64>,
     /// Approximate filesize (when not known precisely).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u64")]
     filesize_approx: Option<u64>,
     /// Audio sampling rate.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u64")]
     asr: Option<u64>,
     /// Frames per second.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_f64")]
     fps: Option<f64>,
     /// Number of audio channels.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_u64")]
     audio_channels: Option<u64>,
 }
 
@@ -1625,7 +1820,7 @@ pub(crate) fn canned_youtube_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 360,
       "width": 640,
-      "tbr": 250000.0,
+      "tbr": 250.0,
       "vcodec": "avc1.42001E",
       "acodec": "mp4a.40.2",
       "resolution": "640x360",
@@ -1640,7 +1835,7 @@ pub(crate) fn canned_youtube_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 720,
       "width": 1280,
-      "tbr": 1150000.0,
+      "tbr": 1150.0,
       "vcodec": "avc1.64001F",
       "acodec": "mp4a.40.2",
       "resolution": "1280x720",
@@ -1655,7 +1850,7 @@ pub(crate) fn canned_youtube_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 1080,
       "width": 1920,
-      "tbr": 4500000.0,
+      "tbr": 4500.0,
       "vcodec": "avc1.640028",
       "acodec": "none",
       "resolution": "1920x1080",
@@ -1670,7 +1865,7 @@ pub(crate) fn canned_youtube_probe_json() -> &'static str {
       "ext": "m4a",
       "height": null,
       "width": null,
-      "tbr": 130000.0,
+      "tbr": 130.0,
       "vcodec": "none",
       "acodec": "mp4a.40.2",
       "resolution": null,
@@ -1685,7 +1880,7 @@ pub(crate) fn canned_youtube_probe_json() -> &'static str {
       "ext": "webm",
       "height": 720,
       "width": 1280,
-      "tbr": 2000000.0,
+      "tbr": 2000.0,
       "vcodec": "vp9",
       "acodec": "none",
       "resolution": "1280x720",
@@ -1700,7 +1895,7 @@ pub(crate) fn canned_youtube_probe_json() -> &'static str {
       "ext": "webm",
       "height": null,
       "width": null,
-      "tbr": 160000.0,
+      "tbr": 160.0,
       "vcodec": "none",
       "acodec": "opus",
       "resolution": null,
@@ -1730,7 +1925,7 @@ pub(crate) fn canned_generic_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 720,
       "width": 1280,
-      "tbr": 1000000.0,
+      "tbr": 1000.0,
       "vcodec": "avc1",
       "acodec": "mp4a",
       "resolution": "1280x720",
@@ -1759,7 +1954,7 @@ pub(crate) fn canned_luxuretv_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 480,
       "width": 854,
-      "tbr": 800000.0,
+      "tbr": 800.0,
       "vcodec": "avc1",
       "acodec": "mp4a",
       "resolution": "854x480",
@@ -1771,7 +1966,7 @@ pub(crate) fn canned_luxuretv_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 720,
       "width": 1280,
-      "tbr": 1600000.0,
+      "tbr": 1600.0,
       "vcodec": "avc1",
       "acodec": "mp4a",
       "resolution": "1280x720",
@@ -1783,7 +1978,7 @@ pub(crate) fn canned_luxuretv_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 1080,
       "width": 1920,
-      "tbr": 3200000.0,
+      "tbr": 3200.0,
       "vcodec": "avc1",
       "acodec": "mp4a",
       "resolution": "1920x1080",
@@ -1811,7 +2006,7 @@ pub(crate) fn canned_xxxbp_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 360,
       "width": 640,
-      "tbr": 500000.0,
+      "tbr": 500.0,
       "vcodec": "avc1",
       "acodec": "mp4a",
       "resolution": "640x360",
@@ -1823,7 +2018,7 @@ pub(crate) fn canned_xxxbp_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 720,
       "width": 1280,
-      "tbr": 1500000.0,
+      "tbr": 1500.0,
       "vcodec": "avc1",
       "acodec": "mp4a",
       "resolution": "1280x720",
@@ -1853,7 +2048,7 @@ pub(crate) fn canned_youtube_playlist_item_json() -> &'static str {
       "ext": "mp4",
       "height": 360,
       "width": 640,
-      "tbr": 250000.0,
+      "tbr": 250.0,
       "vcodec": "avc1.42001E",
       "acodec": "mp4a.40.2",
       "resolution": "640x360",
@@ -1970,7 +2165,7 @@ pub(crate) fn canned_xhamster_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 240,
       "width": 426,
-      "tbr": 300000.0,
+      "tbr": 300.0,
       "vcodec": "avc1",
       "acodec": "mp4a.40.2",
       "resolution": "426x240",
@@ -1982,7 +2177,7 @@ pub(crate) fn canned_xhamster_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 720,
       "width": 1280,
-      "tbr": 1500000.0,
+      "tbr": 1500.0,
       "vcodec": "avc1",
       "acodec": "mp4a.40.2",
       "resolution": "1280x720",
@@ -1994,7 +2189,7 @@ pub(crate) fn canned_xhamster_probe_json() -> &'static str {
       "ext": "mp4",
       "height": 1080,
       "width": 1920,
-      "tbr": 4000000.0,
+      "tbr": 4000.0,
       "vcodec": "avc1",
       "acodec": "mp4a.40.2",
       "resolution": "1920x1080",
@@ -2142,6 +2337,7 @@ mod tests {
             run_command_interruptible(
                 cmd,
                 &stop_for_worker,
+                Duration::from_secs(60),
                 Duration::from_millis(20),
                 &mut |_| {},
             )
@@ -2163,6 +2359,91 @@ mod tests {
             "hard-kill must stop promptly, elapsed {:?}",
             started.elapsed()
         );
+    }
+
+    /// L-22: a download whose process hangs silently used to run forever.
+    #[cfg(unix)]
+    #[test]
+    fn silent_download_is_killed_after_the_stall_limit() {
+        let stop = AtomicBool::new(false);
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo started; sleep 30"]);
+        let started = Instant::now();
+        let err = run_command_interruptible(
+            cmd,
+            &stop,
+            Duration::from_millis(400),
+            Duration::from_millis(20),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(error_code(&err), Some("timeout"), "{err}");
+        assert!(err.contains("stalled"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn steady_output_keeps_a_download_alive_past_the_stall_limit() {
+        let stop = AtomicBool::new(false);
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "for i in 1 2 3 4 5 6; do echo $i; sleep 0.15; done"]);
+        let out = run_command_interruptible(
+            cmd,
+            &stop,
+            Duration::from_millis(400),
+            Duration::from_millis(20),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(
+            matches!(out, InterruptibleOutput::Finished { .. }),
+            "{out:?}"
+        );
+    }
+
+    /// L-23: one stray byte in a title must not fail the whole probe.
+    #[cfg(unix)]
+    #[test]
+    fn probe_output_with_invalid_utf8_is_decoded_lossily() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("yt-dlp");
+        write_executable(
+            &script,
+            "#!/bin/sh\ncase \"$*\" in\n  *--help*) echo '  --impersonate T' ;;\n  *) printf '{\"id\":\"a\",\"title\":\"caf\\351\",\"extractor_key\":\"Youtube\",\"extractor\":\"youtube\",\"webpage_url\":\"https://www.youtube.com/watch?v=a\",\"formats\":[{\"format_id\":\"18\",\"height\":360,\"ext\":\"mp4\",\"vcodec\":\"avc1\",\"acodec\":\"mp4a\"}]}' ;;\nesac\n",
+        );
+        let toolchain = YtDlpExtractorToolchain::new(YtDlpConfig {
+            launcher: Some(YtDlpLauncher::Binary { path: script }),
+            ..YtDlpConfig::default()
+        });
+        let result = toolchain
+            .probe(
+                "https://www.youtube.com/watch?v=a",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
+            .expect("lossy decoding");
+        assert!(result.items[0].title.starts_with("caf"));
+    }
+
+    /// M-26: a missing yt-dlp is reported with a code the shell can act on.
+    #[test]
+    fn missing_ytdlp_binary_probe_error_is_tagged() {
+        let toolchain = YtDlpExtractorToolchain::new(YtDlpConfig {
+            launcher: Some(YtDlpLauncher::Binary {
+                path: PathBuf::from("/nonexistent/phlegethon/yt-dlp"),
+            }),
+            ..YtDlpConfig::default()
+        });
+        toolchain.set_supported_flags_for_test(&[]);
+        let err = toolchain
+            .probe(
+                "https://www.youtube.com/watch?v=a",
+                &CookieChannel::default(),
+                &ProxySettings::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error_code(&err), Some("toolchain_missing"), "{err}");
     }
 
     // ---- YtDlpConfig ----
@@ -2264,6 +2545,11 @@ mod tests {
         crate::sidecar_updates::write_toolchain_manifest(root, &manifest).unwrap();
         let binary = crate::sidecar_updates::toolchain_binary_path(root, &manifest);
         std::fs::write(&binary, b"fake-ytdlp").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
         assert_eq!(extractor.effective_binary_path(), PathBuf::from("yt-dlp"));
@@ -2965,7 +3251,7 @@ mod tests {
             ext: Some("mp4".into()),
             height: Some(360),
             width: Some(640),
-            tbr: Some(250000.0),
+            tbr: Some(250.0),
             vcodec: Some("avc1".into()),
             acodec: Some("mp4a".into()),
             resolution: Some("640x360".into()),
@@ -2989,7 +3275,7 @@ mod tests {
             ext: Some("mp4".into()),
             height: Some(1080),
             width: Some(1920),
-            tbr: Some(4500000.0),
+            tbr: Some(4500.0),
             vcodec: Some("avc1".into()),
             acodec: Some("none".into()),
             resolution: Some("1920x1080".into()),
@@ -3013,7 +3299,7 @@ mod tests {
             ext: Some("m4a".into()),
             height: None,
             width: None,
-            tbr: Some(130000.0),
+            tbr: Some(130.0),
             vcodec: Some("none".into()),
             acodec: Some("mp4a".into()),
             resolution: None,
@@ -3103,7 +3389,7 @@ mod tests {
             ext: Some("mp4".into()),
             height: Some(360),
             width: Some(640),
-            tbr: Some(250000.0),
+            tbr: Some(250.0),
             vcodec: Some("avc1".into()),
             acodec: Some("mp4a".into()),
             resolution: Some("640x360".into()),
@@ -3129,7 +3415,7 @@ mod tests {
             ext: Some("mp4".into()),
             height: Some(720),
             width: Some(1280),
-            tbr: Some(1000000.0),
+            tbr: Some(1000.0),
             vcodec: Some("avc1".into()),
             acodec: Some("mp4a".into()),
             resolution: Some("1280x720".into()),
@@ -3154,7 +3440,7 @@ mod tests {
             ext: Some("mp4".into()),
             height: Some(360),
             width: Some(640),
-            tbr: Some(250000.0),
+            tbr: Some(250.0),
             vcodec: Some("avc1".into()),
             acodec: Some("mp4a".into()),
             resolution: Some("640x360".into()),
@@ -3180,7 +3466,7 @@ mod tests {
                 ext: Some("mp4".into()),
                 height: Some(720),
                 width: Some(1280),
-                tbr: Some(1000000.0),
+                tbr: Some(1000.0),
                 vcodec: Some("avc1".into()),
                 acodec: Some("mp4a".into()),
                 resolution: Some("1280x720".into()),
@@ -3197,7 +3483,7 @@ mod tests {
                 ext: Some("webm".into()),
                 height: Some(720),
                 width: Some(1280),
-                tbr: Some(2000000.0),
+                tbr: Some(2000.0),
                 vcodec: Some("vp9".into()),
                 acodec: Some("opus".into()),
                 resolution: Some("1280x720".into()),
@@ -3231,7 +3517,7 @@ mod tests {
                 ext: Some("mp4".into()),
                 height: Some(720),
                 width: Some(1280),
-                tbr: Some(1000000.0),
+                tbr: Some(1000.0),
                 vcodec: Some("avc1".into()),
                 acodec: Some("mp4a".into()),
                 resolution: Some("1280x720".into()),
@@ -3248,7 +3534,7 @@ mod tests {
                 ext: Some("webm".into()),
                 height: Some(720),
                 width: Some(1280),
-                tbr: Some(2000000.0),
+                tbr: Some(2000.0),
                 vcodec: Some("vp9".into()),
                 acodec: Some("opus".into()),
                 resolution: Some("1280x720".into()),
@@ -3764,5 +4050,220 @@ esac
             seen[1].1.duration_since(seen[0].1) >= Duration::from_millis(200),
             "first report must arrive while the child still runs"
         );
+    }
+
+    // ---- Toolchain health and probe-output tolerance (H-24, M-40, M-28, L-20, L-21) ----
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A `--help` that fails (or times out) on a cold binary used to cache an empty flag
+    /// set for the whole session, so `--impersonate` was never passed again.
+    #[cfg(unix)]
+    #[test]
+    fn failed_help_is_not_cached_and_a_later_probe_sees_the_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("yt-dlp");
+        let marker = dir.path().join("warm");
+        write_executable(
+            &script,
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *--help*) [ -f '{m}' ] || {{ touch '{m}'; exit 1; }}; echo '  --js-runtimes R  --impersonate T' ;;\n  *--list-impersonate-targets*) echo 'chrome  windows  curl_cffi' ;;\nesac\n",
+                m = marker.display()
+            ),
+        );
+        let toolchain = YtDlpExtractorToolchain::new(YtDlpConfig {
+            launcher: Some(YtDlpLauncher::Binary { path: script }),
+            ..YtDlpConfig::default()
+        });
+        assert!(
+            !toolchain.supports_flag("--impersonate"),
+            "cold start fails"
+        );
+        assert!(
+            toolchain.supports_flag("--impersonate"),
+            "the failure must not be cached"
+        );
+        assert!(toolchain
+            .runtime_args()
+            .contains(&"--impersonate".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_caches_follow_the_binary_and_rebind() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("yt-dlp");
+        write_executable(&script, "#!/bin/sh\necho '  --impersonate T'\n");
+        let toolchain = YtDlpExtractorToolchain::new(YtDlpConfig {
+            launcher: Some(YtDlpLauncher::Binary {
+                path: script.clone(),
+            }),
+            ..YtDlpConfig::default()
+        });
+        assert!(toolchain.supports_flag("--impersonate"));
+        assert!(!toolchain.supports_flag("--js-runtimes"));
+
+        // The same path with new contents and a new mtime: an update from the panel.
+        std::thread::sleep(Duration::from_millis(20));
+        write_executable(
+            &script,
+            "#!/bin/sh\necho '  --impersonate T --js-runtimes R'\n",
+        );
+        let later = SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&script)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(
+            toolchain.supports_flag("--js-runtimes"),
+            "a changed binary must be probed again"
+        );
+
+        toolchain.clear_capability_caches();
+        assert!(toolchain.supports_flag("--js-runtimes"));
+    }
+
+    /// `bind_sidecar_root` used to leave the caches of the previous binary in place.
+    #[cfg(unix)]
+    #[test]
+    fn bind_sidecar_root_clears_the_capability_caches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let manifest = crate::sidecar_updates::ToolchainManifest::stub("9.9.9");
+        crate::sidecar_updates::write_toolchain_manifest(root, &manifest).unwrap();
+        let binary = crate::sidecar_updates::toolchain_binary_path(root, &manifest);
+        write_executable(&binary, "#!/bin/sh\necho '  --js-runtimes R'\n");
+
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        extractor.set_supported_flags_for_test(&["--impersonate"]);
+        assert!(extractor.supports_flag("--impersonate"));
+        extractor.bind_sidecar_root(root);
+        assert!(extractor.supports_flag("--js-runtimes"));
+        assert!(!extractor.supports_flag("--impersonate"));
+    }
+
+    /// A slow `--help` must not hold the cache lock: other probes read it meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn slow_help_does_not_block_concurrent_cache_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("yt-dlp");
+        write_executable(&script, "#!/bin/sh\nsleep 2\necho '  --impersonate T'\n");
+        let toolchain = Arc::new(YtDlpExtractorToolchain::new(YtDlpConfig {
+            launcher: Some(YtDlpLauncher::Binary { path: script }),
+            ..YtDlpConfig::default()
+        }));
+        let slow = {
+            let t = Arc::clone(&toolchain);
+            std::thread::spawn(move || t.supports_flag("--impersonate"))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        let guard = toolchain.supported_flags.lock();
+        assert!(guard.is_ok());
+        drop(guard);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the cache lock was held while --help ran"
+        );
+        assert!(slow.join().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_sidecar_root_ignores_a_non_executable_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let manifest = crate::sidecar_updates::ToolchainManifest::stub("9.9.9");
+        crate::sidecar_updates::write_toolchain_manifest(root, &manifest).unwrap();
+        let binary = crate::sidecar_updates::toolchain_binary_path(root, &manifest);
+        std::fs::write(&binary, b"not executable").unwrap();
+
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        extractor.bind_sidecar_root(root);
+        assert!(extractor.sidecar_binary_for_test().is_none());
+        assert_eq!(extractor.effective_binary_path(), PathBuf::from("yt-dlp"));
+    }
+
+    /// A binary deleted while the app runs must stop shadowing a working yt-dlp, and a
+    /// rebind after the deletion drops the binding.
+    #[cfg(unix)]
+    #[test]
+    fn deleted_sidecar_binary_is_unbound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let manifest = crate::sidecar_updates::ToolchainManifest::stub("9.9.9");
+        crate::sidecar_updates::write_toolchain_manifest(root, &manifest).unwrap();
+        let binary = crate::sidecar_updates::toolchain_binary_path(root, &manifest);
+        write_executable(&binary, "#!/bin/sh\n");
+
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        extractor.bind_sidecar_root(root);
+        assert_eq!(extractor.effective_binary_path(), binary);
+        std::fs::remove_file(&binary).unwrap();
+        assert_eq!(extractor.effective_binary_path(), PathBuf::from("yt-dlp"));
+        extractor.bind_sidecar_root(root);
+        assert!(extractor.sidecar_binary_for_test().is_none());
+    }
+
+    #[test]
+    fn audio_ids_use_tbr_as_kbit_per_second() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let json = r#"{"id":"a","title":"t","extractor_key":"Youtube","extractor":"youtube",
+            "webpage_url":"https://www.youtube.com/watch?v=a",
+            "formats":[
+              {"format_id":"139","format_note":"low","ext":"m4a","tbr":48.7,"vcodec":"none","acodec":"mp4a"},
+              {"format_id":"140","format_note":"medium","ext":"m4a","tbr":129.5,"vcodec":"none","acodec":"mp4a"},
+              {"format_id":"251","format_note":"high","ext":"webm","tbr":135.2,"vcodec":"none","acodec":"opus"}]}"#;
+        let result = extractor
+            .parse_probe_result(json, "https://www.youtube.com/watch?v=a")
+            .unwrap();
+        let ids: Vec<&str> = result.items[0]
+            .qualities
+            .iter()
+            .map(|q| q.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["49k-audio", "130k-audio", "135k-audio"]);
+    }
+
+    #[test]
+    fn resolution_string_becomes_a_height_selector() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let json = r#"{"id":"a","title":"t","extractor_key":"Youtube","extractor":"youtube",
+            "webpage_url":"https://www.youtube.com/watch?v=a",
+            "formats":[{"format_id":"x","ext":"mp4","resolution":"1920x1080","vcodec":"avc1","acodec":"mp4a"}]}"#;
+        let result = extractor
+            .parse_probe_result(json, "https://www.youtube.com/watch?v=a")
+            .unwrap();
+        let id = &result.items[0].qualities[0].id;
+        assert_eq!(id, "1080p");
+        assert_eq!(
+            quality_id_to_ytdlp_format(id, true),
+            "best[height=1080]/best[height<=1080]/best"
+        );
+        assert_eq!(height_from_resolution("audio only"), None);
+    }
+
+    #[test]
+    fn probe_json_tolerates_float_and_null_fields() {
+        let extractor = YtDlpExtractorToolchain::new(YtDlpConfig::default());
+        let json = r#"{"id":"a","title":null,"extractor_key":"Youtube","extractor":"youtube",
+            "webpage_url":"https://www.youtube.com/watch?v=a","duration":null,
+            "formats":[
+              {"format_id":"22","height":720.0,"width":null,"filesize":1234567.0,"filesize_approx":null,
+               "asr":44100.0,"fps":null,"tbr":null,"ext":"mp4","vcodec":"avc1","acodec":"mp4a"}]}"#;
+        let result = extractor
+            .parse_probe_result(json, "https://www.youtube.com/watch?v=a")
+            .expect("one float or null field must not fail the whole probe");
+        let quality = &result.items[0].qualities[0];
+        assert_eq!(quality.id, "720p");
+        assert_eq!(quality.size_bytes, Some(1_234_567));
     }
 }
