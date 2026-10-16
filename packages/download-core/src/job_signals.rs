@@ -1,7 +1,7 @@
 //! Per-job pause / discard / transfer signals reachable without the Core mutex.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -9,6 +9,22 @@ pub struct JobSignals {
     pause_requested: Mutex<HashMap<String, Arc<AtomicBool>>>,
     discard_requested: Mutex<HashMap<String, Arc<AtomicBool>>>,
     transfer_active: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    probes_in_flight: AtomicUsize,
+}
+
+/// Counts one in-flight yt-dlp probe or quality lookup while it lives.
+///
+/// Those run outside the Core lock, so the sidecar installer cannot see them
+/// through `transfer_active`. Hold the guard for as long as the extractor may
+/// be executing (H-23).
+pub struct ProbeGuard {
+    signals: Arc<JobSignals>,
+}
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        self.signals.probes_in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl JobSignals {
@@ -66,6 +82,19 @@ impl JobSignals {
             .unwrap()
             .get(job_id)
             .is_some_and(|flag| flag.load(Ordering::Acquire))
+    }
+
+    /// Mark one probe or quality lookup as running until the guard is dropped.
+    pub fn begin_probe(self: &Arc<Self>) -> ProbeGuard {
+        self.probes_in_flight.fetch_add(1, Ordering::AcqRel);
+        ProbeGuard {
+            signals: Arc::clone(self),
+        }
+    }
+
+    /// Number of probes and quality lookups currently running yt-dlp.
+    pub fn probes_in_flight(&self) -> usize {
+        self.probes_in_flight.load(Ordering::Acquire)
     }
 
     /// Number of jobs currently writing body bytes.

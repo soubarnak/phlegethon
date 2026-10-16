@@ -71,7 +71,7 @@ pub use github_release_source::{
 pub use http::{ContentRange, FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
-pub use job_signals::JobSignals;
+pub use job_signals::{JobSignals, ProbeGuard};
 pub use media_extras::{
     apply_remux_postprocess, effective_options, ffmpeg_available, ytdlp_media_extras_args,
     MediaExtrasCapabilities, MediaExtrasOptions, PostprocessOutcome,
@@ -84,10 +84,11 @@ pub use page_sniffer::{
 pub use proxy_settings::ProxySettings;
 pub use quality_policy::{select_default_quality, DefaultQualityPolicy, DEFAULT_MAX_HEIGHT};
 pub use sidecar_updates::{
-    apply_sidecar_updates, apply_sidecar_updates_on_launch, check_sidecar_updates,
-    rollback_sidecar_component, toolchain_binary_path, write_toolchain_manifest,
-    CatalogVersionEntry, FakeSidecarUpdateSource, FileSidecarUpdateSource, SidecarApplyOutcome,
-    SidecarApplyResult, SidecarComponent, SidecarComponentStatus, SidecarRuntimeState,
+    apply_deferred_sidecar_updates, apply_sidecar_updates, apply_sidecar_updates_on_launch,
+    check_sidecar_updates, load_sidecar_settings, rollback_sidecar_component,
+    save_sidecar_settings, toolchain_binary_path, write_toolchain_manifest, CatalogVersionEntry,
+    FakeSidecarUpdateSource, FileSidecarUpdateSource, SidecarApplyOutcome, SidecarApplyResult,
+    SidecarChannel, SidecarComponent, SidecarComponentStatus, SidecarRuntimeState,
     SidecarUpdateCheckResult, SidecarUpdateSettings, SidecarUpdateSource, ToolchainManifest,
     UpdateCatalog, TOOLCHAIN_MANIFEST_FILENAME, UPDATE_CATALOG_FILENAME,
 };
@@ -263,6 +264,8 @@ pub struct ProbePlan {
     cancel: Arc<AtomicBool>,
     /// Unique per planned probe, so concurrent probes of one URL stay distinct.
     id: u64,
+    /// Keeps the sidecar installer from swapping yt-dlp while this probe runs.
+    _probe_guard: Option<job_signals::ProbeGuard>,
 }
 
 impl ProbePlan {
@@ -287,6 +290,7 @@ impl ProbePlan {
             settings,
             cancel: Arc::new(AtomicBool::new(false)),
             id: 0,
+            _probe_guard: None,
         })
     }
 
@@ -514,6 +518,8 @@ pub struct EnrichPlan {
     extractor: Arc<dyn ExtractorToolchain>,
     cookies: CookieChannel,
     proxy: ProxySettings,
+    /// Keeps the sidecar installer from swapping yt-dlp while this lookup runs.
+    _probe_guard: job_signals::ProbeGuard,
 }
 
 impl EnrichPlan {
@@ -1261,7 +1267,6 @@ impl Core {
         if let Err(e) = self.http.apply_proxy_settings(&self.proxy_settings) {
             eprintln!("saved proxy setting rejected: {e}");
         }
-        self.sidecar_update_settings = loaded.sidecar_update_settings;
         self.filename_template = loaded.filename_template;
         self.probe_tier_settings = loaded.probe_tier_settings;
         self.download_archive = archive;
@@ -1299,7 +1304,6 @@ impl Core {
                 &self.default_media_extras,
                 &self.cookie_channel,
                 &self.proxy_settings,
-                &self.sidecar_update_settings,
                 &self.filename_template,
                 &self.probe_tier_settings,
             );
@@ -2066,13 +2070,21 @@ impl Core {
         self.sidecar_update_settings.clone()
     }
 
-    /// Update sidecar update manager settings and persist them.
+    /// Update sidecar update manager settings and persist them beside the sidecar
+    /// (the sidecar is app-wide, so the settings are too; L-27).
     pub fn set_sidecar_update_settings(
         &mut self,
         settings: SidecarUpdateSettings,
     ) -> Result<(), String> {
+        let root = self.require_sidecar_root()?.to_path_buf();
+        sidecar_updates::save_sidecar_settings(&root, &settings)?;
         self.sidecar_update_settings = settings;
-        self.persist_queue_now()
+        Ok(())
+    }
+
+    fn persist_sidecar_settings(&self) -> Result<(), String> {
+        let root = self.require_sidecar_root()?;
+        sidecar_updates::save_sidecar_settings(root, &self.sidecar_update_settings)
     }
 
     /// App-managed sidecar root for Extractor Toolchain and Extractor Plugins.
@@ -2084,6 +2096,8 @@ impl Core {
     pub fn set_sidecar_root(&mut self, root: PathBuf) -> Result<(), String> {
         std::fs::create_dir_all(&root).map_err(|e| format!("create sidecar root: {e}"))?;
         self.sidecar_runtime_state = sidecar_updates::load_sidecar_runtime_state(&root)?;
+        self.sidecar_update_settings =
+            sidecar_updates::load_sidecar_settings(&root)?.unwrap_or_default();
         self.extractor.apply_sidecar_root(&root);
         self.sidecar_root = Some(root);
         Ok(())
@@ -2127,8 +2141,10 @@ impl Core {
     /// active; `NothingToApply` when the installed version is current.
     pub fn install_toolchain_latest(core: Arc<Mutex<Self>>) -> Result<SidecarApplyResult, String> {
         let (root, settings, source) = {
-            let guard = core.lock().map_err(|e| e.to_string())?;
+            let mut guard = core.lock().map_err(|e| e.to_string())?;
             if guard.transfers_active() {
+                // Remember the request so the idle poller applies it later (L-26).
+                guard.defer_sidecar_apply()?;
                 return Ok(SidecarApplyResult {
                     outcome: SidecarApplyOutcome::BlockedMidTransfer,
                     applied: Vec::new(),
@@ -2153,8 +2169,115 @@ impl Core {
         guard.apply_sidecar_updates()
     }
 
+    fn defer_sidecar_apply(&mut self) -> Result<(), String> {
+        let root = self.require_sidecar_root()?.to_path_buf();
+        self.sidecar_runtime_state.deferred_apply = true;
+        sidecar_updates::save_sidecar_runtime_state(&root, &self.sidecar_runtime_state)
+    }
+
+    /// Whether an update waits for the app to go idle (see [`Self::apply_deferred_sidecar_updates`]).
+    pub fn sidecar_apply_deferred(&self) -> bool {
+        self.sidecar_runtime_state.deferred_apply
+    }
+
+    /// Whether any transfer, probe or quality lookup is running (shells poll this
+    /// to decide when to call [`Self::apply_deferred_sidecar_updates`]).
+    pub fn is_busy(&self) -> bool {
+        self.transfers_active()
+    }
+
+    /// Launch-time update: check (when `check_on_launch` is on) and apply, with
+    /// the Core mutex released during the network work (M-42, L-26).
+    ///
+    /// While something is running the update is deferred; call
+    /// [`Self::apply_deferred_sidecar_updates`] later.
+    pub fn apply_sidecar_updates_on_launch_outside_lock(
+        core: Arc<Mutex<Self>>,
+    ) -> Result<SidecarApplyResult, String> {
+        {
+            let mut guard = core.lock().map_err(|e| e.to_string())?;
+            let state = &guard.sidecar_runtime_state;
+            if !state.deferred_apply && !guard.sidecar_update_settings.check_on_launch {
+                return Ok(SidecarApplyResult {
+                    outcome: SidecarApplyOutcome::NothingToApply,
+                    applied: Vec::new(),
+                });
+            }
+            if guard.transfers_active() {
+                guard.defer_sidecar_apply()?;
+                return Ok(SidecarApplyResult {
+                    outcome: SidecarApplyOutcome::DeferredUntilIdle,
+                    applied: Vec::new(),
+                });
+            }
+        }
+        Self::download_then_apply(core)
+    }
+
+    /// Apply an update that was deferred while the app was busy. Does nothing
+    /// (and touches no network) unless one is waiting and the app is idle.
+    pub fn apply_deferred_sidecar_updates(
+        core: Arc<Mutex<Self>>,
+    ) -> Result<SidecarApplyResult, String> {
+        {
+            let guard = core.lock().map_err(|e| e.to_string())?;
+            if !guard.sidecar_runtime_state.deferred_apply {
+                return Ok(SidecarApplyResult {
+                    outcome: SidecarApplyOutcome::NothingToApply,
+                    applied: Vec::new(),
+                });
+            }
+            if guard.transfers_active() {
+                return Ok(SidecarApplyResult {
+                    outcome: SidecarApplyOutcome::DeferredUntilIdle,
+                    applied: Vec::new(),
+                });
+            }
+        }
+        Self::download_then_apply(core)
+    }
+
+    /// Fetch the pending toolchain release without the lock, then swap it in.
+    /// A failure drops the deferred flag so a broken source is not retried on
+    /// every poll; the next launch or manual check tries again.
+    fn download_then_apply(core: Arc<Mutex<Self>>) -> Result<SidecarApplyResult, String> {
+        let (root, settings, source) = {
+            let guard = core.lock().map_err(|e| e.to_string())?;
+            (
+                guard.require_sidecar_root()?.to_path_buf(),
+                guard.sidecar_update_settings.clone(),
+                Arc::clone(&guard.sidecar_update_source),
+            )
+        };
+        let outcome = sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref())
+            .and_then(|_| {
+                let mut guard = core.lock().map_err(|e| e.to_string())?;
+                // Re-checks for running work: a transfer may have started meanwhile.
+                guard.apply_sidecar_updates()
+            });
+        let mut guard = core.lock().map_err(|e| e.to_string())?;
+        match outcome {
+            Ok(mut result) => {
+                if result.outcome == SidecarApplyOutcome::BlockedMidTransfer {
+                    result.outcome = SidecarApplyOutcome::DeferredUntilIdle;
+                }
+                Ok(result)
+            }
+            Err(err) => {
+                guard.sidecar_runtime_state.deferred_apply = false;
+                let _ = sidecar_updates::save_sidecar_runtime_state(
+                    &root,
+                    &guard.sidecar_runtime_state,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Whether anything is using the sidecar yt-dlp: a body-writing job, a
+    /// running probe, or a quality lookup.
     fn transfers_active(&self) -> bool {
-        self.job_signals.active_transfer_count() > 0
+        self.job_signals.active_transfer_count() > 0 || self.job_signals.probes_in_flight() > 0
     }
 
     fn require_sidecar_root(&self) -> Result<&Path, String> {
@@ -2221,7 +2344,7 @@ impl Core {
                 self.sidecar_update_settings.plugin_pin = Some(trimmed.to_string());
             }
         }
-        self.persist_queue_now()
+        self.persist_sidecar_settings()
     }
 
     /// Clear a sidecar version pin.
@@ -2230,20 +2353,28 @@ impl Core {
             SidecarComponent::Toolchain => self.sidecar_update_settings.toolchain_pin = None,
             SidecarComponent::Plugin => self.sidecar_update_settings.plugin_pin = None,
         }
-        self.persist_queue_now()
+        self.persist_sidecar_settings()
     }
 
     /// Roll back one sidecar component to the previous installed version.
     pub fn rollback_sidecar(&mut self, component: SidecarComponent) -> Result<(), String> {
         let root = self.require_sidecar_root()?.to_path_buf();
-        rollback_sidecar_component(
+        let restored = rollback_sidecar_component(
             &root,
             component,
             self.transfers_active(),
             &mut self.sidecar_runtime_state,
         )?;
         self.extractor.apply_sidecar_root(&root);
-        Ok(())
+        // Stay on the restored version: otherwise the next launch check installs
+        // the release the user just rolled back from (M-32).
+        match component {
+            SidecarComponent::Toolchain => {
+                self.sidecar_update_settings.toolchain_pin = Some(restored)
+            }
+            SidecarComponent::Plugin => self.sidecar_update_settings.plugin_pin = Some(restored),
+        }
+        self.persist_sidecar_settings()
     }
 
     /// Current Filename Template for extractor job outputs.
@@ -2459,6 +2590,7 @@ impl Core {
         )?;
         self.next_probe_id += 1;
         plan.id = self.next_probe_id;
+        plan._probe_guard = Some(self.job_signals.begin_probe());
         self.probe_cancels
             .insert(plan.id, (plan.url().to_string(), plan.cancel_flag()));
         Ok(plan)
@@ -2595,6 +2727,7 @@ impl Core {
             extractor: Arc::clone(&self.extractor),
             cookies,
             proxy: self.proxy_settings.clone(),
+            _probe_guard: self.job_signals.begin_probe(),
         })
     }
 

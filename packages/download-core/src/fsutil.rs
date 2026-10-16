@@ -88,7 +88,7 @@ fn write_synced(tmp: &Path, data: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-fn temp_sibling(path: &Path) -> PathBuf {
+pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
