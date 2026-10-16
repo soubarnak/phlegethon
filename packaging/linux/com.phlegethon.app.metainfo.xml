@@ -3,6 +3,9 @@
   <id>com.phlegethon.app</id>
   <name>Phlegethon</name>
   <summary>Download videos, playlists and files from almost any website</summary>
+  <developer id="io.github.soubarnak">
+    <name>Phlegethon contributors</name>
+  </developer>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <description>
@@ -18,5 +21,9 @@
   <provides>
     <binary>phlegethon</binary>
   </provides>
+  <releases>
+    <!-- Newest first. Keep the first entry equal to the application version (scripts/check-versions.sh). -->
+    <release version="0.1.0" date="2026-10-16" />
+  </releases>
   <content_rating type="oars-1.1" />
 </component>

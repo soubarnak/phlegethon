@@ -12,6 +12,9 @@ and yt-dlp (YTDLP_PATH or PATH).
 
   xvfb-run -a python3 packages/tauri-shell/e2e/reference_ui.py [--site xxxbp] [--out DIR]
 
+The WebKit sandbox stays on. In a container that cannot create its namespaces, set
+PHLEGETHON_E2E_NO_SANDBOX=1 to turn it off for this run; a warning is printed.
+
 Prints a table; exit status is non-zero when any row FAILs. A row that fails in its
 documented way (blocked_error in the reference file, or YouTube's bot check) is BLOCKED.
 """
@@ -74,8 +77,10 @@ class App:
             WEBKIT_DISABLE_DMABUF_RENDERER="1",
             WEBKIT_DISABLE_COMPOSITING_MODE="1",
         )
-        # Containers usually cannot create the WebKit sandbox namespaces.
-        env.setdefault("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1")
+        # Containers usually cannot create the WebKit sandbox namespaces. Turning the
+        # sandbox off is opt-in (PHLEGETHON_E2E_NO_SANDBOX=1), never the default (G-19).
+        if os.environ.get("PHLEGETHON_E2E_NO_SANDBOX") == "1":
+            env["WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"] = "1"
         driver_bin = shutil.which("tauri-driver") or str(Path.home() / ".cargo/bin/tauri-driver")
         self.proc = subprocess.Popen(
             [driver_bin, "--port", str(port), "--native-port", str(port + 1)],
@@ -351,6 +356,8 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=4444)
     args = ap.parse_args()
 
+    if os.environ.get("PHLEGETHON_E2E_NO_SANDBOX") == "1":
+        print("warning: the WebKit sandbox is disabled for this run (PHLEGETHON_E2E_NO_SANDBOX=1)", file=sys.stderr)
     if not APP.is_file():
         print(f"{APP} is missing: run scripts/build-linux.sh first", file=sys.stderr)
         return 2

@@ -4,7 +4,8 @@
 #   scripts/xbps-build.sh [--void-packages DIR] [--vendor]
 #
 # Needs a Void Linux host, git, and a non-root user (xbps-src refuses root).
-# The checkout defaults to $VOID_PACKAGES or ./.void-packages and is cloned if absent.
+# The checkout defaults to $VOID_PACKAGES or ./.void-packages and is cloned if absent,
+# at the commit pinned in packaging/void/images.env (override with VOID_PACKAGES_REF).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 vp=${VOID_PACKAGES:-$root/.void-packages} vendor=()
@@ -41,7 +42,15 @@ tarball="$root/dist/phlegethon-$version.tar.gz"
 
 # 2. void-packages checkout.
 if [ ! -d "$vp/.git" ]; then
-	git clone --depth 1 https://github.com/void-linux/void-packages "$vp"
+	# shellcheck source=../packaging/void/images.env
+	ref=${VOID_PACKAGES_REF:-}
+	[ -n "$ref" ] || {
+		. "$root/packaging/void/images.env"
+		ref=$VOID_PACKAGES_REF
+	}
+	git init -q "$vp"
+	git -C "$vp" fetch -q --depth 1 https://github.com/void-linux/void-packages "$ref"
+	git -C "$vp" checkout -q FETCH_HEAD
 fi
 cd "$vp"
 [ -d masterdir ] || ./xbps-src binary-bootstrap

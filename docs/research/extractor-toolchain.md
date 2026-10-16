@@ -1,3 +1,5 @@
+> **Partly superseded (2026-10-16).** This note was written when Phlegethon targeted Windows 11 and Debian with a WinUI shell. [ADR 0001](../adr/0001-drop-windows-shell.md) dropped Windows: the only shell is Tauri 2 on Void Linux, so the `yt-dlp.exe` and ARM64 Windows rows and the Windows packaging verdicts do not apply. What the app does now (sidecar directory, `YTDLP_PATH`, `PATH`, `python3 -m yt_dlp`, app-managed extractor plugins) is described in the README and [ADR 0005](../adr/0005-sidecar-update-policy.md).
+
 # Research: Extractor Toolchain packaging and Launch Site coverage
 
 **Ticket:** [#2](https://github.com/soubarnak/phlegethon/issues/2)  

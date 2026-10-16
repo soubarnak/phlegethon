@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Create phlegethon-<version>.tar.gz for xbps-src: the working-tree sources (tracked and untracked, minus ignored) plus the
-# prebuilt frontend/dist, so the package build needs no npm.
+# Create phlegethon-<version>.tar.gz for xbps-src: the git-tracked sources as they are in the
+# working tree (untracked and ignored files are left out) plus the prebuilt frontend/dist,
+# so the package build needs no npm.
 #
 #   scripts/make-dist-tarball.sh [--out DIR] [--vendor] [--update-template]
 #
 #   --out DIR           where to write the tarball (default: ./dist)
 #   --vendor            also vendor all crates (offline xbps-src builds; adds ~100 MB)
 #   --update-template   write the sha256 into packaging/void/srcpkgs/phlegethon/template
+#
+# Fails when the version differs between Cargo.toml, the xbps template, tauri.conf.json,
+# package.json, package-lock.json, the extension manifest and the README (scripts/check-versions.sh).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out="$root/dist" vendor=0 update_template=0
@@ -25,7 +29,7 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	-h | --help)
-		sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -38,11 +42,7 @@ done
 cd "$root"
 version=$(awk -F'"' '/^\[workspace.package\]/{f=1} f&&/^version/{print $2; exit}' Cargo.toml)
 template="$root/packaging/void/srcpkgs/phlegethon/template"
-tmpl_version=$(sed -n 's/^version=//p' "$template")
-if [ "$version" != "$tmpl_version" ]; then
-	echo "version mismatch: Cargo.toml has $version but the xbps template has $tmpl_version." >&2
-	exit 1
-fi
+"$root/scripts/check-versions.sh" "$version" >&2
 [ -f packages/tauri-shell/frontend/dist/index.html ] || {
 	echo "frontend/dist is missing: run 'npm run build' in packages/tauri-shell/frontend first (make frontend)." >&2
 	exit 1
@@ -53,8 +53,12 @@ stage=$(mktemp -d)
 trap 'rm -rf "${stage:?}"' EXIT
 mkdir -p "$stage/$name"
 
-# Tracked and untracked-but-not-ignored files, as they are in the working tree.
-git ls-files -z --cached --others --exclude-standard | tar --null -T - --ignore-failed-read -cf - | tar -xf - -C "$stage/$name"
+# Tracked files only, with the working-tree contents. Untracked files (local notes,
+# tool output such as graphify-out/) must not end up in a release.
+if ! git diff --quiet HEAD -- 2>/dev/null; then
+	echo "warning: tracked files have uncommitted changes; the tarball contains them." >&2
+fi
+git ls-files -z | tar --null -T - --ignore-failed-read -cf - | tar -xf - -C "$stage/$name"
 mkdir -p "$stage/$name/packages/tauri-shell/frontend"
 cp -r packages/tauri-shell/frontend/dist "$stage/$name/packages/tauri-shell/frontend/dist"
 

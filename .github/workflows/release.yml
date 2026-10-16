@@ -1,12 +1,16 @@
 name: Release
 
 # Builds the source tarball and the x86_64 xbps packages (glibc and musl) and publishes
-# them as a GitHub release. Two ways to release (the version must match `version=` in
-# the xbps template and Cargo.toml):
+# them as a GitHub release. Two ways to release (the version must match every version
+# location, see scripts/check-versions.sh):
 #   - push a tag like v0.1.0, or
 #   - Actions > Release > Run workflow with `version` set to 0.1.0: the release and
-#     its v0.1.0 tag are created on the commit the workflow ran on.
+#     its v0.1.0 tag are created on the commit the workflow ran on. The run is refused
+#     when that tag already exists, so a published release is never rebuilt.
 # Running it by hand with `version` empty builds everything without publishing.
+#
+# Third-party actions are pinned by commit SHA (the comment names the release); the
+# Void images and void-packages commit are pinned in packaging/void/images.env.
 
 on:
   push:
@@ -21,29 +25,68 @@ on:
 env:
   RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || (inputs.version != '' && format('v{0}', inputs.version) || '') }}
 
+# Jobs get read access only; the publish job asks for write access itself.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  test:
-    name: Tests
+  preflight:
+    name: Release preflight
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Refuse a manual run for a version that is already released
+        # A tag push creates the tag itself. For a manual run the publish step would
+        # move nothing (the tag stays on the old commit) but overwrite the assets.
+        if: github.ref_type != 'tag' && inputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            echo "::error::tag ${RELEASE_TAG} already exists. Bump the version, or delete the release and the tag first."
+            exit 1
+          fi
+          if gh release view "${RELEASE_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::a release for ${RELEASE_TAG} already exists."
+            exit 1
+          fi
+      - name: Release version matches every version location
+        if: env.RELEASE_TAG != ''
+        run: scripts/check-versions.sh "${RELEASE_TAG}"
+
+  test:
+    name: Tests
+    needs: preflight
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: packages/tauri-shell/frontend/package-lock.json
       - name: Rust (everything except the WebKit shell)
         run: cargo test --workspace --exclude phlegethon-tauri --locked
+      - name: Install yt-dlp
+        run: python3 -m pip install yt-dlp
       - name: Extractor plugins
-        run: python3 packages/extractor-plugins/tests/test_parse_fixtures.py
+        # test_extractors_offline.py skips every test and exits 0 without yt-dlp, so fail on any skip.
+        run: |
+          python3 packages/extractor-plugins/tests/test_parse_fixtures.py
+          python3 packages/extractor-plugins/tests/test_extractors_offline.py -v 2>&1 | tee offline.log
+          if grep -qi 'skipped' offline.log; then
+            echo "::error::offline extractor tests were skipped"
+            exit 1
+          fi
+      - name: Scripts
+        run: scripts/test-scripts.sh
       - name: Frontend
         working-directory: packages/tauri-shell/frontend
         run: |
@@ -53,18 +96,11 @@ jobs:
 
   source:
     name: Source tarball
+    needs: preflight
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Release version matches the package version
-        if: env.RELEASE_TAG != ''
-        run: |
-          version=$(sed -n 's/^version=//p' packaging/void/srcpkgs/phlegethon/template)
-          cargo_version=$(awk -F'"' '/^\[workspace.package\]/{f=1} f&&/^version/{print $2; exit}' Cargo.toml)
-          tag=${RELEASE_TAG#v}
-          echo "tag=$tag template=$version cargo=$cargo_version"
-          [ "$tag" = "$version" ] && [ "$tag" = "$cargo_version" ]
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -76,7 +112,7 @@ jobs:
           npm run build
       - name: Make the tarball
         run: scripts/make-dist-tarball.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: source
           path: dist/*.tar.gz
@@ -90,18 +126,22 @@ jobs:
       fail-fast: false
       matrix:
         libc: [glibc, musl]
+    env:
+      CONTAINER_ENGINE: docker
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: source
           path: dist
       - name: Build with xbps-src in a Void container
+        # The base image and the void-packages commit come from packaging/void/images.env.
         run: |
-          docker run --rm --privileged -v "$PWD:/src" \
-            ghcr.io/void-linux/void-${{ matrix.libc }}-full \
+          . packaging/void/images.env
+          if [ "${{ matrix.libc }}" = musl ]; then image=$VOID_IMAGE_MUSL; else image=$VOID_IMAGE_GLIBC; fi
+          "$CONTAINER_ENGINE" run --rm --privileged -v "$PWD:/src" "$image" \
             /src/packaging/void/build-in-container.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: xbps-${{ matrix.libc }}
           path: out/${{ matrix.libc }}/*.xbps
@@ -112,17 +152,19 @@ jobs:
     needs: [test, xbps]
     if: github.ref_type == 'tag' || inputs.version != ''
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
       - name: Checksums
         working-directory: artifacts
         run: |
-          sha256sum * > SHA256SUMS
+          sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Phlegethon ${{ env.RELEASE_TAG }}

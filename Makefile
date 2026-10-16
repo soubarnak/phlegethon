@@ -2,9 +2,11 @@
 #
 #   make                 build the frontend and release binaries
 #   make install         install to $(DESTDIR)$(PREFIX)  (default PREFIX=/usr/local)
-#   make test            Rust (core, support crates), plugin and frontend tests
+#   make test            Rust (core, support crates), plugin, script and frontend tests
 #   make dist            source tarball for xbps-src (checksum goes into the template)
-#   make xbps            build the xbps package with xbps-src
+#   make xbps            build the xbps package with xbps-src (on Void)
+#   make xbps-container  build the xbps package in a Void container (CONTAINER_ENGINE, LIBC)
+#   make check-versions  check that every version location agrees
 #   make help
 
 PREFIX  ?= /usr/local
@@ -13,18 +15,25 @@ BINDIR   = $(PREFIX)/bin
 DATADIR  = $(PREFIX)/share
 CARGO   ?= cargo
 NPM     ?= npm
+# Container tool for `make xbps-container`. Podman is the default; rootless is fine.
+# GitHub Actions sets CONTAINER_ENGINE=docker.
+CONTAINER_ENGINE ?= podman
+# glibc or musl: which Void image `make xbps-container` builds on.
+LIBC ?= glibc
+
+include packaging/void/images.env
 
 FRONTEND = packages/tauri-shell/frontend
-TARGET   = target/release
+TARGET   = $(or $(CARGO_TARGET_DIR),target)/release
 ICON_SIZES = 32 128 256 512
 
 .PHONY: all build frontend install uninstall test test-shell test-rust test-plugins test-extension test-frontend \
-	desktop nmh-install dist xbps probe-check e2e-ui clean help
+	test-scripts desktop nmh-install dist xbps xbps-container check-versions probe-check e2e-ui clean help
 
 all: build
 
 help:
-	@sed -n '2,9p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '2,10p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 
 frontend:
 	cd $(FRONTEND) && $(NPM) ci --no-audit --no-fund && $(NPM) run build
@@ -43,6 +52,7 @@ install:
 			$(DESTDIR)$(DATADIR)/icons/hicolor/$${s}x$${s}/apps/phlegethon.png; \
 	done
 	install -Dm644 docs/companion-setup.md $(DESTDIR)$(DATADIR)/doc/phlegethon/companion-setup.md
+	install -Dm644 LICENSE $(DESTDIR)$(DATADIR)/licenses/phlegethon/LICENSE
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/phlegethon $(DESTDIR)$(BINDIR)/phlegethon-nmh
@@ -51,12 +61,18 @@ uninstall:
 	for s in $(ICON_SIZES); do rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/$${s}x$${s}/apps/phlegethon.png; done
 	rm -f $(DESTDIR)$(DATADIR)/doc/phlegethon/companion-setup.md
 	-rmdir $(DESTDIR)$(DATADIR)/doc/phlegethon
+	rm -f $(DESTDIR)$(DATADIR)/licenses/phlegethon/LICENSE
+	-rmdir $(DESTDIR)$(DATADIR)/licenses/phlegethon
 
-test: test-rust test-plugins test-extension test-frontend
+test: test-rust test-plugins test-extension test-scripts test-frontend
 
 # Everything that does not need WebKitGTK headers.
 test-rust:
-	$(CARGO) test --workspace --exclude phlegethon-tauri
+	$(CARGO) test --workspace --exclude phlegethon-tauri --locked
+
+# Shell scripts (version check, native-messaging installer).
+test-scripts:
+	scripts/test-scripts.sh
 
 test-extension:
 	node --test packages/chrome-companion/session.test.js
@@ -70,13 +86,21 @@ test-frontend:
 
 # The Tauri shell crate (needs libwebkit2gtk41-devel, gtk+3-devel, libsoup3-devel).
 test-shell:
-	$(CARGO) test -p phlegethon-tauri
+	$(CARGO) test -p phlegethon-tauri --locked
 
+# Validate the desktop entry and the AppStream metadata. A missing validator is skipped;
+# a validation failure fails the target.
 desktop:
-	@command -v desktop-file-validate >/dev/null && desktop-file-validate packaging/linux/phlegethon.desktop \
-		|| echo "desktop-file-validate not installed (desktop-file-utils); skipped"
-	@command -v appstreamcli >/dev/null && appstreamcli validate --no-net packaging/linux/com.phlegethon.app.metainfo.xml \
-		|| echo "appstreamcli not installed (appstream); skipped"
+	@if command -v desktop-file-validate >/dev/null; then \
+		desktop-file-validate packaging/linux/phlegethon.desktop; \
+	else \
+		echo "desktop-file-validate not installed (desktop-file-utils); skipped"; \
+	fi
+	@if command -v appstreamcli >/dev/null; then \
+		appstreamcli validate --no-net packaging/linux/com.phlegethon.app.metainfo.xml; \
+	else \
+		echo "appstreamcli not installed (appstream); skipped"; \
+	fi
 
 # Usage: make nmh-install EXT=<extension id>
 nmh-install:
@@ -89,12 +113,25 @@ dist: frontend
 xbps:
 	scripts/xbps-build.sh
 
+# Build the xbps package in a pinned Void container (packaging/void/images.env). Run `make dist` first.
+# Rootless podman works; the container needs --privileged for the uchroot build chroot.
+xbps-container:
+	@test -f dist/phlegethon-$$(sed -n 's/^version=//p' packaging/void/srcpkgs/phlegethon/template).tar.gz \
+		|| { echo "run 'make dist' first"; exit 1; }
+	$(CONTAINER_ENGINE) run --rm --privileged -v "$$PWD:/src" \
+		$(if $(filter musl,$(LIBC)),$(VOID_IMAGE_MUSL),$(VOID_IMAGE_GLIBC)) \
+		/src/packaging/void/build-in-container.sh
+
+check-versions:
+	scripts/check-versions.sh
+
 # Probe the reference URLs with the real toolchain (needs network and yt-dlp).
 probe-check:
 	scripts/probe-check.sh
 
 # Drive the real app window on every reference URL (needs a release build, tauri-driver,
-# webkit2gtk-driver, python3-selenium, Xvfb or a display, ffprobe and yt-dlp).
+# webkit2gtk-driver, python3-selenium, Xvfb or a display, ffprobe and yt-dlp). The WebKit
+# sandbox stays on; PHLEGETHON_E2E_NO_SANDBOX=1 turns it off inside containers.
 e2e-ui:
 	xvfb-run -a -s "-screen 0 1400x900x24" python3 packages/tauri-shell/e2e/reference_ui.py $(E2E_ARGS)
 

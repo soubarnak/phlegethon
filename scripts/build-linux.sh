@@ -4,6 +4,9 @@
 #   scripts/build-linux.sh                   full build
 #   SKIP_FRONTEND=1 scripts/build-linux.sh   reuse an existing packages/tauri-shell/frontend/dist
 #   CARGO_FLAGS="--offline --locked" scripts/build-linux.sh
+#
+# Afterwards it checks that the binary embeds the frontend (scripts/check-embedded-frontend.sh).
+# Honors CARGO_TARGET_DIR.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 frontend="$root/packages/tauri-shell/frontend"
@@ -30,6 +33,9 @@ cargo build --release ${CARGO_FLAGS:---locked} \
 	-p phlegethon-tauri -p phlegethon-nmh \
 	--features phlegethon-tauri/custom-protocol
 
+target="${CARGO_TARGET_DIR:-$root/target}/release"
+"$root/scripts/check-embedded-frontend.sh" "$target/phlegethon" "$frontend/dist/index.html"
+
 echo
 echo "Built:"
-ls -lh "$root/target/release/phlegethon" "$root/target/release/phlegethon-nmh"
+ls -lh "$target/phlegethon" "$target/phlegethon-nmh"

@@ -1080,7 +1080,7 @@ impl Core {
         )
     }
 
-    /// Create a Core with shared job signals (used by the C ABI).
+    /// Create a Core with shared job signals (used by the Platform Shell).
     pub fn new_with_clock_and_signals(
         http: Box<dyn HttpBackend>,
         extractor: Box<dyn ExtractorToolchain>,
@@ -1172,7 +1172,7 @@ impl Core {
         );
     }
 
-    /// Finalize a pause when no transfer is active (C ABI / post-transfer).
+    /// Finalize a pause when no transfer is active (Platform Shell / post-transfer).
     pub fn can_pause_job(&self, job_id: &str) -> Result<(), String> {
         let job = self
             .jobs

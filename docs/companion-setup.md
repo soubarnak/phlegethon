@@ -26,10 +26,10 @@ Platform Shell + Download Core
 ### Build (Linux)
 
 ```bash
-cargo build -p phlegethon-nmh --release
-# Tauri shell (includes companion receiver)
-cargo build -p phlegethon-tauri
+scripts/build-linux.sh
 ```
+
+This builds the frontend, the shell (which includes the companion receiver) and `phlegethon-nmh` with `--release --features phlegethon-tauri/custom-protocol`. A plain `cargo build -p phlegethon-tauri` produces a shell that loads the dev server at `http://localhost:1420` instead of the embedded frontend, so do not use it for a usable app.
 
 
 ## Install native messaging host
@@ -45,19 +45,27 @@ scripts/install-nmh-linux.sh --extension-id <32-letter extension id>
 
 The manual steps below do the same thing by hand.
 
-Template manifest: `packages/native-messaging-host/manifests/com.phlegethon.bridge.json`
+Template manifest: `packages/native-messaging-host/manifests/com.phlegethon.bridge.json` (a reference for the manual steps; `scripts/install-nmh-linux.sh` does not read it, and a test checks that both have the same fields).
 
 Replace:
 
 - `path` — absolute path to `phlegethon-nmh`
 - `allowed_origins` — your unpacked or store extension ID (`chrome-extension://<id>/`)
 
-### Linux (Chrome, Chromium, Brave)
+### Linux (Chrome, Chromium and other Chromium browsers)
 
 | Scope | Chrome | Chromium |
 | --- | --- | --- |
 | User | `~/.config/google-chrome/NativeMessagingHosts/com.phlegethon.bridge.json` | `~/.config/chromium/NativeMessagingHosts/com.phlegethon.bridge.json` |
 | System | `/etc/opt/chrome/native-messaging-hosts/com.phlegethon.bridge.json` | `/etc/chromium/native-messaging-hosts/com.phlegethon.bridge.json` |
+
+The install script also writes the per-user manifest for other Chromium browsers:
+
+| Browser | User manifest directory |
+| --- | --- |
+| Brave | `~/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/` |
+| Vivaldi | `~/.config/vivaldi/NativeMessagingHosts/` |
+| Edge | `~/.config/microsoft-edge/NativeMessagingHosts/` |
 
 `path` in the manifest must be an **absolute** path to `phlegethon-nmh` on Linux.
 
@@ -83,7 +91,7 @@ Launch Sites still use **Probe-then-Confirm** — the companion never auto-confi
 
 ## Receiver paths (acceptance)
 
-| Platform | Receiver | Socket / pipe |
+| Platform | Receiver | Socket |
 | --- | --- | --- |
 | Tauri shell | Background thread in `companion.rs` | `$XDG_RUNTIME_DIR/phlegethon/companion.sock` (see ADR 0005) |
 

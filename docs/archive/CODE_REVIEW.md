@@ -1,3 +1,5 @@
+> **Archived 2026-10-16.** This review covers `65a236d..882d514` (2026-07-21). Every finding in it is now fixed or stale. [docs/bugs.md](../bugs.md), section 8, maps each item to the code that resolved it. It is kept for history only; do not use it as a to-do list.
+
 # Code Review — `claude/code-review-7h6bro`
 
 **Reviewed range:** 7 commits since PR #40 (`65a236d..882d514`)
