@@ -33,11 +33,11 @@ The single UI host: a Tauri 2 webview shell on Linux (Void Linux is the release 
 _Avoid_: a second shell per OS, Electron, Geist tokens (replaced by Carbon)
 
 **Extractor Toolchain**:
-The mature external media-extraction capability (e.g. yt-dlp-class) wrapped by the Download Core for probing and fetching Launch Site media; gaps are filled by Extractor Plugins first, with Download Core native handlers only when a site cannot be expressed as a plugin.
+The mature external media-extraction capability (e.g. yt-dlp-class) wrapped by the Download Core for probing and fetching Launch Site media; gaps are filled by Extractor Plugins first, with Download Core native handlers only when a site cannot be expressed as a plugin. A toolchain download is installed only after it matches the release's published checksum; a missing checksum is an error, never a reason to skip verification. It is checked for updates on every launch (stable channel by default, nightly by opt-in) and an update is applied only when no transfer or probe is running; otherwise it waits until the app is idle. A rollback pins the restored version.
 _Avoid_: from-scratch extractors for every site, UI-owned scraping, silent generic extractor as Launch Site coverage
 
 **Extractor Plugin**:
-A Phlegethon-owned yt-dlp plugin shipped as an app-managed sidecar asset (updateable independently of a full app install) that provides Launch Site coverage the upstream toolchain lacks.
+A Phlegethon-owned yt-dlp plugin shipped as an app-managed sidecar asset (updateable independently of a full app install) that provides Launch Site coverage the upstream toolchain lacks. A package that arrives through an update catalog is installed only if the catalog entry carries a `sha256` that matches the copied files; the manifest records the digest of the installed files so a deleted or edited file is noticed.
 _Avoid_: relying on upstream merge for gap sites, user-installed untrusted plugins
 
 **Probe-then-Confirm**:

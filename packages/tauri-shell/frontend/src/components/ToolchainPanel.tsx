@@ -59,7 +59,8 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<SidecarUpdateCheckResult | null>(null);
   const [settings, setSettings] = useState<SidecarUpdateSettings>({
-    check_on_launch: false,
+    check_on_launch: true,
+    channel: "stable",
     toolchain_pin: null,
     plugin_pin: null,
   });
@@ -314,6 +315,16 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
           disabled={!settingsLoaded}
           toggled={settings.check_on_launch}
           onToggle={(checked) => void saveSettings({ ...settings, check_on_launch: checked })}
+        />
+        <Toggle
+          id="toolchain-nightly"
+          labelText={t("toolchain.nightlyChannel")}
+          labelA={t("common.off")}
+          labelB={t("common.on")}
+          toggled={settings.channel === "nightly"}
+          onToggle={(checked) =>
+            void saveSettings({ ...settings, channel: checked ? "nightly" : "stable" })
+          }
         />
         <div className="ph-settings__row">
           <TextInput
