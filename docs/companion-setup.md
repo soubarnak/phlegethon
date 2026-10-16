@@ -101,5 +101,6 @@ Both call the same Download Core enqueue path as paste/drop. Optional cookies ar
 ## Security notes
 
 - Session material travels only over native messaging + local socket — never custom URI schemes.
-- Cookie export requires an explicit per-send user gesture.
+- Cookie export requires an explicit per-send user gesture. The extension holds no cookie or site access at install time: choosing a "with cookies" menu item asks Chrome for the `cookies` permission and access to that one origin, and cookies are collected for the URL being sent (the link target for a link).
+- A failed hand-off, including "Phlegethon desktop app is not running", shows a red `!` on the toolbar icon with the reason in its tooltip. The next successful hand-off clears it.
 - Download Core classifies all URLs; Launch Sites cannot skip Probe-then-Confirm.
