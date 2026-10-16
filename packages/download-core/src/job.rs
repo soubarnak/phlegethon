@@ -1,7 +1,7 @@
 //! Job struct — state machine per download job.
 
-use crate::integrity::ExpectedHash;
 use crate::extractor::ExtractionTier;
+use crate::integrity::ExpectedHash;
 use crate::media_extras::MediaExtrasOptions;
 use crate::mirror_set::MirrorSet;
 use crate::storage::{PersistedJob, PersistedJobState};
@@ -19,9 +19,7 @@ pub enum EnqueueOutcome {
         destination: PathBuf,
     },
     /// The URL requires probe-then-confirm.
-    ProbeThenConfirm {
-        url: String,
-    },
+    ProbeThenConfirm { url: String },
 }
 
 /// Derive a filename from a URL path segment.
@@ -141,11 +139,7 @@ impl Job {
     /// `source_name` is optional; when present (batch/channel), the Job
     /// Destination is a dedicated subfolder derived from the source under
     /// `{library_root}/jobs/`.
-    pub fn new_with_source(
-        url: String,
-        library_root: PathBuf,
-        source: Option<String>,
-    ) -> Self {
+    pub fn new_with_source(url: String, library_root: PathBuf, source: Option<String>) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let destination = match &source {
             Some(name) => {
@@ -177,12 +171,7 @@ impl Job {
         Self::assemble(id, url, destination, source)
     }
 
-    fn assemble(
-        id: String,
-        url: String,
-        destination: PathBuf,
-        source: Option<String>,
-    ) -> Self {
+    fn assemble(id: String, url: String, destination: PathBuf, source: Option<String>) -> Self {
         let filename = filename_from_url(&url);
         Self {
             id,

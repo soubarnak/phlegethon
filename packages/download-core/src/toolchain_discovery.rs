@@ -118,7 +118,10 @@ pub fn discover_ytdlp(
     for name in ["python3", "python"] {
         if let Some(python) = find_in_path(name, env.path_dirs) {
             if (env.python_has_ytdlp)(&python) {
-                return Some((YtDlpLauncher::PythonModule { python }, YtDlpSource::PythonModule));
+                return Some((
+                    YtDlpLauncher::PythonModule { python },
+                    YtDlpSource::PythonModule,
+                ));
             }
         }
     }
@@ -145,7 +148,9 @@ pub fn find_in_path(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 
 /// Regular file with an execute bit (any file on non-Unix).
 pub fn is_executable_file(path: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else { return false };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
     if !meta.is_file() {
         return false;
     }
@@ -238,7 +243,9 @@ pub fn detect_js_runtime(
     let mut fallback: Option<JsRuntime> = None;
     for kind in JsRuntimeKind::ORDER {
         for name in kind.executable_names() {
-            let Some(path) = find_in_path(name, path_dirs) else { continue };
+            let Some(path) = find_in_path(name, path_dirs) else {
+                continue;
+            };
             let version = version_of(&path).and_then(|raw| parse_version_string(&raw));
             let supported = match (kind.minimum(), version.as_deref().and_then(parse_semver)) {
                 (Some(min), Some(found)) => found >= min,
@@ -309,7 +316,11 @@ pub fn tool_version(path: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new(path);
     cmd.args(args);
     match run_command_with_deadline(cmd, None, Some(Instant::now() + Duration::from_secs(10))) {
-        Ok(CommandOutcome::Finished { status, stdout, stderr }) if status.success() => {
+        Ok(CommandOutcome::Finished {
+            status,
+            stdout,
+            stderr,
+        }) if status.success() => {
             let text = if stdout.is_empty() { stderr } else { stdout };
             let text = String::from_utf8_lossy(&text);
             parse_version_string(&text).or_else(|| {
@@ -531,7 +542,12 @@ pub fn run_command_with_deadline(
     stop: Option<&AtomicBool>,
     deadline: Option<Instant>,
 ) -> Result<CommandOutcome, String> {
-    run_command_with_deadline_polling(cmd_prepare(&mut cmd), stop, deadline, Duration::from_millis(50))
+    run_command_with_deadline_polling(
+        cmd_prepare(&mut cmd),
+        stop,
+        deadline,
+        Duration::from_millis(50),
+    )
 }
 
 fn cmd_prepare(cmd: &mut Command) -> &mut Command {
@@ -667,7 +683,10 @@ pub fn classify_ytdlp_failure(stderr: &str) -> Option<&'static str> {
     {
         return Some(ERROR_CODE_GEO_BLOCKED);
     }
-    if lower.contains("http error 404") || lower.contains("video unavailable") || lower.contains("has been removed") {
+    if lower.contains("http error 404")
+        || lower.contains("video unavailable")
+        || lower.contains("has been removed")
+    {
         return Some(ERROR_CODE_NOT_FOUND);
     }
     if lower.contains("unsupported url") {
@@ -757,7 +776,10 @@ mod tests {
         };
         assert_eq!(
             discover_ytdlp(Some(&sidecar), &env),
-            Some((YtDlpLauncher::PythonModule { python: py.clone() }, YtDlpSource::PythonModule))
+            Some((
+                YtDlpLauncher::PythonModule { python: py.clone() },
+                YtDlpSource::PythonModule
+            ))
         );
 
         // yt-dlp on PATH beats python.
@@ -793,7 +815,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(sidecar.join("yt-dlp"), std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::set_permissions(
+                sidecar.join("yt-dlp"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
             assert_eq!(
                 discover_ytdlp(Some(&sidecar), &env).map(|(_, s)| s),
                 Some(YtDlpSource::EnvVar)
@@ -844,9 +870,15 @@ mod tests {
 
     #[test]
     fn version_strings_are_parsed() {
-        assert_eq!(parse_version_string("deno 2.3.1 (stable)").as_deref(), Some("2.3.1"));
+        assert_eq!(
+            parse_version_string("deno 2.3.1 (stable)").as_deref(),
+            Some("2.3.1")
+        );
         assert_eq!(parse_version_string("v22.1.0\n").as_deref(), Some("22.1.0"));
-        assert_eq!(parse_version_string("2026.08.19").as_deref(), Some("2026.08.19"));
+        assert_eq!(
+            parse_version_string("2026.08.19").as_deref(),
+            Some("2026.08.19")
+        );
         assert_eq!(
             parse_version_string("ffmpeg version 7.1.1 Copyright (c) 2000-2025").as_deref(),
             Some("7.1.1")
@@ -861,12 +893,9 @@ mod tests {
         let mut cmd = Command::new("sleep");
         cmd.arg("30");
         let started = Instant::now();
-        let outcome = run_command_with_deadline(
-            cmd,
-            None,
-            Some(Instant::now() + Duration::from_millis(200)),
-        )
-        .unwrap();
+        let outcome =
+            run_command_with_deadline(cmd, None, Some(Instant::now() + Duration::from_millis(200)))
+                .unwrap();
         assert!(matches!(outcome, CommandOutcome::TimedOut), "{outcome:?}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }
@@ -892,7 +921,11 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo out; echo err 1>&2"]);
         match run_command_with_deadline(cmd, None, None).unwrap() {
-            CommandOutcome::Finished { status, stdout, stderr } => {
+            CommandOutcome::Finished {
+                status,
+                stdout,
+                stderr,
+            } => {
                 assert!(status.success());
                 assert_eq!(String::from_utf8_lossy(&stdout).trim(), "out");
                 assert_eq!(String::from_utf8_lossy(&stderr).trim(), "err");
@@ -916,7 +949,9 @@ mod tests {
             Some(ERROR_CODE_NEEDS_BROWSER_COOKIES)
         );
         assert_eq!(
-            classify_ytdlp_failure("WARNING: [youtube] No supported JS runtime found; n challenge solving failed"),
+            classify_ytdlp_failure(
+                "WARNING: [youtube] No supported JS runtime found; n challenge solving failed"
+            ),
             Some(ERROR_CODE_NEEDS_JS_RUNTIME)
         );
         assert_eq!(
@@ -928,7 +963,9 @@ mod tests {
         assert_eq!(error_code(&tagged), Some(ERROR_CODE_TIMEOUT));
         assert_eq!(error_code("[Not A Code] x"), None);
         assert_eq!(error_code("plain"), None);
-        assert!(error_code_hint(ERROR_CODE_NEEDS_BROWSER_COOKIES).unwrap().contains("Cookies"));
+        assert!(error_code_hint(ERROR_CODE_NEEDS_BROWSER_COOKIES)
+            .unwrap()
+            .contains("Cookies"));
     }
 
     #[test]

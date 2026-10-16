@@ -195,10 +195,7 @@ impl<'a, W: Write> TransferWriter<'a, W> {
         let Some(progress) = &self.progress else {
             return;
         };
-        let downloaded = progress
-            .live_bytes
-            .fetch_add(delta, Ordering::AcqRel)
-            + delta;
+        let downloaded = progress.live_bytes.fetch_add(delta, Ordering::AcqRel) + delta;
         let _ = progress.event_tx.send(CoreEvent::JobProgress {
             job_id: progress.job_id.clone(),
             bytes_downloaded: downloaded,

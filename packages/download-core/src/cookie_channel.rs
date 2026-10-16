@@ -126,8 +126,12 @@ mod tests {
             cookie_file: Some(PathBuf::from("/tmp/cookies.txt")),
         };
         let args = ytdlp_cookie_args(&channel);
-        assert!(args.windows(2).any(|w| w == ["--cookies-from-browser", "firefox"]));
-        assert!(args.windows(2).any(|w| w == ["--cookies", "/tmp/cookies.txt"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--cookies-from-browser", "firefox"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--cookies", "/tmp/cookies.txt"]));
     }
 
     #[test]

@@ -50,12 +50,8 @@ impl FreeSpaceLookup for SystemFreeSpace {
         // The Job Destination usually does not exist yet when the guard runs;
         // `statvfs` needs an existing path, so query the nearest existing ancestor.
         let probe = nearest_existing_ancestor(path);
-        fs2::available_space(probe).map_err(|e| {
-            format!(
-                "query free disk space at {}: {e}",
-                probe.display()
-            )
-        })
+        fs2::available_space(probe)
+            .map_err(|e| format!("query free disk space at {}: {e}", probe.display()))
     }
 }
 

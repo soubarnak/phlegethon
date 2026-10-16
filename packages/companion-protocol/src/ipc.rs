@@ -31,8 +31,7 @@ fn try_forward_to_shell(request: &CompanionRequest) -> Result<CompanionResponse,
     let mut stream = LocalSocketStream::connect(name)
         .map_err(|_| "Phlegethon desktop app is not running".to_string())?;
 
-    let payload =
-        serde_json::to_vec(request).map_err(|e| format!("serialize request: {e}"))?;
+    let payload = serde_json::to_vec(request).map_err(|e| format!("serialize request: {e}"))?;
     write_frame(&mut stream, &payload)?;
     let response_bytes = read_frame(&mut stream)?;
     serde_json::from_slice(&response_bytes).map_err(|e| format!("invalid shell response: {e}"))

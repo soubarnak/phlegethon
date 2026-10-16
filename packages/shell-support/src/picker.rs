@@ -103,9 +103,15 @@ mod tests {
     fn zenity_is_preferred_over_kdialog() {
         let dir = tempfile::tempdir().unwrap();
         fake_tool(dir.path(), "kdialog", "true");
-        assert_eq!(detect(&[dir.path().to_path_buf()]).unwrap().0, PickerBackend::Kdialog);
+        assert_eq!(
+            detect(&[dir.path().to_path_buf()]).unwrap().0,
+            PickerBackend::Kdialog
+        );
         fake_tool(dir.path(), "zenity", "true");
-        assert_eq!(detect(&[dir.path().to_path_buf()]).unwrap().0, PickerBackend::Zenity);
+        assert_eq!(
+            detect(&[dir.path().to_path_buf()]).unwrap().0,
+            PickerBackend::Zenity
+        );
         assert!(detect(&[]).is_none());
     }
 

@@ -125,7 +125,10 @@ fn meta_re() -> &'static Regex {
     re(&META_RE, r#"(?is)<meta\b[^>]*>"#)
 }
 fn attr_re() -> &'static Regex {
-    re(&ATTR_RE, r#"(?is)([a-zA-Z_:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"#)
+    re(
+        &ATTR_RE,
+        r#"(?is)([a-zA-Z_:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"#,
+    )
 }
 
 /// Parse `name="value"` attributes of one tag into a lowercase-keyed map.
@@ -155,7 +158,9 @@ fn html_unescape(s: &str) -> String {
 }
 
 fn json_unescape(s: &str) -> String {
-    s.replace("\\/", "/").replace("\\u0026", "&").replace("\\&", "&")
+    s.replace("\\/", "/")
+        .replace("\\u0026", "&")
+        .replace("\\&", "&")
 }
 
 /// Classify a URL by its path extension; `None` when it is not media.
@@ -171,7 +176,9 @@ pub fn classify_media_url(url: &str) -> Option<SniffedKind> {
         return Some(SniffedKind::Dash);
     }
     if MEDIA_EXTENSIONS.contains(&ext) {
-        return Some(SniffedKind::DirectFile { ext: ext.to_string() });
+        return Some(SniffedKind::DirectFile {
+            ext: ext.to_string(),
+        });
     }
     None
 }
@@ -192,7 +199,10 @@ fn resolve(base: &Url, candidate: &str) -> Option<String> {
 /// Hover previews / thumbnails are not the main media.
 fn looks_like_preview(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
-    lower.contains("_preview.") || lower.contains("/preview/") || lower.contains("/previews/") || lower.contains("/thumb")
+    lower.contains("_preview.")
+        || lower.contains("/preview/")
+        || lower.contains("/previews/")
+        || lower.contains("/thumb")
 }
 
 /// Extract media URLs from an HTML document. Pure; no network.
@@ -222,7 +232,9 @@ pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
             .or_else(|| a.get("name"))
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
-        let Some(content) = a.get("content") else { continue };
+        let Some(content) = a.get("content") else {
+            continue;
+        };
         let source = match key.as_str() {
             "og:video" | "og:video:url" | "og:video:secure_url" => SniffSource::OgVideo,
             "twitter:player:stream" => SniffSource::TwitterPlayerStream,
@@ -249,18 +261,27 @@ pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
     }
     for m in re(&SOURCE_TAG_RE, r#"(?is)<source\b[^>]*>"#).find_iter(html) {
         let a = attrs(m.as_str());
-        let ty = a.get("type").map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let ty = a
+            .get("type")
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
         if ty.starts_with("image/") {
             continue;
         }
-        let Some(src) = a.get("src").or_else(|| a.get("data-src")) else { continue };
-        let Some(url) = resolve(base, src) else { continue };
+        let Some(src) = a.get("src").or_else(|| a.get("data-src")) else {
+            continue;
+        };
+        let Some(url) = resolve(base, src) else {
+            continue;
+        };
         let kind = match classify_media_url(&url) {
             Some(k) => k,
             None if ty.contains("mpegurl") => SniffedKind::Hls,
-            None if ty.starts_with("video/") || ty.starts_with("audio/") => SniffedKind::DirectFile {
-                ext: ty.rsplit('/').next().unwrap_or("mp4").to_string(),
-            },
+            None if ty.starts_with("video/") || ty.starts_with("audio/") => {
+                SniffedKind::DirectFile {
+                    ext: ty.rsplit('/').next().unwrap_or("mp4").to_string(),
+                }
+            }
             None => continue,
         };
         let label = a
@@ -274,8 +295,11 @@ pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
     }
 
     // 3. JSON-LD VideoObject
-    for m in re(&JSONLD_RE, r#"(?is)<script\b[^>]*type\s*=\s*["']application/ld\+json["'][^>]*>(.*?)</script>"#)
-        .captures_iter(html)
+    for m in re(
+        &JSONLD_RE,
+        r#"(?is)<script\b[^>]*type\s*=\s*["']application/ld\+json["'][^>]*>(.*?)</script>"#,
+    )
+    .captures_iter(html)
     {
         let body = &m[1];
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(body.trim()) {
@@ -295,7 +319,9 @@ pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
     for m in re(&ANCHOR_RE, r#"(?is)<a\b[^>]*>"#).find_iter(html) {
         let a = attrs(m.as_str());
         let Some(href) = a.get("href") else { continue };
-        let Some(url) = resolve(base, href) else { continue };
+        let Some(url) = resolve(base, href) else {
+            continue;
+        };
         if let Some(kind) = classify_media_url(&url) {
             let label = a.get("title").or_else(|| a.get("data-quality")).cloned();
             push(url, kind, label, SniffSource::Anchor);
@@ -303,12 +329,17 @@ pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
     }
     for m in re(&LINK_ALT_RE, r#"(?is)<link\b[^>]*>"#).find_iter(html) {
         let a = attrs(m.as_str());
-        let rel = a.get("rel").map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+        let rel = a
+            .get("rel")
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
         if !rel.contains("alternate") && !rel.contains("enclosure") {
             continue;
         }
         let Some(href) = a.get("href") else { continue };
-        let Some(url) = resolve(base, href) else { continue };
+        let Some(url) = resolve(base, href) else {
+            continue;
+        };
         if let Some(kind) = classify_media_url(&url) {
             push(url, kind, None, SniffSource::LinkAlternate);
         }
@@ -352,9 +383,10 @@ fn collect_jsonld_video_urls(value: &serde_json::Value, out: &mut Vec<String>) {
                 .get("@type")
                 .map(|t| match t {
                     serde_json::Value::String(s) => s.eq_ignore_ascii_case("VideoObject"),
-                    serde_json::Value::Array(a) => a
-                        .iter()
-                        .any(|s| s.as_str().is_some_and(|s| s.eq_ignore_ascii_case("VideoObject"))),
+                    serde_json::Value::Array(a) => a.iter().any(|s| {
+                        s.as_str()
+                            .is_some_and(|s| s.eq_ignore_ascii_case("VideoObject"))
+                    }),
                     _ => false,
                 })
                 .unwrap_or(false);
@@ -379,7 +411,10 @@ fn collect_jsonld_video_urls(value: &serde_json::Value, out: &mut Vec<String>) {
 pub fn page_title(html: &str) -> Option<String> {
     for m in re(&OG_TITLE_RE, r#"(?is)<meta\b[^>]*>"#).find_iter(html) {
         let a = attrs(m.as_str());
-        let key = a.get("property").or_else(|| a.get("name")).map(|s| s.to_ascii_lowercase());
+        let key = a
+            .get("property")
+            .or_else(|| a.get("name"))
+            .map(|s| s.to_ascii_lowercase());
         if key.as_deref() == Some("og:title") {
             if let Some(c) = a.get("content").map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 return Some(c.to_string());
@@ -403,10 +438,18 @@ pub fn height_hint(label: Option<&str>, url: &str) -> Option<u32> {
             }
         }
     }
-    re(&HEIGHT_IN_URL_RE, r"(?i)(?:^|[^0-9])(\d{3,4})p?(?:[._/-]|$)")
-        .captures_iter(url.rsplit('/').next().unwrap_or(url))
-        .filter_map(|c| c[1].parse::<u32>().ok())
-        .find(|h| matches!(h, 144 | 240 | 360 | 480 | 540 | 720 | 1080 | 1440 | 2160 | 4320))
+    re(
+        &HEIGHT_IN_URL_RE,
+        r"(?i)(?:^|[^0-9])(\d{3,4})p?(?:[._/-]|$)",
+    )
+    .captures_iter(url.rsplit('/').next().unwrap_or(url))
+    .filter_map(|c| c[1].parse::<u32>().ok())
+    .find(|h| {
+        matches!(
+            h,
+            144 | 240 | 360 | 480 | 540 | 720 | 1080 | 1440 | 2160 | 4320
+        )
+    })
 }
 
 /// Build a [`Quality`] from URL and markup hints.
@@ -455,9 +498,12 @@ fn stem_of(url: &str) -> String {
     let last = path.rsplit('/').next().unwrap_or("");
     let no_ext = last.rsplit_once('.').map(|(s, _)| s).unwrap_or(last);
     // Strip trailing quality markers: `_720p`, `-1080`, `.480`
-    let stripped = re(&HEIGHT_IN_URL_RE, r"(?i)(?:^|[^0-9])(\d{3,4})p?(?:[._/-]|$)")
-        .replace_all(no_ext, "")
-        .to_string();
+    let stripped = re(
+        &HEIGHT_IN_URL_RE,
+        r"(?i)(?:^|[^0-9])(\d{3,4})p?(?:[._/-]|$)",
+    )
+    .replace_all(no_ext, "")
+    .to_string();
     let stem = stripped.trim_matches(|c: char| c == '_' || c == '-' || c == '.');
     if stem.is_empty() {
         no_ext.to_string()
@@ -595,7 +641,12 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
         .map(|m| m.as_str().trim())
         .filter(|s| !s.is_empty())?;
     let decoded = percent_decode(raw);
-    let name = decoded.rsplit(['/', '\\']).next().unwrap_or("").trim().to_string();
+    let name = decoded
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if name.is_empty() {
         None
     } else {
@@ -810,13 +861,22 @@ mod tests {
 
     #[test]
     fn quality_hints_from_label_and_url() {
-        assert_eq!(quality_from_hints("https://c/x_720.mp4", None, None).id, "720p");
-        assert_eq!(quality_from_hints("https://c/x.mp4", Some("HD 1080"), None).id, "1080p");
+        assert_eq!(
+            quality_from_hints("https://c/x_720.mp4", None, None).id,
+            "720p"
+        );
+        assert_eq!(
+            quality_from_hints("https://c/x.mp4", Some("HD 1080"), None).id,
+            "1080p"
+        );
         let q = quality_from_hints("https://c/x.mp4", None, Some(10));
         assert_eq!(q.id, "file");
         assert_eq!(q.size_bytes, Some(10));
         assert_eq!(q.container.as_deref(), Some("mp4"));
-        assert_eq!(quality_from_hints("https://c/m.m3u8", None, None).id, "best");
+        assert_eq!(
+            quality_from_hints("https://c/m.m3u8", None, None).id,
+            "best"
+        );
     }
 
     #[test]
@@ -843,8 +903,14 @@ mod tests {
         ];
         let items = media_items_from_sniff("https://example.com/p", Some("Page"), media);
         assert_eq!(items.len(), 2);
-        let file_item = items.iter().find(|i| i.fetch_kind == MediaFetchKind::DirectHttp).unwrap();
-        assert_eq!(file_item.url, "https://cdn/x/clip_1080.mp4", "best variant first");
+        let file_item = items
+            .iter()
+            .find(|i| i.fetch_kind == MediaFetchKind::DirectHttp)
+            .unwrap();
+        assert_eq!(
+            file_item.url, "https://cdn/x/clip_1080.mp4",
+            "best variant first"
+        );
         let ids: Vec<_> = file_item.qualities.iter().map(|q| q.id.clone()).collect();
         assert_eq!(ids[0], "1080p");
         assert_eq!(ids[1], "480p@https://cdn/x/clip_480.mp4");
@@ -852,7 +918,10 @@ mod tests {
             split_quality_url(&ids[1]),
             ("480p", Some("https://cdn/x/clip_480.mp4"))
         );
-        let hls_item = items.iter().find(|i| i.fetch_kind == MediaFetchKind::Extractor).unwrap();
+        let hls_item = items
+            .iter()
+            .find(|i| i.fetch_kind == MediaFetchKind::Extractor)
+            .unwrap();
         assert_eq!(hls_item.qualities[0].id, "best");
         assert_eq!(hls_item.referer.as_deref(), Some("https://example.com/p"));
         assert!(items[0].id.starts_with("sniff-"));

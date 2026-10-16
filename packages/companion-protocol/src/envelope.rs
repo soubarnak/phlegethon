@@ -112,13 +112,8 @@ impl CompanionResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompanionResult {
-    EnqueueDirect {
-        job_id: String,
-        destination: String,
-    },
-    ProbeThenConfirm {
-        url: String,
-    },
+    EnqueueDirect { job_id: String, destination: String },
+    ProbeThenConfirm { url: String },
 }
 
 #[cfg(test)]
@@ -155,10 +150,7 @@ mod tests {
             referrer: None,
             session: None,
         };
-        assert_eq!(
-            req.effective_url(),
-            "https://cdn.example.com/video.mp4"
-        );
+        assert_eq!(req.effective_url(), "https://cdn.example.com/video.mp4");
     }
 
     #[test]

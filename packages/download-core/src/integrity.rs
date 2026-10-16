@@ -104,7 +104,9 @@ pub fn hash_from_metalink(xml: &str) -> Option<ExpectedHash> {
         }
     }
 
-    found.into_iter().min_by_key(|h| hash_preference(h.algorithm))
+    found
+        .into_iter()
+        .min_by_key(|h| hash_preference(h.algorithm))
 }
 
 fn hash_preference(algorithm: HashAlgorithm) -> u8 {
@@ -129,7 +131,9 @@ fn infer_algorithm_from_digest_len(len: usize) -> Result<HashAlgorithm, String> 
         32 => Ok(HashAlgorithm::Md5),
         40 => Ok(HashAlgorithm::Sha1),
         64 => Ok(HashAlgorithm::Sha256),
-        n => Err(format!("cannot infer hash algorithm from digest length {n}")),
+        n => Err(format!(
+            "cannot infer hash algorithm from digest length {n}"
+        )),
     }
 }
 

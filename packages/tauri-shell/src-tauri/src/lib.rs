@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, State};
-use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 // ---------------------------------------------------------------------------
 // App state
@@ -87,13 +87,8 @@ impl AppState {
 #[derive(Serialize, Clone)]
 #[serde(tag = "type")]
 enum EnqueueResult {
-    EnqueueDirect {
-        job_id: String,
-        destination: String,
-    },
-    ProbeThenConfirm {
-        url: String,
-    },
+    EnqueueDirect { job_id: String, destination: String },
+    ProbeThenConfirm { url: String },
 }
 
 impl From<EnqueueOutcome> for EnqueueResult {
@@ -106,9 +101,7 @@ impl From<EnqueueOutcome> for EnqueueResult {
                 job_id,
                 destination: destination.display().to_string(),
             },
-            EnqueueOutcome::ProbeThenConfirm { url } => {
-                EnqueueResult::ProbeThenConfirm { url }
-            }
+            EnqueueOutcome::ProbeThenConfirm { url } => EnqueueResult::ProbeThenConfirm { url },
         }
     }
 }
@@ -205,7 +198,9 @@ fn event_to_summary(evt: &CoreEvent) -> Option<EventSummary> {
 fn start_event_drain(app: tauri::AppHandle, rx: crossbeam_channel::Receiver<CoreEvent>) {
     std::thread::spawn(move || {
         while let Ok(evt) = rx.recv() {
-            let Some(summary) = event_to_summary(&evt) else { continue };
+            let Some(summary) = event_to_summary(&evt) else {
+                continue;
+            };
             if let Err(err) = app.emit("core-event", &summary) {
                 log::warn!("failed to emit core-event: {err}");
             }
@@ -346,13 +341,14 @@ async fn get_toolchain_status(
         }
     }
     let core = core_handle(&app)?;
-    let status = tauri::async_runtime::spawn_blocking(move || -> Result<ToolchainStatus, String> {
-        // `--version` probes run subprocesses; snapshot the extractor handle, not the lock.
-        let guard = core.lock().map_err(|e| e.to_string())?;
-        Ok(guard.toolchain_status())
-    })
-    .await
-    .map_err(|e| format!("toolchain status task failed: {e}"))??;
+    let status =
+        tauri::async_runtime::spawn_blocking(move || -> Result<ToolchainStatus, String> {
+            // `--version` probes run subprocesses; snapshot the extractor handle, not the lock.
+            let guard = core.lock().map_err(|e| e.to_string())?;
+            Ok(guard.toolchain_status())
+        })
+        .await
+        .map_err(|e| format!("toolchain status task failed: {e}"))??;
     store_toolchain_status(&app, Some(status.clone()));
     Ok(status)
 }
@@ -507,9 +503,7 @@ fn preview_probe_destination(
 #[tauri::command]
 fn get_library_root(state: State<AppState>) -> Result<Option<String>, String> {
     let core = state.core.lock().map_err(|e| e.to_string())?;
-    Ok(core
-        .library_root()
-        .map(|p| p.display().to_string()))
+    Ok(core.library_root().map(|p| p.display().to_string()))
 }
 
 #[tauri::command]
@@ -604,8 +598,8 @@ async fn pick_folder(
             })
         }
         method @ (PickerMethod::Zenity | PickerMethod::Kdialog) => {
-            let (backend, program) = picker::detect(&dirs)
-                .ok_or_else(|| "folder picker disappeared".to_string())?;
+            let (backend, program) =
+                picker::detect(&dirs).ok_or_else(|| "folder picker disappeared".to_string())?;
             let start = dirs_home();
             let outcome = tauri::async_runtime::spawn_blocking(move || {
                 picker::run(backend, &program, &label, start.as_deref())
@@ -658,7 +652,9 @@ async fn get_platform_capabilities() -> Result<PlatformCapabilities, String> {
 #[tauri::command]
 fn notify_fallback(summary: String, body: String) -> Result<bool, String> {
     match phlegethon_shell_support::notify::detect(&path_dirs()) {
-        Some(program) => phlegethon_shell_support::notify::send(&program, &summary, &body).map(|_| true),
+        Some(program) => {
+            phlegethon_shell_support::notify::send(&program, &summary, &body).map(|_| true)
+        }
         None => Ok(false),
     }
 }
@@ -677,9 +673,7 @@ fn process_pending(app: tauri::AppHandle, state: State<AppState>) -> Result<(), 
     std::thread::spawn(move || {
         let clear_busy = || {
             if let Some(state) = app.try_state::<AppState>() {
-                state
-                    .process_pending_busy
-                    .store(false, Ordering::Release);
+                state.process_pending_busy.store(false, Ordering::Release);
             }
         };
 
@@ -775,11 +769,7 @@ fn set_active_job_limit(state: State<AppState>, limit: u32) -> Result<(), String
 }
 
 #[tauri::command]
-fn reorder_job(
-    state: State<AppState>,
-    from_index: usize,
-    to_index: usize,
-) -> Result<(), String> {
+fn reorder_job(state: State<AppState>, from_index: usize, to_index: usize) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.reorder_job(from_index, to_index)
 }
@@ -908,7 +898,9 @@ async fn check_sidecar_updates(
 }
 
 #[tauri::command]
-fn apply_sidecar_updates(state: State<AppState>) -> Result<download_core::SidecarApplyResult, String> {
+fn apply_sidecar_updates(
+    state: State<AppState>,
+) -> Result<download_core::SidecarApplyResult, String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     core.apply_sidecar_updates()
 }
@@ -1032,10 +1024,7 @@ fn list_history_by_outcome(
 }
 
 #[tauri::command]
-fn remove_history_entry(
-    state: State<AppState>,
-    media_id: String,
-) -> Result<(), String> {
+fn remove_history_entry(state: State<AppState>, media_id: String) -> Result<(), String> {
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
     match core.remove_history_entry(&media_id) {
         Ok(_) => Ok(()),
@@ -1106,8 +1095,11 @@ fn load_library_root_preference() -> Option<PathBuf> {
 fn persist_library_root_preference(root: &Path) -> Result<(), String> {
     let data = dirs_data_dir();
     std::fs::create_dir_all(&data).map_err(|e| format!("create data dir: {e}"))?;
-    std::fs::write(library_root_preference_path(), root.to_string_lossy().as_bytes())
-        .map_err(|e| format!("persist library root: {e}"))
+    std::fs::write(
+        library_root_preference_path(),
+        root.to_string_lossy().as_bytes(),
+    )
+    .map_err(|e| format!("persist library root: {e}"))
 }
 
 // ---------------------------------------------------------------------------

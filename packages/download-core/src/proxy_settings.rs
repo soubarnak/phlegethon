@@ -13,9 +13,7 @@ pub struct ProxySettings {
 impl ProxySettings {
     /// Whether a proxy URL is configured.
     pub fn is_configured(&self) -> bool {
-        self.url
-            .as_ref()
-            .is_some_and(|s| !s.trim().is_empty())
+        self.url.as_ref().is_some_and(|s| !s.trim().is_empty())
     }
 
     /// Validate before persistence.
@@ -46,7 +44,12 @@ impl ProxySettings {
 
 /// Build yt-dlp argv fragments for the configured global proxy.
 pub fn ytdlp_proxy_args(settings: &ProxySettings) -> Vec<String> {
-    let Some(url) = settings.url.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(url) = settings
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return Vec::new();
     };
     vec!["--proxy".to_string(), url.to_string()]

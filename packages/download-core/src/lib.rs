@@ -11,8 +11,6 @@ mod doh_dns;
 mod doh_proxy;
 mod doh_ytdlp;
 mod download_archive;
-mod media_extras;
-mod quality_policy;
 mod event;
 mod extractor;
 mod filename_template;
@@ -21,70 +19,72 @@ mod http;
 mod integrity;
 mod job;
 mod job_signals;
+mod media_extras;
 mod mirror_set;
 pub mod page_sniffer;
-mod transfer;
-mod url_input;
-mod proxy_settings;
 pub mod plugin_sidecar;
+mod proxy_settings;
+mod quality_policy;
 mod sidecar_updates;
 mod storage;
 pub mod toolchain_discovery;
+mod transfer;
+mod url_input;
 pub mod ytdlp_extractor;
 pub use plugin_sidecar::{
     bundled_manifest, ensure_bundled_plugins, install_plugin_package, load_manifest, needs_update,
-    plugin_dirs_path, version_is_newer, write_manifest, BundledInstall,
-    PluginManifest, MANIFEST_FILENAME, PLUGIN_DIRS_REL, PLUGIN_PACKAGE_NAME,
+    plugin_dirs_path, version_is_newer, write_manifest, BundledInstall, PluginManifest,
+    MANIFEST_FILENAME, PLUGIN_DIRS_REL, PLUGIN_PACKAGE_NAME,
 };
-pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 pub use toolchain_discovery::{
     classify_ytdlp_failure, detect_libc, error_code, error_code_hint, tag_error, EjsStatus,
     JsRuntime, JsRuntimeKind, Libc, PlatformInfo, ToolInfo, ToolchainStatus, YtDlpLauncher,
-    YtDlpSource, ERROR_CODE_NEEDS_BROWSER_COOKIES, ERROR_CODE_NEEDS_JS_RUNTIME,
-    ERROR_CODE_TIMEOUT,
+    YtDlpSource, ERROR_CODE_NEEDS_BROWSER_COOKIES, ERROR_CODE_NEEDS_JS_RUNTIME, ERROR_CODE_TIMEOUT,
 };
+pub use ytdlp_extractor::{FakeYtDlpExtractor, YtDlpConfig, YtDlpExtractorToolchain};
 
-pub use cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
-pub use proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
-pub use github_release_source::{select_asset as select_ytdlp_release_asset, GitHubReleaseUpdateSource};
-pub use sidecar_updates::{
-    apply_sidecar_updates, apply_sidecar_updates_on_launch, check_sidecar_updates,
-    rollback_sidecar_component, toolchain_binary_path, write_toolchain_manifest,
-    CatalogVersionEntry, FakeSidecarUpdateSource, FileSidecarUpdateSource,
-    SidecarApplyOutcome, SidecarApplyResult, SidecarComponent, SidecarComponentStatus,
-    SidecarRuntimeState, SidecarUpdateCheckResult, SidecarUpdateSettings,
-    SidecarUpdateSource, ToolchainManifest, UpdateCatalog, TOOLCHAIN_MANIFEST_FILENAME,
-    UPDATE_CATALOG_FILENAME,
-};
 pub use bandwidth::{Clock, ManualClock, SystemClock, TransferProgress};
+pub use cookie_channel::{append_ytdlp_cookie_args, ytdlp_cookie_args, CookieChannel};
+pub use disk_space::{
+    disk_space_margin_bytes, required_free_bytes, FreeSpaceLookup, SystemFreeSpace,
+};
+pub use download_archive::{ArchiveEntry, ArchiveOutcome, DownloadArchive};
 pub use event::CoreEvent;
 pub use extractor::{
     is_generic_extractor_key, ExtractionTier, ExtractorDownloadOutcome, ExtractorToolchain,
     FakeExtractorToolchain, ItemSelection, MediaFetchKind, MediaItem, ProbePolicy, ProbeResult,
     ProbeSelection, ProbeTierSettings, Quality, DEFAULT_PROBE_TIMEOUT_SECS,
 };
-pub use page_sniffer::{
-    FakePageSniffer, HtmlPageSniffer, PageSniffer, SniffOutcome, SniffSource, SniffedKind,
-    SniffedMedia,
-};
 pub use filename_template::{
     media_item_raw_id, prepare_extractor_output, render_template, resolve_collision,
     sanitize_filename, TemplateVars, DEFAULT_FILENAME_TEMPLATE,
 };
-pub use http::{FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
-pub use disk_space::{
-    disk_space_margin_bytes, required_free_bytes, FreeSpaceLookup, SystemFreeSpace,
+pub use github_release_source::{
+    select_asset as select_ytdlp_release_asset, GitHubReleaseUpdateSource,
 };
-pub use download_archive::{ArchiveEntry, ArchiveOutcome, DownloadArchive};
+pub use http::{FetchResult, HeadInfo, HttpBackend, ProdHttpBackend};
 pub use integrity::{hash_from_metalink, ExpectedHash, HashAlgorithm};
 pub use job::{EnqueueOutcome, JobState};
 pub use job_signals::JobSignals;
-pub use mirror_set::MirrorSet;
 pub use media_extras::{
     apply_remux_postprocess, effective_options, ffmpeg_available, ytdlp_media_extras_args,
     MediaExtrasCapabilities, MediaExtrasOptions, PostprocessOutcome,
 };
+pub use mirror_set::MirrorSet;
+pub use page_sniffer::{
+    FakePageSniffer, HtmlPageSniffer, PageSniffer, SniffOutcome, SniffSource, SniffedKind,
+    SniffedMedia,
+};
+pub use proxy_settings::{append_ytdlp_proxy_args, ytdlp_proxy_args, ProxySettings};
 pub use quality_policy::{select_default_quality, DefaultQualityPolicy, DEFAULT_MAX_HEIGHT};
+pub use sidecar_updates::{
+    apply_sidecar_updates, apply_sidecar_updates_on_launch, check_sidecar_updates,
+    rollback_sidecar_component, toolchain_binary_path, write_toolchain_manifest,
+    CatalogVersionEntry, FakeSidecarUpdateSource, FileSidecarUpdateSource, SidecarApplyOutcome,
+    SidecarApplyResult, SidecarComponent, SidecarComponentStatus, SidecarRuntimeState,
+    SidecarUpdateCheckResult, SidecarUpdateSettings, SidecarUpdateSource, ToolchainManifest,
+    UpdateCatalog, TOOLCHAIN_MANIFEST_FILENAME, UPDATE_CATALOG_FILENAME,
+};
 pub use url_input::{normalize_url, split_urls};
 
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
@@ -293,9 +293,9 @@ impl ProbePlan {
         let policy = self.policy();
 
         if self.launch_site {
-            let result = self
-                .extractor
-                .probe_with_policy(&self.url, &self.cookies, &self.proxy, &policy)?;
+            let result =
+                self.extractor
+                    .probe_with_policy(&self.url, &self.cookies, &self.proxy, &policy)?;
             if !result.tier.is_dedicated() {
                 return Err(format!(
                     "unsupported Launch Site: '{}' resolved via yt-dlp's generic extractor",
@@ -326,23 +326,24 @@ impl ProbePlan {
         self.check_cancel()?;
 
         // Tiers 1 + 2: one yt-dlp run; the extractor key tells dedicated from generic.
-        let ytdlp_error = match self
-            .extractor
-            .probe_with_policy(&self.url, &self.cookies, &self.proxy, &policy)
-        {
-            Ok(mut result) if !result.items.is_empty() => {
-                if result.tier == ExtractionTier::GenericExtractor {
-                    result.warnings.push(
-                        "yt-dlp has no dedicated extractor for this site; the results come \
+        let ytdlp_error =
+            match self
+                .extractor
+                .probe_with_policy(&self.url, &self.cookies, &self.proxy, &policy)
+            {
+                Ok(mut result) if !result.items.is_empty() => {
+                    if result.tier == ExtractionTier::GenericExtractor {
+                        result.warnings.push(
+                            "yt-dlp has no dedicated extractor for this site; the results come \
                          from its generic extractor and the quality list may be incomplete."
-                            .to_string(),
-                    );
+                                .to_string(),
+                        );
+                    }
+                    return Ok(result);
                 }
-                return Ok(result);
-            }
-            Ok(_) => format!("yt-dlp returned no media items for {}", self.url),
-            Err(err) => err,
-        };
+                Ok(_) => format!("yt-dlp returned no media items for {}", self.url),
+                Err(err) => err,
+            };
         self.check_cancel()?;
 
         // Tier 3: Core's own HTML sniffer.
@@ -350,11 +351,8 @@ impl ProbePlan {
         if self.settings.allow_page_sniff {
             match self.sniffer.sniff(&self.url, &self.proxy) {
                 Ok(SniffOutcome::Page { title, media }) if !media.is_empty() => {
-                    let items = page_sniffer::media_items_from_sniff(
-                        &self.url,
-                        title.as_deref(),
-                        media,
-                    );
+                    let items =
+                        page_sniffer::media_items_from_sniff(&self.url, title.as_deref(), media);
                     let source_name = if items.len() > 1 { title } else { None };
                     return Ok(ProbeResult {
                         url: self.url.clone(),
@@ -437,7 +435,9 @@ fn direct_file_result(
         source_name: None,
         tier: ExtractionTier::DirectFile,
         extractor_key: None,
-        warnings: vec![format!("Server reports {content_type}; downloading as a plain file.")],
+        warnings: vec![format!(
+            "Server reports {content_type}; downloading as a plain file."
+        )],
     }
 }
 
@@ -1216,9 +1216,7 @@ impl Core {
         match kind {
             classification::Kind::EnqueueDirect => {
                 let mut job = match destination {
-                    Some(dest) => {
-                        job::Job::new_with_source_at(url_str.clone(), dest, None)
-                    }
+                    Some(dest) => job::Job::new_with_source_at(url_str.clone(), dest, None),
                     None => job::Job::new(url_str.clone(), root.clone()),
                 };
                 if options.force_direct {
@@ -1393,9 +1391,8 @@ impl Core {
         self.job_signals.unregister(job_id);
 
         if !completed && destination.exists() {
-            std::fs::remove_dir_all(destination).map_err(|e| {
-                format!("delete Job Destination {destination:?}: {e}")
-            })?;
+            std::fs::remove_dir_all(destination)
+                .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))?;
         }
 
         self.event_tx
@@ -1628,10 +1625,7 @@ impl Core {
     }
 
     /// Update media extras defaults and persist them.
-    pub fn set_default_media_extras(
-        &mut self,
-        options: MediaExtrasOptions,
-    ) -> Result<(), String> {
+    pub fn set_default_media_extras(&mut self, options: MediaExtrasOptions) -> Result<(), String> {
         self.default_media_extras = options;
         self.persist_queue_now()?;
         Ok(())
@@ -1708,8 +1702,7 @@ impl Core {
     /// Set the sidecar root and load persisted runtime state from disk.
     pub fn set_sidecar_root(&mut self, root: PathBuf) -> Result<(), String> {
         std::fs::create_dir_all(&root).map_err(|e| format!("create sidecar root: {e}"))?;
-        self.sidecar_runtime_state =
-            sidecar_updates::load_sidecar_runtime_state(&root)?;
+        self.sidecar_runtime_state = sidecar_updates::load_sidecar_runtime_state(&root)?;
         self.extractor.apply_sidecar_root(&root);
         self.sidecar_root = Some(root);
         Ok(())
@@ -1765,7 +1758,8 @@ impl Core {
             )
         };
         // Network work (release lookup + asset download + checksum) outside the lock.
-        let prefetched = sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref())?;
+        let prefetched =
+            sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref())?;
         if prefetched.is_none() {
             return Ok(SidecarApplyResult {
                 outcome: SidecarApplyOutcome::NothingToApply,
@@ -1884,16 +1878,8 @@ impl Core {
         self.persist_queue_now()
     }
 
-    fn apply_extractor_filename(
-        &self,
-        job: &mut job::Job,
-        item: &MediaItem,
-        quality: &Quality,
-    ) {
-        let ext = quality
-            .container
-            .as_deref()
-            .unwrap_or("mp4");
+    fn apply_extractor_filename(&self, job: &mut job::Job, item: &MediaItem, quality: &Quality) {
+        let ext = quality.container.as_deref().unwrap_or("mp4");
         let raw_id = media_item_raw_id(&item.id);
         let vars = TemplateVars {
             title: &item.title,
@@ -1923,11 +1909,7 @@ impl Core {
                 upload_date: job.media_upload_date(),
                 ext,
             };
-            return prepare_extractor_output(
-                job.destination(),
-                &self.filename_template,
-                &vars,
-            );
+            return prepare_extractor_output(job.destination(), &self.filename_template, &vars);
         }
         (
             self.filename_template.clone(),
@@ -2107,8 +2089,7 @@ impl Core {
         match outcome {
             Ok(mut result) => {
                 self.mark_archived_probe_items(&mut result.items);
-                self.pending_probes
-                    .insert(url.to_string(), result.clone());
+                self.pending_probes.insert(url.to_string(), result.clone());
                 self.event_tx
                     .send(CoreEvent::ProbeResult {
                         url: url.to_string(),
@@ -2132,7 +2113,9 @@ impl Core {
 
     /// Ask an in-flight probe to stop between tiers. Returns whether one was found.
     pub fn cancel_probe(&self, url: &str) -> bool {
-        let Some(key) = normalize_url(url) else { return false };
+        let Some(key) = normalize_url(url) else {
+            return false;
+        };
         match self.probe_cancels.get(&key) {
             Some(flag) => {
                 flag.store(true, Ordering::Release);
@@ -2196,12 +2179,10 @@ impl Core {
 
     fn plan_enrich(&self, probe_url: &str, item_id: &str) -> Result<EnrichPlan, String> {
         let url_key = normalize_url(probe_url).ok_or_else(|| "invalid URL".to_string())?;
-        let probe = self.pending_probes.get(&url_key).ok_or_else(|| {
-            format!(
-                "no pending probe for {}. Call probe() first.",
-                url_key
-            )
-        })?;
+        let probe = self
+            .pending_probes
+            .get(&url_key)
+            .ok_or_else(|| format!("no pending probe for {}. Call probe() first.", url_key))?;
         let item = probe
             .items
             .iter()
@@ -2256,12 +2237,10 @@ impl Core {
 
         let url_key = normalize_url(&selection.url)
             .ok_or_else(|| format!("invalid URL: {}", selection.url))?;
-        let probe = self.pending_probes.get(&url_key).ok_or_else(|| {
-            format!(
-                "no pending probe for {}. Call probe() first.",
-                url_key
-            )
-        })?;
+        let probe = self
+            .pending_probes
+            .get(&url_key)
+            .ok_or_else(|| format!("no pending probe for {}. Call probe() first.", url_key))?;
 
         let items_map: HashMap<&str, &MediaItem> =
             probe.items.iter().map(|i| (i.id.as_str(), i)).collect();
@@ -2275,11 +2254,8 @@ impl Core {
         })?;
 
         let job_source = Self::probe_job_source(probe, item);
-        let path = Self::preview_destination_path(
-            root,
-            destination.as_deref(),
-            job_source.as_deref(),
-        );
+        let path =
+            Self::preview_destination_path(root, destination.as_deref(), job_source.as_deref());
 
         Ok(ProbeDestinationPreview {
             path_display: path.display().to_string(),
@@ -2349,12 +2325,7 @@ impl Core {
         let probe = self
             .pending_probes
             .get(&url_key)
-            .ok_or_else(|| {
-                format!(
-                    "no pending probe for {}. Call probe() first.",
-                    url_key
-                )
-            })?;
+            .ok_or_else(|| format!("no pending probe for {}. Call probe() first.", url_key))?;
 
         // Build lookup maps
         let items_map: HashMap<&str, &MediaItem> =
@@ -2471,7 +2442,8 @@ impl Core {
             let core = core.lock().map_err(|e| e.to_string())?;
             let slots = core
                 .active_job_limit
-                .saturating_sub(core.job_signals.active_transfer_count() as u32) as usize;
+                .saturating_sub(core.job_signals.active_transfer_count() as u32)
+                as usize;
             if slots == 0 {
                 return Ok(());
             }
@@ -2498,12 +2470,11 @@ impl Core {
             let core = Arc::clone(&core);
             let bucket = global_bucket.clone();
             std::thread::spawn(move || {
-                if let Err(e) = Self::run_transfer_outside_lock(Arc::clone(&core), job_id.clone(), bucket)
+                if let Err(e) =
+                    Self::run_transfer_outside_lock(Arc::clone(&core), job_id.clone(), bucket)
                 {
                     if let Err(report) = Self::report_transfer_thread_failure(core, &job_id, e) {
-                        eprintln!(
-                            "transfer job failure reporting failed for {job_id}: {report}"
-                        );
+                        eprintln!("transfer job failure reporting failed for {job_id}: {report}");
                     }
                 }
             });
@@ -2596,8 +2567,7 @@ impl Core {
         let transfer_active = self.jobs[i].transfer_active().clone();
 
         if let Some(format) = extractor_format {
-            let output_spec = ytdlp_output_spec
-                .unwrap_or_else(|| self.filename_template.clone());
+            let output_spec = ytdlp_output_spec.unwrap_or_else(|| self.filename_template.clone());
             let on_disk = storage::destination_byte_total(&dest);
             if on_disk > 0 && !self.extractor.supports_extractor_resume() {
                 self.finalize_failed_job(
@@ -2706,16 +2676,14 @@ impl Core {
             })
             .map_err(|_| "event channel closed".to_string())?;
 
-        std::fs::create_dir_all(&dest)
-            .map_err(|e| format!("create job dir {dest:?}: {e}"))?;
+        std::fs::create_dir_all(&dest).map_err(|e| format!("create job dir {dest:?}: {e}"))?;
 
         let file_path = dest.join(&filename);
         let part_path = Self::part_path_for(&file_path);
 
         if bytes_received > 0 && !part_path.exists() && file_path.exists() {
-            std::fs::rename(&file_path, &part_path).map_err(|e| {
-                format!("migrate partial {file_path:?} -> {part_path:?}: {e}")
-            })?;
+            std::fs::rename(&file_path, &part_path)
+                .map_err(|e| format!("migrate partial {file_path:?} -> {part_path:?}: {e}"))?;
         }
 
         let live_bytes = self.jobs[i].live_downloaded();
@@ -2799,14 +2767,18 @@ impl Core {
 
                         match total_opt {
                             Some(total) if on_disk >= total => {
-                                self.complete_job_file(job_id, job_index, &part_path, &file_path, total)?;
+                                self.complete_job_file(
+                                    job_id, job_index, &part_path, &file_path, total,
+                                )?;
                             }
                             Some(_) => {
                                 self.flush_pending_progress()?;
                             }
                             None => {
                                 // Unknown size: successful fetch to EOF is complete.
-                                self.complete_job_file(job_id, job_index, &part_path, &file_path, on_disk)?;
+                                self.complete_job_file(
+                                    job_id, job_index, &part_path, &file_path, on_disk,
+                                )?;
                             }
                         }
                         Ok(false)
@@ -2847,7 +2819,9 @@ impl Core {
                         .map_err(|_| "event channel closed".to_string())?;
 
                     if on_disk >= total_size {
-                        self.complete_job_file(job_id, job_index, &part_path, &file_path, total_size)?;
+                        self.complete_job_file(
+                            job_id, job_index, &part_path, &file_path, total_size,
+                        )?;
                     } else {
                         self.flush_pending_progress()?;
                     }
@@ -3074,11 +3048,7 @@ impl Core {
         }
     }
 
-    fn record_media_identity(
-        &mut self,
-        job_id: &str,
-        job_index: usize,
-    ) -> Result<(), String> {
+    fn record_media_identity(&mut self, job_id: &str, job_index: usize) -> Result<(), String> {
         let Some(media_id) = self.jobs[job_index].media_id().map(str::to_string) else {
             return Ok(());
         };
@@ -3122,11 +3092,7 @@ impl Core {
     /// second History DB.  The archive only records media identities; plain
     /// HTTP jobs without media_id are not archived.
     pub fn list_history(&self) -> Vec<ArchiveEntry> {
-        self.download_archive
-            .list()
-            .into_iter()
-            .cloned()
-            .collect()
+        self.download_archive.list().into_iter().cloned().collect()
     }
 
     /// Return archive entries matching the given outcome, most recent first.

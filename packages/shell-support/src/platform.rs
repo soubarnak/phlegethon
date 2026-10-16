@@ -41,7 +41,10 @@ mod tests {
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -51,7 +54,10 @@ mod tests {
             DisplayServer::Wayland
         );
         assert_eq!(
-            display_server(&env(&[("XDG_SESSION_TYPE", "x11"), ("WAYLAND_DISPLAY", "w0")])),
+            display_server(&env(&[
+                ("XDG_SESSION_TYPE", "x11"),
+                ("WAYLAND_DISPLAY", "w0")
+            ])),
             DisplayServer::X11
         );
     }
@@ -59,7 +65,10 @@ mod tests {
     #[test]
     fn falls_back_to_display_variables() {
         assert!(is_wayland(&env(&[("WAYLAND_DISPLAY", "wayland-0")])));
-        assert_eq!(display_server(&env(&[("DISPLAY", ":1")])), DisplayServer::X11);
+        assert_eq!(
+            display_server(&env(&[("DISPLAY", ":1")])),
+            DisplayServer::X11
+        );
         assert_eq!(display_server(&env(&[])), DisplayServer::Unknown);
     }
 }

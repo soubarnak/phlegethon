@@ -155,13 +155,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &to)?;
         } else if ty.is_file() {
-            fs::copy(entry.path(), &to).map_err(|e| {
-                format!(
-                    "copy {} -> {}: {e}",
-                    entry.path().display(),
-                    to.display()
-                )
-            })?;
+            fs::copy(entry.path(), &to)
+                .map_err(|e| format!("copy {} -> {}: {e}", entry.path().display(), to.display()))?;
         }
     }
     Ok(())
@@ -176,15 +171,21 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 const BUNDLED_FILES: &[(&str, &str)] = &[
     (
         "yt_dlp_plugins/extractor/_parse.py",
-        include_str!("../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/_parse.py"),
+        include_str!(
+            "../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/_parse.py"
+        ),
     ),
     (
         "yt_dlp_plugins/extractor/luxuretv.py",
-        include_str!("../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/luxuretv.py"),
+        include_str!(
+            "../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/luxuretv.py"
+        ),
     ),
     (
         "yt_dlp_plugins/extractor/xxxbp.py",
-        include_str!("../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/xxxbp.py"),
+        include_str!(
+            "../../extractor-plugins/phlegethon-launch-sites/yt_dlp_plugins/extractor/xxxbp.py"
+        ),
     ),
 ];
 
@@ -218,7 +219,11 @@ fn bundled_digest() -> String {
         hasher.update(content.as_bytes());
         hasher.update([0]);
     }
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// `a.b.c` comparison on the numeric components; non-numeric parts count as 0.
@@ -294,9 +299,7 @@ mod tests {
     use std::fs;
 
     fn write_minimal_package(root: &Path) {
-        let extractor = root
-            .join("yt_dlp_plugins")
-            .join("extractor");
+        let extractor = root.join("yt_dlp_plugins").join("extractor");
         fs::create_dir_all(&extractor).unwrap();
         fs::write(extractor.join("luxuretv.py"), b"# fixture\n").unwrap();
         fs::write(extractor.join("xxxbp.py"), b"# fixture\n").unwrap();
@@ -454,16 +457,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let outcome = ensure_bundled_plugins(tmp.path()).unwrap();
         assert!(matches!(outcome, BundledInstall::Installed { .. }));
-        let base = plugin_dirs_path(tmp.path()).unwrap().join(PLUGIN_PACKAGE_NAME);
+        let base = plugin_dirs_path(tmp.path())
+            .unwrap()
+            .join(PLUGIN_PACKAGE_NAME);
         for file in ["_parse.py", "luxuretv.py", "xxxbp.py"] {
-            assert!(base.join("yt_dlp_plugins/extractor").join(file).is_file(), "{file}");
+            assert!(
+                base.join("yt_dlp_plugins/extractor").join(file).is_file(),
+                "{file}"
+            );
         }
-        assert_eq!(load_manifest(tmp.path()).unwrap().version, bundled_manifest().version);
+        assert_eq!(
+            load_manifest(tmp.path()).unwrap().version,
+            bundled_manifest().version
+        );
         // No staging directory is left behind.
         let leftovers: Vec<_> = fs::read_dir(tmp.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".bundled-plugins"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".bundled-plugins")
+            })
             .collect();
         assert!(leftovers.is_empty());
     }
@@ -472,14 +487,19 @@ mod tests {
     fn second_run_is_a_no_op() {
         let tmp = tempfile::tempdir().unwrap();
         ensure_bundled_plugins(tmp.path()).unwrap();
-        assert_eq!(ensure_bundled_plugins(tmp.path()).unwrap(), BundledInstall::UpToDate);
+        assert_eq!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::UpToDate
+        );
     }
 
     #[test]
     fn missing_files_or_a_changed_digest_are_repaired() {
         let tmp = tempfile::tempdir().unwrap();
         ensure_bundled_plugins(tmp.path()).unwrap();
-        let pkg = plugin_dirs_path(tmp.path()).unwrap().join(PLUGIN_PACKAGE_NAME);
+        let pkg = plugin_dirs_path(tmp.path())
+            .unwrap()
+            .join(PLUGIN_PACKAGE_NAME);
         fs::remove_dir_all(&pkg).unwrap();
         assert!(matches!(
             ensure_bundled_plugins(tmp.path()).unwrap(),
@@ -493,7 +513,10 @@ mod tests {
             ensure_bundled_plugins(tmp.path()).unwrap(),
             BundledInstall::Installed { .. }
         ));
-        assert_eq!(ensure_bundled_plugins(tmp.path()).unwrap(), BundledInstall::UpToDate);
+        assert_eq!(
+            ensure_bundled_plugins(tmp.path()).unwrap(),
+            BundledInstall::UpToDate
+        );
     }
 
     #[test]
@@ -519,7 +542,9 @@ mod tests {
         write_manifest(tmp.path(), &newer).unwrap();
         assert_eq!(
             ensure_bundled_plugins(tmp.path()).unwrap(),
-            BundledInstall::KeptNewer { installed: "99.0.0".to_string() }
+            BundledInstall::KeptNewer {
+                installed: "99.0.0".to_string()
+            }
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "# out-of-band update");
     }

@@ -4,9 +4,7 @@
 //! JSON parsing, extractor key validation, and quality mapping.
 //! CI defaults to fixtures — never live Launch Site network.
 
-use download_core::{
-    Core, ExtractorToolchain, FakeYtDlpExtractor, ItemSelection, ProbeSelection,
-};
+use download_core::{Core, ExtractorToolchain, FakeYtDlpExtractor, ItemSelection, ProbeSelection};
 
 const CANNED_YOUTUBE_JSON: &str = r#"{
   "id": "dQw4w9WgXcQ",
@@ -117,7 +115,11 @@ fn fake_ytdlp_extractor_probe_youtube_single_video() {
     );
 
     let result = fake
-        .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap();
 
     assert_eq!(result.items.len(), 1);
@@ -137,7 +139,11 @@ fn fake_ytdlp_extractor_qualities_include_resolutions() {
     );
 
     let result = fake
-        .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap();
     let qualities = &result.items[0].qualities;
 
@@ -162,14 +168,15 @@ fn fake_ytdlp_extractor_probe_youtube_playlist_multi_item() {
     );
 
     let result = fake
-        .probe("https://www.youtube.com/playlist?list=PLabc123", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://www.youtube.com/playlist?list=PLabc123",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap();
 
     assert_eq!(result.items.len(), 2);
-    assert_eq!(
-        result.source_name,
-        Some("My Awesome Playlist".to_string())
-    );
+    assert_eq!(result.source_name, Some("My Awesome Playlist".to_string()));
     assert!(result
         .items
         .iter()
@@ -185,7 +192,11 @@ fn fake_ytdlp_extractor_probe_xhamster_single_video() {
     );
 
     let result = fake
-        .probe("https://xhamster.com/videos/example-xh-video-12345", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://xhamster.com/videos/example-xh-video-12345",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap();
 
     assert_eq!(result.items.len(), 1);
@@ -203,7 +214,11 @@ fn fake_ytdlp_extractor_probe_xhamster_user_multi_item() {
     );
 
     let result = fake
-        .probe("https://xhamster.com/creators/example-creator", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://xhamster.com/creators/example-creator",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap();
 
     assert_eq!(result.items.len(), 2);
@@ -213,13 +228,14 @@ fn fake_ytdlp_extractor_probe_xhamster_user_multi_item() {
 #[test]
 fn generic_extractor_hard_fails() {
     let mut fake = FakeYtDlpExtractor::new();
-    fake.insert(
-        "https://example.com/video/12345",
-        CANNED_GENERIC_JSON,
-    );
+    fake.insert("https://example.com/video/12345", CANNED_GENERIC_JSON);
 
     let err = fake
-        .probe("https://example.com/video/12345", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://example.com/video/12345",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap_err();
     assert!(
         err.contains("generic extractor") || err.contains("unsupported"),
@@ -236,7 +252,11 @@ fn luxuretv_plugin_probe_returns_quality_list() {
     );
 
     let result = fake
-        .probe("https://www.luxuretv.com/videos/sample-video-16982.html", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://www.luxuretv.com/videos/sample-video-16982.html",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap();
     assert_eq!(result.items.len(), 1);
     assert_eq!(result.items[0].title, "Sample LuxureTV Video");
@@ -250,7 +270,13 @@ fn xxxbp_plugin_probe_returns_quality_list() {
     let mut fake = FakeYtDlpExtractor::new();
     fake.insert("https://www.xxxbp.tv/v/12345", CANNED_XXXBP_JSON);
 
-    let result = fake.probe("https://www.xxxbp.tv/v/12345", &download_core::CookieChannel::default(), &download_core::ProxySettings::default()).unwrap();
+    let result = fake
+        .probe(
+            "https://www.xxxbp.tv/v/12345",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
+        .unwrap();
     assert_eq!(result.items.len(), 1);
     assert_eq!(result.items[0].title, "Sample XXXBP Video");
     let qualities = &result.items[0].qualities;
@@ -266,7 +292,11 @@ fn luxuretv_plugin_miss_generic_hard_fails() {
         CANNED_GENERIC_JSON,
     );
     let err = fake
-        .probe("https://www.luxuretv.com/videos/sample-video-16982.html", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://www.luxuretv.com/videos/sample-video-16982.html",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap_err();
     assert!(
         err.contains("generic") || err.contains("unsupported"),
@@ -278,7 +308,11 @@ fn luxuretv_plugin_miss_generic_hard_fails() {
 fn fake_extractor_fails_on_unknown_url() {
     let fake = FakeYtDlpExtractor::new();
     let err = fake
-        .probe("https://www.youtube.com/watch?v=unknown", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://www.youtube.com/watch?v=unknown",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap_err();
     assert!(err.contains("no canned response"), "got: {err}");
 }
@@ -288,7 +322,11 @@ fn fake_extractor_fails_on_configured_failure() {
     let mut fake = FakeYtDlpExtractor::new();
     fake.insert_failure("https://www.youtube.com/watch?v=fail");
     let err = fake
-        .probe("https://www.youtube.com/watch?v=fail", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://www.youtube.com/watch?v=fail",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap_err();
     assert!(err.contains("process error"), "got: {err}");
 }
@@ -302,7 +340,11 @@ fn quality_ids_are_unique() {
     );
 
     let result = fake
-        .probe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", &download_core::CookieChannel::default(), &download_core::ProxySettings::default())
+        .probe(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            &download_core::CookieChannel::default(),
+            &download_core::ProxySettings::default(),
+        )
         .unwrap();
     let qualities = &result.items[0].qualities;
 
@@ -394,7 +436,11 @@ fn youtube_playlist_probe_then_confirm_creates_jobs_only_after_confirm() {
             None,
         )
         .unwrap();
-    assert_eq!(job_ids.len(), 2, "confirm creates jobs; probe alone does not");
+    assert_eq!(
+        job_ids.len(),
+        2,
+        "confirm creates jobs; probe alone does not"
+    );
 }
 
 #[test]

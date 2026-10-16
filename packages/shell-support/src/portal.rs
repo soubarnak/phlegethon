@@ -85,13 +85,20 @@ mod tests {
     fn args_target_the_portal_name() {
         let args = name_has_owner_args();
         assert!(args.contains(&"--session".to_string()));
-        assert_eq!(args.last().unwrap(), "string:org.freedesktop.portal.Desktop");
+        assert_eq!(
+            args.last().unwrap(),
+            "string:org.freedesktop.portal.Desktop"
+        );
     }
 
     #[test]
     fn parses_replies() {
-        assert!(parse_name_has_owner("method return time=1.2\n   boolean true\n"));
-        assert!(!parse_name_has_owner("method return time=1.2\n   boolean false\n"));
+        assert!(parse_name_has_owner(
+            "method return time=1.2\n   boolean true\n"
+        ));
+        assert!(!parse_name_has_owner(
+            "method return time=1.2\n   boolean false\n"
+        ));
         assert!(!parse_name_has_owner(""));
     }
 
@@ -99,21 +106,33 @@ mod tests {
     fn available_when_bus_says_true() {
         let dir = tempfile::tempdir().unwrap();
         fake_tool(dir.path(), "dbus-send", "echo '   boolean true'");
-        assert!(portal_available_with(&[dir.path().to_path_buf()], Duration::from_secs(2)));
+        assert!(portal_available_with(
+            &[dir.path().to_path_buf()],
+            Duration::from_secs(2)
+        ));
     }
 
     #[test]
     fn unavailable_on_false_failure_or_missing_tool() {
         let dir = tempfile::tempdir().unwrap();
         fake_tool(dir.path(), "dbus-send", "echo '   boolean false'");
-        assert!(!portal_available_with(&[dir.path().to_path_buf()], Duration::from_secs(2)));
+        assert!(!portal_available_with(
+            &[dir.path().to_path_buf()],
+            Duration::from_secs(2)
+        ));
 
         let failing = tempfile::tempdir().unwrap();
         fake_tool(failing.path(), "dbus-send", "exit 1");
-        assert!(!portal_available_with(&[failing.path().to_path_buf()], Duration::from_secs(2)));
+        assert!(!portal_available_with(
+            &[failing.path().to_path_buf()],
+            Duration::from_secs(2)
+        ));
 
         let empty = tempfile::tempdir().unwrap();
-        assert!(!portal_available_with(&[empty.path().to_path_buf()], Duration::from_secs(1)));
+        assert!(!portal_available_with(
+            &[empty.path().to_path_buf()],
+            Duration::from_secs(1)
+        ));
     }
 
     #[test]
@@ -121,7 +140,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fake_tool(dir.path(), "dbus-send", "sleep 30");
         let started = Instant::now();
-        assert!(!portal_available_with(&[dir.path().to_path_buf()], Duration::from_millis(300)));
+        assert!(!portal_available_with(
+            &[dir.path().to_path_buf()],
+            Duration::from_millis(300)
+        ));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 }
