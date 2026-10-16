@@ -441,7 +441,7 @@ export function ProbeModal({
                 <AccordionItem title={t("probe.mediaOptions")}>
                   {!caps.ffmpeg_available && (
                     <p className="ph-muted" style={{ marginBottom: "0.75rem" }}>
-                      {caps.embed_disabled_reason ?? t("probe.media.noFfmpeg")}
+                      {t("probe.media.noFfmpeg")}
                     </p>
                   )}
                   <div className="ph-settings__grid">
