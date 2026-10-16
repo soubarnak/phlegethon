@@ -241,6 +241,8 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
                 void run(t("settings.libraryRoot"), async () => {
                   const applied = await api.setLibraryRoot(libraryRoot.trim());
                   setLibraryRoot(applied);
+                  const notes = await api.takeLibraryRootWarnings().catch(() => [] as string[]);
+                  notes.forEach((note) => toasts.warning(t("libraryRoot.warning"), note));
                 })
               }
             >

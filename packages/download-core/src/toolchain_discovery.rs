@@ -324,6 +324,12 @@ pub fn ytdlp_js_runtime_args(runtime: Option<&JsRuntime>, remote_components: boo
     args
 }
 
+/// The dotted version in a tool's `--version` output, or `unknown`: arbitrary output
+/// (a banner, an error line) is never shown as a version.
+pub fn version_or_unknown(raw: &str) -> String {
+    parse_version_string(raw).unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Production `<path> --version` with a short timeout.
 pub fn tool_version(path: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new(path);
@@ -336,11 +342,7 @@ pub fn tool_version(path: &Path, args: &[&str]) -> Option<String> {
         }) if status.success() => {
             let text = if stdout.is_empty() { stderr } else { stdout };
             let text = String::from_utf8_lossy(&text);
-            parse_version_string(&text).or_else(|| {
-                text.lines()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|l| l.trim().to_string())
-            })
+            Some(version_or_unknown(&text))
         }
         _ => None,
     }
@@ -1105,6 +1107,9 @@ mod tests {
             parse_version_string("ffmpeg version 7.1.1 Copyright (c) 2000-2025").as_deref(),
             Some("7.1.1")
         );
+        assert_eq!(version_or_unknown("2026.08.19\n"), "2026.08.19");
+        assert_eq!(version_or_unknown("Usage: tool [options]\n"), "unknown");
+        assert_eq!(version_or_unknown(""), "unknown");
         assert_eq!(parse_semver("22.1.0"), Some((22, 1, 0)));
         assert_eq!(parse_semver("2.3"), Some((2, 3, 0)));
         assert_eq!(parse_semver("nope"), None);

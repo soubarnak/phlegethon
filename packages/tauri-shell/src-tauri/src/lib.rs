@@ -46,6 +46,9 @@ struct AppState {
     /// Companion and second-launch intents waiting for the webview (M-69).
     intents: intents::IntentInbox<companion::CompanionIntentEvent>,
     toolchain_status_cache: Mutex<Option<(Instant, ToolchainStatus)>>,
+    /// Notes from loading a Library Root (corrupt queue moved aside, rows skipped)
+    /// that the webview has not shown yet (H-8).
+    library_root_warnings: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -85,6 +88,16 @@ impl AppState {
             process_pending_busy: Arc::new(AtomicBool::new(false)),
             intents: intents::IntentInbox::default(),
             toolchain_status_cache: Mutex::new(None),
+            library_root_warnings: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record_library_root_warnings(&self, report: download_core::LibraryRootReport) {
+        for warning in &report.warnings {
+            log::warn!("library root: {warning}");
+        }
+        if let Ok(mut pending) = self.library_root_warnings.lock() {
+            pending.extend(report.warnings);
         }
     }
 }
@@ -304,10 +317,10 @@ fn adopt_library_root(
     core: &mut Core,
     stored: &mut Option<PathBuf>,
     root: PathBuf,
-) -> Result<(), String> {
-    core.set_library_root(root.clone())?;
+) -> Result<download_core::LibraryRootReport, String> {
+    let report = core.set_library_root(root.clone())?;
     *stored = Some(root);
-    Ok(())
+    Ok(report)
 }
 
 /// Changing the Library Root reloads the queue and replaces the live Job objects,
@@ -331,7 +344,8 @@ fn ensure_library_root(state: &AppState) -> Result<PathBuf, String> {
     // move the user to another queue when the saved one failed to load.
     let root = load_library_root_preference().unwrap_or_else(default_library_root);
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    adopt_library_root(&mut core, &mut stored, root.clone())?;
+    let report = adopt_library_root(&mut core, &mut stored, root.clone())?;
+    state.record_library_root_warnings(report);
     Ok(root)
 }
 
@@ -628,7 +642,8 @@ async fn set_library_root(state: State<'_, AppState>, path: String) -> Result<St
             return Ok(root.display().to_string());
         }
         check_root_change_allowed(state.job_signals.active_transfer_count())?;
-        adopt_library_root(&mut core, &mut stored, root.clone())?;
+        let report = adopt_library_root(&mut core, &mut stored, root.clone())?;
+        state.record_library_root_warnings(report);
     }
     persist_library_root_preference(&root)?;
     Ok(root.display().to_string())
@@ -1062,16 +1077,13 @@ async fn check_sidecar_updates(
 
 #[tauri::command]
 async fn apply_sidecar_updates(
-    state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<download_core::SidecarApplyResult, String> {
-    let core = Arc::clone(&state.core);
-    // Copies files and may hit the network: not on an async worker, and not inline.
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut core = core.lock().map_err(|e| e.to_string())?;
-        core.apply_sidecar_updates()
-    })
-    .await
-    .map_err(|e| format!("apply task failed: {e}"))?
+    let core = core_handle(&app)?;
+    // Network and file copies: not on an async worker, and not under the Core lock.
+    tauri::async_runtime::spawn_blocking(move || Core::apply_sidecar_updates_outside_lock(core))
+        .await
+        .map_err(|e| format!("apply task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1278,6 +1290,18 @@ async fn take_pending_intents(
     Ok(state.intents.take_pending())
 }
 
+/// Notes from loading the Library Root (a corrupt queue file moved aside, rows
+/// skipped) that were not shown yet. The webview calls this on mount and after it
+/// changes the root (H-8).
+#[tauri::command]
+async fn take_library_root_warnings(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let mut pending = state
+        .library_root_warnings
+        .lock()
+        .map_err(|e| e.to_string())?;
+    Ok(std::mem::take(&mut *pending))
+}
+
 /// HTTP(S) URLs in the argv of a second launch. `argv[0]` is the program path.
 fn urls_from_argv(argv: &[String]) -> Vec<String> {
     argv.iter()
@@ -1398,9 +1422,16 @@ fn dirs_home() -> Option<PathBuf> {
 }
 
 fn dirs_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("phlegethon")
+    match dirs::data_dir() {
+        Some(dir) => dir.join("phlegethon"),
+        // No home directory (HOME unset): never a path relative to the working directory,
+        // which would put the queue, cookie files and sidecars wherever the app started.
+        None => {
+            let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+            log::error!("no user data directory; falling back to the temporary directory");
+            std::env::temp_dir().join(format!("phlegethon-{user}"))
+        }
+    }
 }
 
 fn default_library_root() -> PathBuf {
@@ -1498,7 +1529,8 @@ pub fn run() {
                     log::warn!("sidecar root: {err}");
                 }
                 match adopt_library_root(&mut core, &mut stored, root.clone()) {
-                    Ok(()) => {
+                    Ok(report) => {
+                        state.record_library_root_warnings(report);
                         let _ = persist_library_root_preference(&root);
                     }
                     // Not recorded as set: commands retry and report this error (H-8).
@@ -1602,6 +1634,7 @@ pub fn run() {
             is_main_window_focused,
             focus_main_window,
             take_pending_intents,
+            take_library_root_warnings,
             list_history,
             list_history_by_outcome,
             remove_history_entry,
@@ -1728,6 +1761,24 @@ mod tests {
         let mut core = test_core();
         let mut stored = None;
         adopt_library_root(&mut core, &mut stored, tmp.path().to_path_buf()).unwrap();
+        assert_eq!(stored.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn library_root_report_carries_the_corrupt_queue_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_dir = tmp.path().join(".phlegethon");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        std::fs::write(queue_dir.join("jobs.json"), b"{ not json").unwrap();
+
+        let mut core = test_core();
+        let mut stored = None;
+        let report = adopt_library_root(&mut core, &mut stored, tmp.path().to_path_buf()).unwrap();
+
+        assert!(
+            !report.warnings.is_empty(),
+            "the user must be told the queue was reset"
+        );
         assert_eq!(stored.as_deref(), Some(tmp.path()));
     }
 

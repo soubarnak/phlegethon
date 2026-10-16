@@ -9904,6 +9904,37 @@ fn on_launch_apply_outside_lock_downloads_without_holding_the_core_mutex() {
 }
 
 #[test]
+fn manual_apply_outside_lock_downloads_without_holding_the_core_mutex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    let (entered_tx, entered_rx) = crossbeam_channel::unbounded();
+    let (release_tx, release_rx) = crossbeam_channel::unbounded();
+    core.set_sidecar_update_source(Arc::new(BlockingSource {
+        inner: source,
+        entered: entered_tx,
+        release: release_rx,
+    }));
+    let core = Arc::new(Mutex::new(core));
+
+    let worker = {
+        let core = Arc::clone(&core);
+        std::thread::spawn(move || Core::apply_sidecar_updates_outside_lock(core))
+    };
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("download started");
+    assert!(
+        core.try_lock().is_ok(),
+        "Core mutex was held during the sidecar download"
+    );
+    drop(release_tx);
+    let result = worker.join().unwrap().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::Applied);
+}
+
+#[test]
 fn discard_detached_removes_the_row_before_the_files_go() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = make_core(Box::new(fake_http()));

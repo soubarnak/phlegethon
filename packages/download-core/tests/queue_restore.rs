@@ -249,6 +249,32 @@ fn m7_paused_job_with_a_missing_part_stays_paused() {
 }
 
 #[test]
+fn m7_paused_segmented_job_with_a_missing_part_stays_paused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let ids = root_with_jobs(&root, 1);
+    edit_queue(&root, |v| {
+        v["jobs"][0]["state"] = Value::from("paused");
+        v["jobs"][0]["bytes_received"] = Value::from(500);
+        v["jobs"][0]["segments"] = serde_json::json!([
+            {"start": 0, "end": 1000, "written": 500}
+        ]);
+    });
+
+    let mut core = new_core();
+    core.set_library_root(root).unwrap();
+
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == ids[0])
+        .unwrap();
+    assert_eq!(snap.status, "paused");
+    assert_eq!(snap.bytes_downloaded, 0);
+    assert!(snap.last_error.is_some(), "the user needs an explanation");
+}
+
+#[test]
 fn m7_downloading_job_with_a_missing_part_fails_with_a_message() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("library");
