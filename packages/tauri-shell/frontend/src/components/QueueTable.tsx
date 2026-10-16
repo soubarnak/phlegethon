@@ -37,6 +37,7 @@ import {
 } from "@/lib/queueView";
 import { displayProgressPercent, estimateEtaSeconds, formatBytes, formatEta, formatRate } from "@/lib/progress";
 import { errorHint, parseCoreError } from "@/lib/errors";
+import { NARROW_QUERY, useMediaQuery } from "@/state/useMediaQuery";
 
 export interface QueueActions {
   pause: (jobId: string) => void;
@@ -68,6 +69,9 @@ const headers = [
   { key: "size", header: t("queue.col.size") },
   { key: "actions", header: "" },
 ];
+
+/** Column key to cell class: lets the stylesheet size, hide or restack columns by width (UI-1). */
+const colClass = (key: string) => `ph-queue__col ph-queue__col--${key}`;
 
 type StatusTagType = "gray" | "blue" | "teal" | "green" | "red";
 
@@ -150,6 +154,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState(FILTERS[0]);
   const [sort, setSort] = useState(SORTS[0]);
+  const narrow = useMediaQuery(NARROW_QUERY);
 
   const visible = useMemo(
     () => applyQueueView(jobs, { search, stateFilter: filter.id, sort: sort.id }),
@@ -196,12 +201,22 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
           const selectedIds = selectedRows.map((r) => r.id);
           const selectedJobs = selectedIds.map((id) => byId.get(id)).filter((j): j is JobRow => !!j);
           const batchProps = getBatchActionProps();
+          // Below the narrow breakpoint the labelled buttons no longer fit the bar, so show icons with tooltips (UI-4).
+          const batchButton = (label: string) => (narrow ? { hasIconOnly: true, iconDescription: label } : {});
+          // ...and the summary shrinks to the bare count so Cancel still fits beside them.
+          const batchSummary = narrow
+            ? {
+                translateWithId: (id: string, values?: { totalSelected?: number }) =>
+                  id === "carbon.table.batch.cancel" ? t("queue.batch.cancel") : String(values?.totalSelected ?? ""),
+              }
+            : {};
           return (
             <TableContainer {...getTableContainerProps()} title={t("queue.title")} description={t("queue.description", { count: jobs.length })}>
               <TableToolbar {...getToolbarProps()} aria-label={t("queue.toolbar")}>
-                <TableBatchActions {...batchProps}>
+                <TableBatchActions {...batchProps} {...batchSummary}>
                   <TableBatchAction
                     renderIcon={Pause}
+                    {...batchButton(t("queue.action.pause"))}
                     tabIndex={batchProps.shouldShowBatchActions ? 0 : -1}
                     disabled={!selectedJobs.some((j) => j.status === "pending" || j.status === "downloading")}
                     onClick={() => actions.pauseMany(selectedJobs.filter((j) => j.status === "pending" || j.status === "downloading").map((j) => j.job_id))}
@@ -210,6 +225,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                   </TableBatchAction>
                   <TableBatchAction
                     renderIcon={Play}
+                    {...batchButton(t("queue.action.resume"))}
                     tabIndex={batchProps.shouldShowBatchActions ? 0 : -1}
                     disabled={!selectedJobs.some((j) => j.status === "paused")}
                     onClick={() => actions.resumeMany(selectedJobs.filter((j) => j.status === "paused").map((j) => j.job_id))}
@@ -218,6 +234,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                   </TableBatchAction>
                   <TableBatchAction
                     renderIcon={Renew}
+                    {...batchButton(t("queue.action.retry"))}
                     tabIndex={batchProps.shouldShowBatchActions ? 0 : -1}
                     disabled={!selectedJobs.some((j) => j.status === "failed")}
                     onClick={() => actions.retryMany(selectedJobs.filter((j) => j.status === "failed").map((j) => j.job_id))}
@@ -226,6 +243,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                   </TableBatchAction>
                   <TableBatchAction
                     renderIcon={TrashCan}
+                    {...batchButton(t("queue.action.discard"))}
                     tabIndex={batchProps.shouldShowBatchActions ? 0 : -1}
                     onClick={() => actions.discard(selectedIds)}
                   >
@@ -276,7 +294,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                       {tableHeaders.map((header) => {
                         const { key, ...headerProps } = getHeaderProps({ header });
                         return (
-                          <TableHeader key={key} {...headerProps}>
+                          <TableHeader key={key} {...headerProps} className={colClass(header.key)}>
                             {header.header}
                           </TableHeader>
                         );
@@ -309,7 +327,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                       return (
                         <TableRow key={key} {...rowProps} data-testid={`queue-row-${job.job_id}`}>
                           <TableSelectRow {...getSelectionProps({ row })} />
-                          <TableCell>
+                          <TableCell className={colClass("title")}>
                             <div className="ph-queue__title">
                               <span className="ph-queue__title-text" title={job.title}>
                                 {job.title}
@@ -322,7 +340,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                               )}
                             </div>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className={colClass("status")}>
                             <div className="ph-queue__tags">
                               <Tag size="sm" type={STATUS_TAG[job.status]} data-testid="status-tag">
                                 {statusLabel(job.status)}
@@ -330,7 +348,7 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                               {tierTag(job.extraction_tier)}
                             </div>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className={colClass("progress")}>
                             <div className="ph-queue__progress">
                               <ProgressBar
                                 size="small"
@@ -343,8 +361,8 @@ export function QueueTable({ jobs, actions, hasAnyJobs }: QueueTableProps) {
                               />
                             </div>
                           </TableCell>
-                          <TableCell>{job.total_bytes != null ? formatBytes(job.total_bytes) : "—"}</TableCell>
-                          <TableCell>
+                          <TableCell className={colClass("size")}>{job.total_bytes != null ? formatBytes(job.total_bytes) : "—"}</TableCell>
+                          <TableCell className={colClass("actions")}>
                             <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.25rem" }}>
                               {(job.status === "pending" || job.status === "downloading") && (
                                 <Button kind="ghost" size="sm" hasIconOnly renderIcon={Pause} iconDescription={t("queue.action.pause")} onClick={() => actions.pause(job.job_id)} />

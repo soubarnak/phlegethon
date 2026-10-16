@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { QueueTable, type QueueActions } from "./QueueTable";
 import { job } from "@/test/mockApi";
+import { NARROW_QUERY } from "@/state/useMediaQuery";
 import type { JobRow } from "@/state/useJobs";
 
 function row(overrides: Partial<JobRow> & { job_id: string }): JobRow {
@@ -101,5 +102,44 @@ describe("QueueTable", () => {
     await user.click(screen.getByRole("checkbox", { name: /select all/i }));
     await user.click(screen.getByRole("button", { name: "Discard" }));
     expect(a.discard).toHaveBeenCalledWith(expect.arrayContaining(["dl", "pa", "fa", "ok", "gx"]));
+  });
+
+  describe("batch actions below the narrow breakpoint (UI-4)", () => {
+    function narrowViewport(narrow: boolean) {
+      vi.spyOn(window, "matchMedia").mockImplementation(
+        (query: string) =>
+          ({
+            matches: narrow && query === NARROW_QUERY,
+            media: query,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+
+    it("shows labelled buttons and the full selection count when wide", async () => {
+      narrowViewport(false);
+      render(<QueueTable jobs={jobs} actions={actions()} hasAnyJobs />);
+      await userEvent.setup().click(screen.getByRole("checkbox", { name: /select all/i }));
+      const bar = within(document.querySelector<HTMLElement>(".cds--batch-actions")!);
+      expect(bar.getByRole("button", { name: "Discard" })).not.toHaveClass("cds--btn--icon-only");
+      expect(screen.getByText("5 items selected")).toBeInTheDocument();
+    });
+
+    it("collapses to icon-only buttons that keep their names and actions", async () => {
+      narrowViewport(true);
+      const a = actions();
+      render(<QueueTable jobs={jobs} actions={a} hasAnyJobs />);
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("checkbox", { name: /select all/i }));
+      const bar = within(document.querySelector<HTMLElement>(".cds--batch-actions")!);
+      for (const name of ["Pause", "Resume", "Retry", "Discard"]) {
+        expect(bar.getByRole("button", { name })).toHaveClass("cds--btn--icon-only");
+      }
+      expect(screen.queryByText("5 items selected")).not.toBeInTheDocument();
+      expect(bar.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+      await user.click(bar.getByRole("button", { name: "Discard" }));
+      expect(a.discard).toHaveBeenCalledWith(expect.arrayContaining(["dl", "pa", "fa", "ok", "gx"]));
+    });
   });
 });
