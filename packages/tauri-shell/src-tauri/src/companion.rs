@@ -104,15 +104,7 @@ pub(crate) fn companion_result_from_outcome(
 }
 
 fn ensure_library_root(state: &AppState) -> Result<(), String> {
-    let mut stored = state.library_root.lock().map_err(|e| e.to_string())?;
-    if stored.is_some() {
-        return Ok(());
-    }
-    let default_root = crate::default_library_root();
-    let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.set_library_root(default_root.clone())?;
-    *stored = Some(default_root);
-    Ok(())
+    crate::ensure_library_root(state).map(|_| ())
 }
 
 #[cfg(test)]
