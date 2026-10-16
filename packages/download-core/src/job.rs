@@ -5,7 +5,7 @@ use crate::extractor::ExtractionTier;
 use crate::integrity::ExpectedHash;
 use crate::media_extras::MediaExtrasOptions;
 use crate::mirror_set::MirrorSet;
-use crate::storage::{PersistedJob, PersistedJobState};
+use crate::storage::{PersistedJob, PersistedJobState, Segment};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -135,6 +135,10 @@ pub struct Job {
     /// The server answered a Range request with the whole body, so this job
     /// must use a single plain connection.
     range_ignored: bool,
+    /// Segment table of a Segmented Transfer (empty for single-connection jobs).
+    /// While a transfer runs, `segment_counters` hold the live `written` values.
+    segments: Vec<Segment>,
+    segment_counters: Vec<Arc<AtomicU64>>,
 }
 
 impl Job {
@@ -212,6 +216,8 @@ impl Job {
             etag: None,
             last_modified: None,
             range_ignored: false,
+            segments: Vec::new(),
+            segment_counters: Vec::new(),
         }
     }
 
@@ -247,6 +253,8 @@ impl Job {
             etag: persisted.etag,
             last_modified: persisted.last_modified,
             range_ignored: persisted.range_ignored,
+            segments: persisted.segments,
+            segment_counters: Vec::new(),
         };
         if job.filename.is_empty() {
             job.filename = filename_from_url(job.url());
@@ -273,7 +281,11 @@ impl Job {
             mirror_index: self.mirrors.current_index(),
             state: self.persisted_state(),
             destination: self.destination.clone(),
-            bytes_received: self.bytes_received,
+            bytes_received: if self.segments.is_empty() {
+                self.bytes_received
+            } else {
+                self.segments_written()
+            },
             bandwidth_cap: self.bandwidth_cap,
             source: self.source.clone(),
             extractor_format: self.extractor_format.clone(),
@@ -291,7 +303,52 @@ impl Job {
             etag: self.etag.clone(),
             last_modified: self.last_modified.clone(),
             range_ignored: self.range_ignored,
+            segments: self.segment_snapshot(),
         }
+    }
+
+    /// The segment table, with live counters applied while a transfer runs.
+    pub fn segment_snapshot(&self) -> Vec<Segment> {
+        let mut table = self.segments.clone();
+        for (seg, counter) in table.iter_mut().zip(&self.segment_counters) {
+            seg.written = counter.load(Ordering::Acquire).min(seg.len());
+        }
+        table
+    }
+
+    /// True while a transfer is advancing this job's segment counters.
+    pub fn has_live_segments(&self) -> bool {
+        !self.segment_counters.is_empty()
+    }
+
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+
+    /// Sum of the bytes written across all segments (live counters included).
+    pub fn segments_written(&self) -> u64 {
+        self.segment_snapshot().iter().map(|s| s.written).sum()
+    }
+
+    /// Install a segment table and the live counters a transfer will advance.
+    pub fn begin_segments(&mut self, table: Vec<Segment>) -> Vec<Arc<AtomicU64>> {
+        self.segment_counters = table
+            .iter()
+            .map(|s| Arc::new(AtomicU64::new(s.written)))
+            .collect();
+        self.segments = table;
+        self.segment_counters.clone()
+    }
+
+    /// Fold the live counters into the table and stop tracking them.
+    pub fn freeze_segments(&mut self) {
+        self.segments = self.segment_snapshot();
+        self.segment_counters.clear();
+    }
+
+    pub fn clear_segments(&mut self) {
+        self.segments.clear();
+        self.segment_counters.clear();
     }
 
     /// Validator for `If-Range` on resume: the `ETag`, else `Last-Modified`.
@@ -618,6 +675,7 @@ impl Job {
                 self.clear_pause_requested();
                 self.state = JobState::Pending;
                 self.bytes_received = 0;
+                self.clear_segments();
                 self.live_downloaded.store(0, Ordering::Release);
                 self.total_bytes = None;
                 self.mirrors.reset();
