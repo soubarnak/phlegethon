@@ -571,6 +571,16 @@ enum UnlockedTransferOutcome {
         stop: Arc<AtomicBool>,
         result: Result<ExtractorDownloadOutcome, String>,
     },
+    /// The transfer code panicked; the job is failed so it cannot stay active.
+    Panicked { job_id: String, message: String },
+}
+
+/// Answers to the HEAD requests planning needs, fetched without the Core
+/// lock. Planning uses them only while the job still points at `url`.
+struct PlanningHead {
+    url: String,
+    supports_range: Result<bool, String>,
+    file_size: Result<u64, String>,
 }
 
 enum SegmentedPlanning {
@@ -602,13 +612,56 @@ impl UnlockedTransferOutcome {
         match self {
             Self::Fetched { job_id, .. }
             | Self::Segmented { job_id, .. }
-            | Self::Extracted { job_id, .. } => job_id,
+            | Self::Extracted { job_id, .. }
+            | Self::Panicked { job_id, .. } => job_id,
         }
     }
 }
 
 impl UnlockedTransferPlan {
+    fn job_id(&self) -> &str {
+        match self {
+            Self::SingleFetch { job_id, .. }
+            | Self::Segmented { job_id, .. }
+            | Self::ExtractorFetch { job_id, .. } => job_id,
+        }
+    }
+
+    fn transfer_active_flag(&self) -> Arc<AtomicBool> {
+        match self {
+            Self::SingleFetch {
+                transfer_active, ..
+            }
+            | Self::Segmented {
+                transfer_active, ..
+            }
+            | Self::ExtractorFetch {
+                transfer_active, ..
+            } => transfer_active.clone(),
+        }
+    }
+
+    /// Run the transfer. A panic inside it must not leave the job marked
+    /// active, so it is caught, the flag is cleared, and the job is reported
+    /// as failed through [`UnlockedTransferOutcome::Panicked`].
     fn run(self) -> UnlockedTransferOutcome {
+        let job_id = self.job_id().to_string();
+        let active = self.transfer_active_flag();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_inner())) {
+            Ok(outcome) => outcome,
+            Err(payload) => {
+                active.store(false, Ordering::Release);
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|m| m.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                UnlockedTransferOutcome::Panicked { job_id, message }
+            }
+        }
+    }
+
+    fn run_inner(self) -> UnlockedTransferOutcome {
         match self {
             Self::SingleFetch {
                 job_id,
@@ -859,7 +912,14 @@ fn run_segmented_fetch(
                     })
                 }));
             }
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(SegmentError::Failed("segment worker panicked".to_string()))
+                    })
+                })
+                .collect()
         });
 
     let mut done = SegmentedDone {
@@ -1164,10 +1224,30 @@ impl Core {
         self.jobs.iter().position(|j| j.id() == job_id)
     }
 
-    fn resolve_known_total(&self, job_index: usize, url: &str) -> Option<u64> {
+    fn resolve_known_total(
+        &self,
+        job_index: usize,
+        url: &str,
+        head: Option<&PlanningHead>,
+    ) -> Option<u64> {
         self.jobs[job_index]
             .total_bytes()
-            .or_else(|| self.http.file_size(url).ok().filter(|&n| n > 0))
+            .or_else(|| self.head_file_size(url, head).ok().filter(|&n| n > 0))
+    }
+
+    /// `file_size` from the pre-fetched HEAD when it is for `url`, else live.
+    fn head_file_size(&self, url: &str, head: Option<&PlanningHead>) -> Result<u64, String> {
+        match head {
+            Some(h) if h.url == url => h.file_size.clone(),
+            _ => self.http.file_size(url),
+        }
+    }
+
+    fn head_supports_range(&self, url: &str, head: Option<&PlanningHead>) -> Result<bool, String> {
+        match head {
+            Some(h) if h.url == url => h.supports_range.clone(),
+            _ => self.http.supports_range(url),
+        }
     }
 
     fn check_disk_space_before_start(
@@ -1227,8 +1307,9 @@ impl Core {
         destination: &Path,
         url: &str,
         bytes_received: u64,
+        head: Option<&PlanningHead>,
     ) -> Result<bool, String> {
-        let Some(total) = self.resolve_known_total(job_index, url) else {
+        let Some(total) = self.resolve_known_total(job_index, url, head) else {
             return Ok(true);
         };
         if let Err(err) = self.check_disk_space_before_start(destination, total, bytes_received) {
@@ -2544,6 +2625,9 @@ impl Core {
                 if job.transfer_active().load(Ordering::Acquire) {
                     continue;
                 }
+                // Reserve the slot under the lock, so the next round counts
+                // this job before its thread has had time to plan.
+                job.transfer_active().store(true, Ordering::Release);
                 job_ids.push(job.id().to_string());
                 if job_ids.len() >= slots {
                     break;
@@ -2585,15 +2669,19 @@ impl Core {
     }
 
     /// Run a job transfer, releasing the Core mutex during blocking body I/O.
+    ///
+    /// The caller has claimed the job's Active Job Limit slot (its
+    /// `transfer_active` flag) under the lock; every exit releases it.
     fn run_transfer_outside_lock(
         core: Arc<Mutex<Self>>,
         job_id: String,
         global_bucket: Option<SharedTokenBucket>,
     ) -> Result<(), String> {
         loop {
+            let head = Self::fetch_head_unlocked(&core, &job_id)?;
             let plan = {
                 let mut core = core.lock().map_err(|e| e.to_string())?;
-                core.plan_unlocked_transfer(&job_id, &global_bucket)?
+                core.plan_unlocked_transfer(&job_id, &global_bucket, true, head.as_ref())?
             };
             let Some(plan) = plan else {
                 return Ok(());
@@ -2603,12 +2691,60 @@ impl Core {
 
             let retry = {
                 let mut core = core.lock().map_err(|e| e.to_string())?;
-                core.finish_unlocked_transfer(outcome)?
+                let retry = core.finish_unlocked_transfer(outcome)?;
+                if retry {
+                    // Keep the slot across the failover replan.
+                    if let Some(i) = core.job_index(&job_id) {
+                        core.jobs[i]
+                            .transfer_active()
+                            .store(true, Ordering::Release);
+                    }
+                }
+                retry
             };
             if !retry {
                 return Ok(());
             }
         }
+    }
+
+    /// Ask the origin the HEAD questions planning needs, without the Core
+    /// lock: a slow server must not freeze Pause, Discard and queue reads.
+    /// Planning re-validates the answers against the job under the lock.
+    fn fetch_head_unlocked(
+        core: &Arc<Mutex<Self>>,
+        job_id: &str,
+    ) -> Result<Option<PlanningHead>, String> {
+        let (http, url, fresh) = {
+            let core = core.lock().map_err(|e| e.to_string())?;
+            let Some(i) = core.job_index(job_id) else {
+                return Ok(None);
+            };
+            let job = &core.jobs[i];
+            let needs_size = job.is_pending()
+                && job.extractor_format().is_none()
+                && job.segments().is_empty()
+                && (job.total_bytes().is_none() || job.bytes_received() == 0);
+            if !needs_size {
+                return Ok(None);
+            }
+            (
+                core.http.clone(),
+                job.url().to_string(),
+                job.bytes_received() == 0,
+            )
+        };
+        let supports_range = if fresh {
+            http.supports_range(&url)
+        } else {
+            Err("not asked for a resume".to_string())
+        };
+        let file_size = http.file_size(&url);
+        Ok(Some(PlanningHead {
+            url,
+            supports_range,
+            file_size,
+        }))
     }
 
     /// Prepare a transfer that can run without holding the Core mutex.
@@ -2617,10 +2753,34 @@ impl Core {
     /// Toolchain download) is planned under the lock and executed outside it.
     /// Returns `None` when the job is not pending, is already transferring, or
     /// was finalized Failed during planning (disk space, no extractor resume).
+    ///
+    /// `claimed` means the caller already set the job's `transfer_active` flag
+    /// under the lock to reserve an Active Job Limit slot; any outcome other
+    /// than a plan releases that reservation.
     fn plan_unlocked_transfer(
         &mut self,
         job_id: &str,
         global_bucket: &Option<SharedTokenBucket>,
+        claimed: bool,
+        head: Option<&PlanningHead>,
+    ) -> Result<Option<UnlockedTransferPlan>, String> {
+        let planned = self.plan_unlocked_transfer_inner(job_id, global_bucket, claimed, head);
+        if claimed && !matches!(planned, Ok(Some(_))) {
+            if let Some(i) = self.job_index(job_id) {
+                self.jobs[i]
+                    .transfer_active()
+                    .store(false, Ordering::Release);
+            }
+        }
+        planned
+    }
+
+    fn plan_unlocked_transfer_inner(
+        &mut self,
+        job_id: &str,
+        global_bucket: &Option<SharedTokenBucket>,
+        claimed: bool,
+        head: Option<&PlanningHead>,
     ) -> Result<Option<UnlockedTransferPlan>, String> {
         let i = self
             .jobs
@@ -2630,7 +2790,15 @@ impl Core {
         if !self.jobs[i].is_pending() {
             return Ok(None);
         }
-        if self.jobs[i].transfer_active().load(Ordering::Acquire) {
+        if !claimed && self.jobs[i].transfer_active().load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        // Pause or Discard arrived after the job was picked: honour it now
+        // instead of starting a transfer that would stop at its first write.
+        if self.jobs[i].pause_requested().load(Ordering::Acquire)
+            || self.jobs[i].is_discard_requested()
+        {
+            self.finalize_stop_after_transfer(job_id)?;
             return Ok(None);
         }
 
@@ -2645,7 +2813,7 @@ impl Core {
             spec
         });
 
-        if !self.guard_disk_space_for_transfer(i, job_id, &dest, &url, bytes_received)? {
+        if !self.guard_disk_space_for_transfer(i, job_id, &dest, &url, bytes_received, head)? {
             return Ok(None);
         }
 
@@ -2709,13 +2877,14 @@ impl Core {
             &filename,
             &job_bucket,
             global_bucket,
+            head,
         )? {
             SegmentedPlanning::NotApplicable => {}
             SegmentedPlanning::Plan(plan) => return Ok(Some(*plan)),
             SegmentedPlanning::Finalized => return Ok(None),
         }
 
-        let known_total = self.http.file_size(&url).ok().filter(|&n| n > 0);
+        let known_total = self.head_file_size(&url, head).ok().filter(|&n| n > 0);
         if let Some(total) = known_total {
             self.jobs[i].set_total_bytes(Some(total));
         }
@@ -2815,6 +2984,7 @@ impl Core {
         filename: &str,
         job_bucket: &Option<SharedTokenBucket>,
         global_bucket: &Option<SharedTokenBucket>,
+        head: Option<&PlanningHead>,
     ) -> Result<SegmentedPlanning, String> {
         let file_path = dest.join(filename);
         let part_path = Self::part_path_for(&file_path);
@@ -2839,11 +3009,11 @@ impl Core {
             if self.jobs[i].bytes_received() != 0
                 || self.jobs[i].range_ignored()
                 || rate_limited
-                || !matches!(self.http.supports_range(url), Ok(true))
+                || !matches!(self.head_supports_range(url, head), Ok(true))
             {
                 return Ok(SegmentedPlanning::NotApplicable);
             }
-            let total = match self.http.file_size(url) {
+            let total = match self.head_file_size(url, head) {
                 Ok(0) => {
                     self.finalize_failed_job(
                         job_id,
@@ -3095,6 +3265,19 @@ impl Core {
                     }
                 }
             }
+            UnlockedTransferOutcome::Panicked { message, .. } => {
+                self.jobs[job_index].freeze_segments();
+                let on_disk = self.jobs[job_index].segments_written();
+                if on_disk > 0 {
+                    self.jobs[job_index].set_bytes_received(on_disk);
+                }
+                self.finalize_failed_job(
+                    job_id,
+                    job_index,
+                    format!("transfer stopped unexpectedly: {message}"),
+                )?;
+                Ok(false)
+            }
             UnlockedTransferOutcome::Extracted {
                 dest,
                 media_extras,
@@ -3258,7 +3441,8 @@ impl Core {
     ) -> Result<(), String> {
         let job_id = self.jobs[i].id().to_string();
         loop {
-            let Some(plan) = self.plan_unlocked_transfer(&job_id, global_bucket)? else {
+            let Some(plan) = self.plan_unlocked_transfer(&job_id, global_bucket, false, None)?
+            else {
                 return Ok(());
             };
             let outcome = plan.run();

@@ -8763,3 +8763,234 @@ fn complete_segment_table_left_by_a_crash_is_finished_without_a_request() {
     assert_eq!(completed_file(&root, &job_id), body);
     assert!(http.requests().is_empty(), "nothing is left to fetch");
 }
+
+// ---------------------------------------------------------------------------
+// Regression: transfer planning and thread safety (H-6, M-3, M-13, H-9)
+// ---------------------------------------------------------------------------
+
+/// Origin whose behaviour is switched per test: panics, slow HEAD requests,
+/// an unknown size, and counts of the fetches that ran.
+#[derive(Clone)]
+struct PlanningHttp {
+    body: Vec<u8>,
+    ranges: bool,
+    size_known: bool,
+    head_delay: std::time::Duration,
+    /// Panic inside `fetch`; only for ranged fetches when `Some(true)`.
+    panic_on_fetch: Option<bool>,
+    fetches: Arc<std::sync::atomic::AtomicUsize>,
+    ranged_fetches: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PlanningHttp {
+    fn new(body: &[u8]) -> Self {
+        Self {
+            body: body.to_vec(),
+            ranges: false,
+            size_known: true,
+            head_delay: std::time::Duration::ZERO,
+            panic_on_fetch: None,
+            fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ranged_fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn fetch_count(&self) -> usize {
+        self.fetches.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl HttpBackend for PlanningHttp {
+    fn fetch(
+        &self,
+        _url: &str,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<FetchResult, String> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if range.is_some() {
+            self.ranged_fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(only_ranged) = self.panic_on_fetch {
+            if !only_ranged || range.is_some() {
+                panic!("fake origin blew up");
+            }
+        }
+        let total = self.body.len() as u64;
+        let data = match range {
+            Some(r) => &self.body[r.start.min(total) as usize..r.end.min(total) as usize],
+            None => &self.body[..],
+        };
+        write_fetch_to_sink(sink, data, total)
+    }
+
+    fn supports_range(&self, _url: &str) -> Result<bool, String> {
+        std::thread::sleep(self.head_delay);
+        Ok(self.ranges)
+    }
+
+    fn file_size(&self, _url: &str) -> Result<u64, String> {
+        std::thread::sleep(self.head_delay);
+        if self.size_known {
+            Ok(self.body.len() as u64)
+        } else {
+            Err("no Content-Length".to_string())
+        }
+    }
+}
+
+#[test]
+fn panic_in_a_single_fetch_fails_the_job_and_frees_its_slot() {
+    let mut http = PlanningHttp::new(&object_body(1));
+    http.panic_on_fetch = Some(false);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/panic.bin");
+    let signals = core.job_signals();
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+
+    wait_for_status(&core, &job_id, "failed", std::time::Duration::from_secs(5));
+    assert!(
+        !signals.is_transfer_active(&job_id),
+        "a panicked transfer must not keep its Active Job Limit slot"
+    );
+}
+
+#[test]
+fn panic_in_a_segment_worker_fails_the_job_instead_of_hanging_it() {
+    let mut http = PlanningHttp::new(&object_body(2));
+    http.ranges = true;
+    http.panic_on_fetch = Some(true);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/panic.bin");
+    let signals = core.job_signals();
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+
+    wait_for_status(&core, &job_id, "failed", std::time::Duration::from_secs(5));
+    assert!(!signals.is_transfer_active(&job_id));
+}
+
+#[test]
+fn unknown_size_falls_back_to_a_single_fetch_even_when_ranges_are_advertised() {
+    let body = object_body(3);
+    let mut http = PlanningHttp::new(&body);
+    http.ranges = true;
+    http.size_known = false;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(root.clone()).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/object.bin");
+
+    let events = run_until_idle(&mut core, &rx);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobCompleted { .. })),
+        "a single GET works without a Content-Length, got {events:?}"
+    );
+    assert_eq!(
+        std::fs::read(root.join("jobs").join(&job_id).join("object.bin")).unwrap(),
+        body
+    );
+    assert_eq!(http.fetch_count(), 1);
+    assert_eq!(
+        http.ranged_fetches
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[test]
+fn pause_requested_before_planning_starts_no_transfer() {
+    let http = PlanningHttp::new(&object_body(4));
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, rx) = make_core(Box::new(http.clone()));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/object.bin");
+    // Pause lands after the job was picked but before its transfer is planned.
+    core.job_signals()
+        .request_pause(&job_id)
+        .unwrap()
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let events = run_until_idle(&mut core, &rx);
+
+    assert_eq!(http.fetch_count(), 0, "no request for a paused job");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::JobPaused { .. })),
+        "the job ends Paused, got {events:?}"
+    );
+}
+
+#[test]
+fn dispatch_claims_active_job_slots_before_the_transfer_threads_plan() {
+    let mut http = PlanningHttp::new(&object_body(5));
+    // Slow HEAD keeps the transfer threads from planning for a while.
+    http.head_delay = std::time::Duration::from_millis(300);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    core.set_active_job_limit(2).unwrap();
+    for n in 0..3 {
+        enqueue_direct_job_id(&mut core, &format!("https://example.com/{n}.bin"));
+    }
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+    Core::dispatch_pending(core.clone()).unwrap();
+
+    let downloading = core
+        .lock()
+        .unwrap()
+        .list_job_snapshots()
+        .iter()
+        .filter(|j| j.status == "downloading")
+        .count();
+    assert_eq!(
+        downloading, 2,
+        "exactly the Active Job Limit is reserved, however many rounds run"
+    );
+}
+
+#[test]
+fn slow_head_requests_do_not_hold_the_core_lock() {
+    let mut http = PlanningHttp::new(&object_body(6));
+    http.ranges = true;
+    http.head_delay = std::time::Duration::from_millis(600);
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(http));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/object.bin");
+
+    let core = Arc::new(Mutex::new(core));
+    Core::dispatch_pending(core.clone()).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let started = std::time::Instant::now();
+    let snapshots = core.lock().unwrap().list_job_snapshots();
+    let waited = started.elapsed();
+    assert_eq!(snapshots.len(), 1);
+    assert!(
+        waited < std::time::Duration::from_millis(250),
+        "planning held the Core lock for {waited:?} during HEAD requests"
+    );
+    wait_for_status(
+        &core,
+        &job_id,
+        "completed",
+        std::time::Duration::from_secs(10),
+    );
+}
