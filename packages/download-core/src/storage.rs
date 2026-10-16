@@ -1,7 +1,7 @@
 //! Storage — Library Root queue persistence and load reconciliation.
 //!
 //! Queue state lives at `{library_root}/.phlegethon/jobs.json`.
-//! Writes are atomic (temp file + rename).
+//! Writes are atomic and durable (temp file, fsync, rename, directory fsync).
 
 use crate::cookie_channel::CookieChannel;
 use crate::extractor::{ExtractionTier, ProbeTierSettings};
@@ -353,11 +353,9 @@ pub fn save_queue(library_root: &Path, queue: &PersistedQueue) -> Result<(), Str
     fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
     let path = dir.join(JOBS_FILENAME);
-    let tmp = dir.join(".jobs.json.tmp");
     let raw = serde_json::to_string_pretty(queue).map_err(|e| format!("serialize queue: {e}"))?;
-    fs::write(&tmp, &raw).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, &path)
-        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    crate::fsutil::write_atomic(&path, raw.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
 

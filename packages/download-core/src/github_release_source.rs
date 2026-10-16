@@ -261,6 +261,8 @@ impl SidecarUpdateSource for GitHubReleaseUpdateSource {
                 .map_err(|e| format!("download {name} {version}: {e}"))?;
             file.flush()
                 .map_err(|e| format!("flush {}: {e}", tmp.display()))?;
+            file.sync_all()
+                .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
         }
         if let Some(expected) = &entry.sha256 {
             let actual = sha256_file(&tmp)?;
@@ -271,7 +273,7 @@ impl SidecarUpdateSource for GitHubReleaseUpdateSource {
                 ));
             }
         }
-        std::fs::rename(&tmp, &dest)
+        crate::fsutil::rename_durable(&tmp, &dest)
             .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), dest.display()))?;
         Ok(dest)
     }

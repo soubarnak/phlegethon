@@ -82,16 +82,14 @@ impl DownloadArchive {
         fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
         let path = dir.join(ARCHIVE_FILENAME);
-        let tmp = dir.join(".archive.json.tmp");
         let persisted = PersistedArchive {
             version: ARCHIVE_VERSION,
             entries: self.entries.clone(),
         };
         let raw = serde_json::to_string_pretty(&persisted)
             .map_err(|e| format!("serialize archive: {e}"))?;
-        fs::write(&tmp, &raw).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        fs::rename(&tmp, &path)
-            .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+        crate::fsutil::write_atomic(&path, raw.as_bytes())
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
         Ok(())
     }
 

@@ -14,6 +14,7 @@ mod download_archive;
 mod event;
 mod extractor;
 mod filename_template;
+mod fsutil;
 pub mod github_release_source;
 mod http;
 mod integrity;
