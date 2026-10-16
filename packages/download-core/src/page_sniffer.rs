@@ -736,7 +736,9 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
     }
 }
 
-fn percent_decode(s: &str) -> String {
+/// Decode `%XX` escapes; invalid escapes are kept literally and invalid UTF-8
+/// is replaced.
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

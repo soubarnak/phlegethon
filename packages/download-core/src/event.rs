@@ -43,6 +43,9 @@ pub enum CoreEvent {
     JobRetried { job_id: String },
     /// A job was discarded (removed from the queue) by the user.
     JobDiscarded { job_id: String },
+    /// The queue order changed (`Core::reorder_job`). `from_index` and
+    /// `to_index` are the queue positions passed to the call.
+    JobsReordered { from_index: usize, to_index: usize },
     /// A job's current mirror failed and the job is trying the next.
     JobMirrorFailover {
         job_id: String,

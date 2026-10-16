@@ -60,7 +60,8 @@ pub use extractor::{
 };
 pub use filename_template::{
     media_item_raw_id, prepare_extractor_output, render_template, resolve_collision,
-    sanitize_filename, TemplateVars, DEFAULT_FILENAME_TEMPLATE,
+    sanitize_filename, validate_filename_template, TemplateVars, DEFAULT_FILENAME_TEMPLATE,
+    MAX_FILENAME_BYTES,
 };
 pub use github_release_source::{
     select_asset as select_ytdlp_release_asset, GitHubReleaseUpdateSource,
@@ -88,7 +89,7 @@ pub use sidecar_updates::{
     SidecarUpdateCheckResult, SidecarUpdateSettings, SidecarUpdateSource, ToolchainManifest,
     UpdateCatalog, TOOLCHAIN_MANIFEST_FILENAME, UPDATE_CATALOG_FILENAME,
 };
-pub use url_input::{normalize_url, split_urls};
+pub use url_input::{normalize_url, split_urls, split_urls_report, SplitUrlsReport};
 
 use bandwidth::{shared_token_bucket, SharedTokenBucket};
 use std::collections::HashMap;
@@ -203,8 +204,10 @@ pub struct Core {
     sniffer: Arc<dyn PageSniffer>,
     /// Settings-backed fallback-chain policy.
     probe_tier_settings: ProbeTierSettings,
-    /// Cancel flags for in-flight probes, keyed by normalized URL.
-    probe_cancels: HashMap<String, Arc<AtomicBool>>,
+    /// Cancel flags for in-flight probes, keyed by probe id, with the normalized
+    /// URL each probe runs against (several probes of one URL can be in flight).
+    probe_cancels: HashMap<u64, (String, Arc<AtomicBool>)>,
+    next_probe_id: u64,
     /// Cookie sessions handed in with an enqueue that still needs a probe,
     /// keyed by normalized URL. Moved onto the jobs at confirm.
     probe_cookie_sessions: HashMap<String, CookieChannel>,
@@ -256,6 +259,8 @@ pub struct ProbePlan {
     proxy: ProxySettings,
     settings: ProbeTierSettings,
     cancel: Arc<AtomicBool>,
+    /// Unique per planned probe, so concurrent probes of one URL stay distinct.
+    id: u64,
 }
 
 impl ProbePlan {
@@ -279,6 +284,7 @@ impl ProbePlan {
             proxy,
             settings,
             cancel: Arc::new(AtomicBool::new(false)),
+            id: 0,
         })
     }
 
@@ -1091,6 +1097,7 @@ impl Core {
             sniffer,
             probe_tier_settings: ProbeTierSettings::default(),
             probe_cancels: HashMap::new(),
+            next_probe_id: 0,
             probe_cookie_sessions: HashMap::new(),
         };
         (core, rx)
@@ -1896,7 +1903,12 @@ impl Core {
         }
         let job = self.jobs.remove(from_index);
         self.jobs.insert(to_index, job);
+        // Persist before announcing, so a restart never contradicts the event.
         self.persist_queue_now()?;
+        let _ = self.event_tx.send(CoreEvent::JobsReordered {
+            from_index,
+            to_index,
+        });
         Ok(())
     }
 
@@ -2210,11 +2222,8 @@ impl Core {
 
     /// Update the Filename Template and persist it.
     pub fn set_filename_template(&mut self, template: String) -> Result<(), String> {
-        let trimmed = template.trim();
-        if trimmed.is_empty() {
-            return Err("Filename Template cannot be empty".to_string());
-        }
-        self.filename_template = trimmed.to_string();
+        validate_filename_template(&template)?;
+        self.filename_template = template.trim().to_string();
         self.persist_queue_now()
     }
 
@@ -2390,7 +2399,7 @@ impl Core {
     pub fn probe(&mut self, url: &str) -> Result<ProbeResult, String> {
         let plan = self.plan_probe(url)?;
         let outcome = plan.run();
-        self.finish_probe(plan.url(), outcome)
+        self.finish_probe(&plan, outcome)
     }
 
     /// Probe with the Core mutex released during the network work.
@@ -2401,7 +2410,7 @@ impl Core {
         };
         let outcome = plan.run();
         let mut guard = core.lock().map_err(|e| e.to_string())?;
-        guard.finish_probe(plan.url(), outcome)
+        guard.finish_probe(&plan, outcome)
     }
 
     /// Capture everything a probe needs (settings, toolchain, cancel flag).
@@ -2409,7 +2418,7 @@ impl Core {
         let cookies = normalize_url(url)
             .and_then(|key| self.probe_cookie_sessions.get(&key).cloned())
             .unwrap_or_else(|| self.cookie_channel.clone());
-        let plan = ProbePlan::standalone(
+        let mut plan = ProbePlan::standalone(
             url,
             Arc::clone(&self.extractor),
             Arc::clone(&self.sniffer),
@@ -2417,18 +2426,26 @@ impl Core {
             cookies,
             self.proxy_settings.clone(),
         )?;
+        self.next_probe_id += 1;
+        plan.id = self.next_probe_id;
         self.probe_cancels
-            .insert(plan.url().to_string(), plan.cancel_flag());
+            .insert(plan.id, (plan.url().to_string(), plan.cancel_flag()));
         Ok(plan)
     }
 
     /// Record a probe outcome: archive marks, pending store, events.
+    ///
+    /// Only this plan's own cancel flag is released, so another probe of the
+    /// same URL that is still running keeps its flag. A failed probe also drops
+    /// any result stored for the URL by an earlier probe, so the sheet the user
+    /// is looking at cannot be confirmed from a stale result.
     pub fn finish_probe(
         &mut self,
-        url: &str,
+        plan: &ProbePlan,
         outcome: Result<ProbeResult, String>,
     ) -> Result<ProbeResult, String> {
-        self.probe_cancels.remove(url);
+        self.probe_cancels.remove(&plan.id);
+        let url = plan.url();
         match outcome {
             Ok(mut result) => {
                 self.mark_archived_probe_items(&mut result.items);
@@ -2443,6 +2460,7 @@ impl Core {
                 Ok(result)
             }
             Err(err) => {
+                self.pending_probes.remove(url);
                 self.event_tx
                     .send(CoreEvent::ProbeFailed {
                         url: url.to_string(),
@@ -2459,13 +2477,14 @@ impl Core {
         let Some(key) = normalize_url(url) else {
             return false;
         };
-        match self.probe_cancels.get(&key) {
-            Some(flag) => {
+        let mut found = false;
+        for (_, (probe_url, flag)) in self.probe_cancels.iter() {
+            if *probe_url == key {
                 flag.store(true, Ordering::Release);
-                true
+                found = true;
             }
-            None => false,
         }
+        found
     }
 
     /// Current fallback-chain settings.

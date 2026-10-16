@@ -31,23 +31,36 @@ pub fn media_item_raw_id(prefixed_id: &str) -> &str {
 /// Supports `%(name)s` and `%(name).Nb` truncation (byte limit on `title`).
 pub fn render_template(template: &str, vars: &TemplateVars<'_>) -> String {
     let mut out = String::with_capacity(template.len());
-    let bytes = template.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
-            if let Some((value, next)) = parse_field(&template[i..], vars) {
+    while i < template.len() {
+        let rest = &template[i..];
+        if rest.starts_with("%(") {
+            if let Some((value, next)) = parse_field(rest, vars) {
                 out.push_str(&value);
                 i += next;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let Some(c) = rest.chars().next() else { break };
+        out.push(c);
+        i += c.len_utf8();
     }
     sanitize_filename(&out)
 }
 
-/// Replace characters unsafe on common filesystems.
+/// Longest file name Core writes: the 255-byte filesystem limit minus room for
+/// what is appended while a download is in progress (`.part`, and for yt-dlp
+/// `.f<format id>` and `.ytdl` as well).
+pub const MAX_FILENAME_BYTES: usize = 235;
+
+/// Longest extension kept when a long name is shortened; a longer "extension"
+/// is treated as part of the stem.
+const MAX_EXTENSION_BYTES: usize = 16;
+
+/// Make a string safe to use as a single file name: replace characters unsafe
+/// on common filesystems, never return an empty name or `.` / `..`, and cap
+/// the length at [`MAX_FILENAME_BYTES`] by shortening the stem on a char
+/// boundary (the extension is kept).
 pub fn sanitize_filename(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
@@ -69,11 +82,63 @@ pub fn sanitize_filename(name: &str) -> String {
         }
     }
     let trimmed = out.trim();
-    if trimmed.is_empty() {
-        "download".to_string()
-    } else {
-        trimmed.to_string()
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "download".to_string();
     }
+    cap_filename_bytes(trimmed)
+}
+
+fn cap_filename_bytes(name: &str) -> String {
+    if name.len() <= MAX_FILENAME_BYTES {
+        return name.to_string();
+    }
+    let (stem, ext) = match split_extension(name) {
+        (stem, ext) if ext.len() <= MAX_EXTENSION_BYTES => (stem, ext),
+        _ => (name, ""),
+    };
+    let reserved = if ext.is_empty() { 0 } else { ext.len() + 1 };
+    let stem = truncate_bytes_str(stem, MAX_FILENAME_BYTES - reserved);
+    let stem = stem.trim_end();
+    if ext.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{stem}.{ext}")
+    }
+}
+
+/// Check a Filename Template before it is stored or handed to the Extractor
+/// Toolchain. The template names a file inside the Job Destination, so it must
+/// be a single relative component: no path separators, no `..`, no absolute
+/// path, and no control characters.
+pub fn validate_filename_template(template: &str) -> Result<(), String> {
+    let trimmed = template.trim();
+    if trimmed.is_empty() {
+        return Err("Filename Template cannot be empty".to_string());
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(
+            "Filename Template cannot contain path separators; it names a file inside the \
+             job's folder"
+                .to_string(),
+        );
+    }
+    // yt-dlp expands `~` and environment variables in the template before it
+    // substitutes fields, so either can turn it into an absolute path.
+    if trimmed.starts_with('~') || trimmed.contains('$') {
+        return Err("Filename Template cannot contain \"~\" at the start or \"$\"".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err(format!("Filename Template cannot be \"{trimmed}\""));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("Filename Template cannot contain control characters".to_string());
+    }
+    if trimmed.len() > MAX_FILENAME_BYTES {
+        return Err(format!(
+            "Filename Template is too long (limit {MAX_FILENAME_BYTES} bytes)"
+        ));
+    }
+    Ok(())
 }
 
 /// Pick a non-colliding filename under `dest_dir`.
@@ -103,6 +168,10 @@ fn resolve_collision_inner(dest_dir: &Path, filename: &str, stem_guard: bool) ->
 
 fn next_suffixed_name(dest_dir: &Path, filename: &str) -> String {
     let (stem, ext) = split_extension(filename);
+    // Leave room for " (9999)" so the suffix never pushes the name past the cap.
+    let reserved = 7 + if ext.is_empty() { 0 } else { ext.len() + 1 };
+    let stem = truncate_bytes_str(stem, MAX_FILENAME_BYTES.saturating_sub(reserved));
+    let stem = stem.as_str();
     for n in 1..10_000 {
         let candidate = if ext.is_empty() {
             format!("{stem} ({n})")
@@ -154,7 +223,10 @@ pub fn prepare_extractor_output(
     let rendered = render_template(template, vars);
     let stem_guard = template.contains("%(ext)");
     let final_name = resolve_collision_inner(dest_dir, &rendered, stem_guard);
-    if final_name == rendered {
+    // A name that hit the length cap was shortened by us, not by the
+    // template, so the Extractor Toolchain must be given the capped name.
+    let was_capped = rendered.len() >= MAX_FILENAME_BYTES;
+    if final_name == rendered && !was_capped {
         (template.to_string(), final_name)
     } else {
         (final_name.clone(), final_name)
