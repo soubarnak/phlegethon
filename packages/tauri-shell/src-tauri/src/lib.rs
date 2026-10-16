@@ -1145,13 +1145,24 @@ pub fn run() {
                 start_event_drain(app.handle().clone(), rx);
             }
 
-            // Deferred / on-launch sidecar updates may hit the network: never on the UI thread.
+            // On-launch and deferred sidecar updates hit the network, so they run on their
+            // own thread and release the Core lock during the download. When a transfer is
+            // running the update waits; the loop below applies it once the app is idle.
             {
                 let core = Arc::clone(&state.core);
                 std::thread::spawn(move || {
-                    if let Ok(mut guard) = core.lock() {
-                        if let Err(err) = guard.apply_sidecar_updates_on_launch() {
-                            log::warn!("sidecar update on launch: {err}");
+                    match Core::apply_sidecar_updates_on_launch_outside_lock(Arc::clone(&core)) {
+                        Ok(result) => log::info!("sidecar update on launch: {:?}", result.outcome),
+                        Err(err) => log::warn!("sidecar update on launch: {err}"),
+                    }
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        match Core::apply_deferred_sidecar_updates(Arc::clone(&core)) {
+                            Ok(result) if !result.applied.is_empty() => {
+                                log::info!("applied deferred sidecar update: {:?}", result.applied)
+                            }
+                            Ok(_) => {}
+                            Err(err) => log::warn!("deferred sidecar update: {err}"),
                         }
                     }
                 });

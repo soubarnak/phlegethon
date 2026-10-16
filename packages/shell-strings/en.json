@@ -270,6 +270,7 @@
   "toolchain.statusFailed": "Could not read the toolchain state",
   "toolchain.saveFailed": "Could not save the update settings",
   "toolchain.checkOnLaunch": "Check for updates on launch",
+  "toolchain.nightlyChannel": "Use nightly yt-dlp builds (fixes site changes sooner)",
   "toolchain.pinToolchain": "Pin yt-dlp version",
   "toolchain.pinPlugin": "Pin plugin version",
   "toolchain.pinHelper": "Leave empty to follow the latest.",

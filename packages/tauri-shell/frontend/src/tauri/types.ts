@@ -129,8 +129,11 @@ export interface ProxySettings {
   url: string | null;
 }
 
+export type SidecarChannel = "stable" | "nightly";
+
 export interface SidecarUpdateSettings {
   check_on_launch: boolean;
+  channel: SidecarChannel;
   toolchain_pin: string | null;
   plugin_pin: string | null;
 }
@@ -155,7 +158,6 @@ export interface SidecarUpdateCheckResult {
 export type SidecarApplyOutcome =
   | "applied"
   | "deferred_until_idle"
-  | "deferred_until_next_launch"
   | "nothing_to_apply"
   | "blocked_mid_transfer";
 

@@ -6798,27 +6798,38 @@ fn setup_sidecar_core(
 }
 
 #[test]
-fn sidecar_update_settings_default_check_on_launch_off() {
+fn sidecar_update_settings_default_to_checking_on_launch() {
+    // M-42: yt-dlp used to stay frozen unless the user found the toggle.
     let (core, _rx) = make_core(Box::new(fake_http()));
-    assert!(!core.sidecar_update_settings().check_on_launch);
+    let settings = core.sidecar_update_settings();
+    assert!(settings.check_on_launch);
+    assert_eq!(settings.channel, SidecarChannel::Stable);
 }
 
 #[test]
-fn sidecar_update_settings_persist_across_library_root_reload() {
+fn sidecar_update_settings_follow_the_sidecar_not_the_library_root() {
+    // L-27: the sidecar is app-wide, so a pin must survive a Library Root change.
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("library");
+    let sidecar = tmp.path().join("sidecar");
     let (mut core, _rx) = make_core(Box::new(fake_http()));
-    core.set_library_root(root.clone()).unwrap();
+    core.set_sidecar_root(sidecar.clone()).unwrap();
+    core.set_library_root(tmp.path().join("library-a")).unwrap();
 
     let settings = SidecarUpdateSettings {
-        check_on_launch: true,
+        check_on_launch: false,
+        channel: SidecarChannel::Nightly,
         toolchain_pin: Some("1.0.0".to_string()),
         plugin_pin: None,
     };
     core.set_sidecar_update_settings(settings.clone()).unwrap();
+    core.set_library_root(tmp.path().join("library-b")).unwrap();
+    assert_eq!(core.sidecar_update_settings(), settings);
 
     let (mut core2, _rx2) = make_core(Box::new(fake_http()));
-    core2.set_library_root(root).unwrap();
+    core2
+        .set_library_root(tmp.path().join("library-c"))
+        .unwrap();
+    core2.set_sidecar_root(sidecar).unwrap();
     assert_eq!(core2.sidecar_update_settings(), settings);
 }
 
@@ -7064,6 +7075,106 @@ fn deferred_updates_apply_on_launch_when_idle() {
             .as_deref(),
         Some("2.0.0")
     );
+}
+
+#[test]
+fn rollback_pins_the_restored_version_so_the_next_launch_keeps_it() {
+    // M-32: with check_on_launch on, the next start re-installed the release just rolled back.
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+
+    core.apply_sidecar_updates().unwrap();
+    core.rollback_sidecar(SidecarComponent::Toolchain).unwrap();
+    assert_eq!(
+        core.sidecar_update_settings().toolchain_pin.as_deref(),
+        Some("1.0.0")
+    );
+
+    let result = core.apply_sidecar_updates_on_launch().unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::NothingToApply);
+    assert_eq!(
+        core.check_sidecar_updates()
+            .unwrap()
+            .toolchain
+            .installed_version
+            .as_deref(),
+        Some("1.0.0")
+    );
+}
+
+#[test]
+fn pins_are_written_beside_the_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    core.pin_sidecar_version(SidecarComponent::Plugin, "0.2.1".to_string())
+        .unwrap();
+    let saved = load_sidecar_settings(&sidecar).unwrap().unwrap();
+    assert_eq!(saved.plugin_pin.as_deref(), Some("0.2.1"));
+}
+
+#[test]
+fn a_blocked_install_is_remembered_and_applied_once_idle() {
+    // L-26: "Install" during a transfer used to vanish; now the idle pass finishes it.
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.job_signals()
+        .set_transfer_active_for_test(&job_id, true);
+    let signals = core.job_signals();
+    let core = Arc::new(std::sync::Mutex::new(core));
+
+    let blocked = Core::install_toolchain_latest(Arc::clone(&core)).unwrap();
+    assert_eq!(blocked.outcome, SidecarApplyOutcome::BlockedMidTransfer);
+    assert!(core.lock().unwrap().sidecar_apply_deferred());
+
+    let waiting = Core::apply_deferred_sidecar_updates(Arc::clone(&core)).unwrap();
+    assert_eq!(waiting.outcome, SidecarApplyOutcome::DeferredUntilIdle);
+
+    signals.set_transfer_active_for_test(&job_id, false);
+    let done = Core::apply_deferred_sidecar_updates(Arc::clone(&core)).unwrap();
+    assert_eq!(done.outcome, SidecarApplyOutcome::Applied);
+    assert!(!core.lock().unwrap().sidecar_apply_deferred());
+}
+
+#[test]
+fn launch_update_runs_outside_the_lock_and_defers_when_busy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+    core.job_signals()
+        .set_transfer_active_for_test(&job_id, true);
+    let signals = core.job_signals();
+    let core = Arc::new(std::sync::Mutex::new(core));
+
+    let busy = Core::apply_sidecar_updates_on_launch_outside_lock(Arc::clone(&core)).unwrap();
+    assert_eq!(busy.outcome, SidecarApplyOutcome::DeferredUntilIdle);
+
+    signals.set_transfer_active_for_test(&job_id, false);
+    let idle = Core::apply_sidecar_updates_on_launch_outside_lock(Arc::clone(&core)).unwrap();
+    assert_eq!(idle.outcome, SidecarApplyOutcome::Applied);
+}
+
+#[test]
+fn launch_update_does_nothing_when_the_user_turned_checking_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let catalog = toolchain_catalog(&tmp, "2.0.0", b"v2");
+    let (mut core, _rx, sidecar, _source) = setup_sidecar_core(&tmp, catalog);
+    write_toolchain_fixture(&sidecar, "1.0.0", b"v1");
+    core.set_sidecar_update_settings(SidecarUpdateSettings {
+        check_on_launch: false,
+        ..Default::default()
+    })
+    .unwrap();
+    let core = Arc::new(std::sync::Mutex::new(core));
+    let result = Core::apply_sidecar_updates_on_launch_outside_lock(core).unwrap();
+    assert_eq!(result.outcome, SidecarApplyOutcome::NothingToApply);
 }
 
 #[test]
