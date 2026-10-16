@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Button, Checkbox, Dropdown, NumberInput, TextInput, Toggle } from "@carbon/react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Button, Checkbox, Dropdown, InlineNotification, NumberInput, TextInput, Toggle } from "@carbon/react";
 import { api } from "@/tauri/api";
 import type {
   CookieChannel,
@@ -46,6 +46,34 @@ const MEDIA_FIELDS: Array<{ key: keyof MediaExtrasOptions; label: string; needsF
   { key: "remux", label: "probe.media.remux", needsFfmpeg: true },
 ];
 
+/** Each setting loads on its own; one that fails keeps its Apply disabled so defaults are never written back (M-60). */
+type SettingKey =
+  | "libraryRoot"
+  | "activeLimit"
+  | "audioOnly"
+  | "quality"
+  | "template"
+  | "extras"
+  | "cookies"
+  | "proxy"
+  | "bandwidth"
+  | "tiers";
+
+/** Order of the `Promise.allSettled` calls in the loader; null marks a call that blocks nothing. */
+const LOAD_ORDER: Array<SettingKey | null> = [
+  "libraryRoot",
+  "activeLimit",
+  "audioOnly",
+  "quality",
+  "template",
+  "extras",
+  null, // media extras capabilities
+  "cookies",
+  "proxy",
+  "bandwidth",
+  "tiers",
+];
+
 function Section({ id, title, hint, children }: { id?: string; title: string; hint?: string; children: ReactNode }) {
   return (
     <section className="ph-settings__section" id={id}>
@@ -78,9 +106,13 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
     probe_timeout_secs: 45,
   });
 
-  // ---- load everything once
-  useEffect(() => {
-    let alive = true;
+  const [failed, setFailed] = useState<ReadonlySet<SettingKey>>(new Set());
+  const isBlocked = (...keys: SettingKey[]) => keys.some((k) => failed.has(k));
+  const loadSeq = useRef(0);
+
+  // ---- load every setting independently; only the ones that loaded are applied to state
+  const loadAll = useCallback(() => {
+    const seq = ++loadSeq.current;
     (async () => {
       const results = await Promise.allSettled([
         api.getLibraryRoot(),
@@ -95,26 +127,55 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
         api.getGlobalBandwidthCap(),
         api.getProbeTierSettings(),
       ]);
-      if (!alive) return;
-      const ok = <T,>(i: number): T | undefined =>
-        results[i].status === "fulfilled" ? ((results[i] as PromiseFulfilledResult<T>).value as T) : undefined;
-      setLibraryRoot(ok<string | null>(0) ?? "");
-      setActiveLimit(ok<number>(1) ?? 3);
-      setAudioOnly(ok<boolean>(2) ?? false);
-      setPolicy(ok<DefaultQualityPolicy>(3) ?? { max_height: 1080, prefer_mp4: true });
-      setTemplate(ok<string>(4) ?? "");
-      setExtras(ok<MediaExtrasOptions>(5) ?? EMPTY_MEDIA_EXTRAS);
-      setCaps(ok<MediaExtrasCapabilities>(6) ?? { ffmpeg_available: true, embed_disabled_reason: null });
-      setCookies(ok<CookieChannel>(7) ?? { cookies_from_browser: null, cookie_file: null });
-      setProxy(ok<{ url: string | null }>(8)?.url ?? "");
-      const cap = ok<number | null>(9);
-      setCapKb(cap ? Math.round(cap / 1024) : 0);
-      setTiers(ok<ProbeTierSettings>(10) ?? { allow_generic: true, allow_page_sniff: true, allow_direct_fallback: true, probe_timeout_secs: 45 });
+      if (seq !== loadSeq.current) return;
+      const bad = new Set<SettingKey>();
+      results.forEach((result, i) => {
+        const key = LOAD_ORDER[i];
+        if (result.status === "rejected" && key) bad.add(key);
+      });
+      setFailed(bad);
+      const ok = <T,>(i: number): { value: T } | null =>
+        results[i].status === "fulfilled" ? { value: (results[i] as PromiseFulfilledResult<T>).value } : null;
+      const set = <T,>(i: number, apply: (value: T) => void) => {
+        const loaded = ok<T>(i);
+        if (loaded) apply(loaded.value);
+      };
+      set<string | null>(0, (v) => setLibraryRoot(v ?? ""));
+      set<number>(1, setActiveLimit);
+      set<boolean>(2, setAudioOnly);
+      set<DefaultQualityPolicy>(3, setPolicy);
+      set<string>(4, setTemplate);
+      set<MediaExtrasOptions>(5, setExtras);
+      set<MediaExtrasCapabilities>(6, setCaps);
+      set<CookieChannel>(7, setCookies);
+      set<{ url: string | null }>(8, (v) => setProxy(v.url ?? ""));
+      set<number | null>(9, (cap) => setCapKb(cap ? Math.round(cap / 1024) : 0));
+      set<ProbeTierSettings>(10, setTiers);
     })();
-    return () => {
-      alive = false;
-    };
   }, []);
+
+  useEffect(() => {
+    loadAll();
+    return () => {
+      loadSeq.current += 1;
+    };
+  }, [loadAll]);
+
+  const loadWarning = (...keys: SettingKey[]) =>
+    isBlocked(...keys) && (
+      <div className="ph-settings__loadfail" data-testid={`load-failed-${keys[0]}`}>
+        <InlineNotification
+          kind="warning"
+          lowContrast
+          hideCloseButton
+          title={t("settings.loadFailed")}
+          subtitle={t("settings.loadFailed.detail")}
+        />
+        <Button kind="ghost" size="sm" onClick={loadAll}>
+          {t("settings.retryLoad")}
+        </Button>
+      </div>
+    );
 
   // ---- filename template live preview (debounced)
   useEffect(() => {
@@ -123,28 +184,37 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
       setTemplateError(t("settings.template.empty"));
       return;
     }
+    // A reply that arrives after a newer request was sent is stale and must not win (L-57).
+    let current = true;
     const timer = window.setTimeout(() => {
       api
         .previewFilenameTemplate(template)
         .then((preview) => {
+          if (!current) return;
           setTemplatePreview(preview);
           setTemplateError(null);
         })
         .catch((err) => {
+          if (!current) return;
           setTemplatePreview("");
           setTemplateError(String(err));
         });
     }, 200);
-    return () => window.clearTimeout(timer);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
   }, [template]);
 
   const run = useCallback(
-    async (label: string, action: () => Promise<unknown>) => {
+    async (label: string, action: () => Promise<unknown>): Promise<boolean> => {
       try {
         await action();
         toasts.success(t("settings.saved"), label);
+        return true;
       } catch (err) {
         toasts.error(t("settings.saveFailed", { setting: label }), err);
+        return false;
       }
     },
     [toasts],
@@ -154,6 +224,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
     <div className="ph-scroll" data-testid="settings-page">
       <div className="ph-settings">
         <Section title={t("settings.libraryRoot")} hint={t("settings.libraryRoot.hint")}>
+          {loadWarning("libraryRoot")}
           <div className="ph-settings__row">
             <TextInput
               id="library-root"
@@ -165,6 +236,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
             <FolderPicker label={t("settings.choose")} kind="tertiary" onPicked={(p) => setLibraryRoot(p)} />
             <Button
               kind="primary"
+              disabled={isBlocked("libraryRoot")}
               onClick={() =>
                 void run(t("settings.libraryRoot"), async () => {
                   const applied = await api.setLibraryRoot(libraryRoot.trim());
@@ -178,6 +250,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
         </Section>
 
         <Section title={t("settings.transfers")} hint={t("settings.transfers.hint")}>
+          {loadWarning("activeLimit", "bandwidth")}
           <div className="ph-settings__row">
             <NumberInput
               id="active-limit"
@@ -188,7 +261,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
               value={activeLimit}
               onChange={(_, { value }) => setActiveLimit(Number(value) || 1)}
             />
-            <Button kind="tertiary" onClick={() => void run(t("queue.footer.activeLimit"), () => api.setActiveJobLimit(activeLimit))}>
+            <Button kind="tertiary" disabled={isBlocked("activeLimit")} onClick={() => void run(t("queue.footer.activeLimit"), () => api.setActiveJobLimit(activeLimit))}>
               {t("settings.apply")}
             </Button>
           </div>
@@ -204,6 +277,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
             />
             <Button
               kind="tertiary"
+              disabled={isBlocked("bandwidth")}
               onClick={() => void run(t("settings.bandwidth"), () => api.setGlobalBandwidthCap(capKb > 0 ? capKb * 1024 : null))}
             >
               {t("settings.apply")}
@@ -212,6 +286,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
         </Section>
 
         <Section title={t("settings.quality")} hint={t("settings.quality.hint")}>
+          {loadWarning("quality", "audioOnly")}
           <div className="ph-settings__row">
             <Dropdown
               id="quality-max-height"
@@ -228,7 +303,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
               checked={policy.prefer_mp4}
               onChange={(_, { checked }) => setPolicy((p) => ({ ...p, prefer_mp4: checked }))}
             />
-            <Button kind="tertiary" onClick={() => void run(t("settings.quality"), () => api.setDefaultQualityPolicy(policy))}>
+            <Button kind="tertiary" disabled={isBlocked("quality")} onClick={() => void run(t("settings.quality"), () => api.setDefaultQualityPolicy(policy))}>
               {t("settings.apply")}
             </Button>
           </div>
@@ -239,15 +314,20 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
               labelA={t("common.off")}
               labelB={t("common.on")}
               toggled={audioOnly}
+              disabled={isBlocked("audioOnly")}
               onToggle={(checked) => {
+                const previous = audioOnly;
                 setAudioOnly(checked);
-                void run(t("settings.audioOnly"), () => api.setAudioOnlyMode(checked));
+                void run(t("settings.audioOnly"), () => api.setAudioOnlyMode(checked)).then((saved) => {
+                  if (!saved) setAudioOnly(previous);
+                });
               }}
             />
           </div>
         </Section>
 
         <Section title={t("settings.template")} hint={t("settings.template.hint")}>
+          {loadWarning("template")}
           <div className="ph-settings__row">
             <TextInput
               id="filename-template"
@@ -260,7 +340,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
             />
             <Button
               kind="tertiary"
-              disabled={templateError != null}
+              disabled={templateError != null || isBlocked("template")}
               onClick={() => void run(t("settings.template"), () => api.setFilenameTemplate(template))}
             >
               {t("settings.apply")}
@@ -274,6 +354,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
         </Section>
 
         <Section title={t("probe.mediaOptions")} hint={t("settings.extras.hint")}>
+          {loadWarning("extras")}
           {!caps.ffmpeg_available && (
             <p className="ph-muted" style={{ marginBottom: "0.75rem" }}>
               {caps.embed_disabled_reason ?? t("probe.media.noFfmpeg")}
@@ -292,13 +373,14 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
             ))}
           </div>
           <div style={{ marginTop: "1rem" }}>
-            <Button kind="tertiary" onClick={() => void run(t("probe.mediaOptions"), () => api.setDefaultMediaExtras(extras))}>
+            <Button kind="tertiary" disabled={isBlocked("extras")} onClick={() => void run(t("probe.mediaOptions"), () => api.setDefaultMediaExtras(extras))}>
               {t("settings.apply")}
             </Button>
           </div>
         </Section>
 
         <Section id="settings-cookies" title={t("settings.cookies")} hint={t("settings.cookies.hint")}>
+          {loadWarning("cookies")}
           <div className="ph-settings__row">
             <Dropdown
               id="cookies-browser"
@@ -320,13 +402,14 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
               value={cookies.cookie_file ?? ""}
               onChange={(e) => setCookies((c) => ({ ...c, cookie_file: e.target.value || null }))}
             />
-            <Button kind="tertiary" onClick={() => void run(t("settings.cookies"), () => api.setCookieChannel(cookies))}>
+            <Button kind="tertiary" disabled={isBlocked("cookies")} onClick={() => void run(t("settings.cookies"), () => api.setCookieChannel(cookies))}>
               {t("settings.apply")}
             </Button>
           </div>
         </Section>
 
         <Section title={t("settings.proxy")} hint={t("settings.proxy.hint")}>
+          {loadWarning("proxy")}
           <div className="ph-settings__row">
             <TextInput
               id="proxy-url"
@@ -336,13 +419,14 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
               value={proxy}
               onChange={(e) => setProxy(e.target.value)}
             />
-            <Button kind="tertiary" onClick={() => void run(t("settings.proxy"), () => api.setProxySettings({ url: proxy.trim() || null }))}>
+            <Button kind="tertiary" disabled={isBlocked("proxy")} onClick={() => void run(t("settings.proxy"), () => api.setProxySettings({ url: proxy.trim() || null }))}>
               {t("settings.apply")}
             </Button>
           </div>
         </Section>
 
         <Section title={t("settings.tiers")} hint={t("settings.tiers.hint")}>
+          {loadWarning("tiers")}
           <div className="ph-settings__grid">
             <Toggle
               id="tier-generic"
@@ -379,7 +463,7 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
               value={tiers.probe_timeout_secs}
               onChange={(_, { value }) => setTiers((s) => ({ ...s, probe_timeout_secs: Number(value) || 45 }))}
             />
-            <Button kind="tertiary" onClick={() => void run(t("settings.tiers"), () => api.setProbeTierSettings(tiers))}>
+            <Button kind="tertiary" disabled={isBlocked("tiers")} onClick={() => void run(t("settings.tiers"), () => api.setProbeTierSettings(tiers))}>
               {t("settings.apply")}
             </Button>
           </div>
