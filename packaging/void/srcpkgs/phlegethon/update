@@ -1,0 +1,2 @@
+site=https://github.com/soubarnak/phlegethon/releases/latest
+pattern="(?<=releases/tag/phlegethon-v)[\d.]+"

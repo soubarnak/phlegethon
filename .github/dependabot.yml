@@ -1,7 +1,11 @@
-# Keeps the SHA-pinned actions in .github/workflows current.
+# Keeps the SHA-pinned actions in .github/workflows current. All action bumps arrive as one weekly PR.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"

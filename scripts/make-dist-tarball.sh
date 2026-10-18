@@ -10,7 +10,7 @@
 #   --update-template   write the sha256 into packaging/void/srcpkgs/phlegethon/template
 #
 # Fails when the version differs between Cargo.toml, the xbps template, tauri.conf.json,
-# package.json, package-lock.json, the extension manifest and the README (scripts/check-versions.sh).
+# package.json, package-lock.json, the extension manifest and the AppStream metainfo (scripts/check-versions.sh).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out="$root/dist" vendor=0 update_template=0
