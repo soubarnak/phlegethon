@@ -660,6 +660,7 @@ impl YtDlpExtractorToolchain {
     /// extracting each video. Multi-item probes keep standard quality presets
     /// from flat parse so the probe sheet opens without N+1 yt-dlp calls.
     /// `--plugin-dirs` is included when configured (Launch Site Extractor Plugins).
+    #[cfg(test)]
     pub(crate) fn probe_args(
         &self,
         url: &str,
@@ -669,12 +670,14 @@ impl YtDlpExtractorToolchain {
         self.probe_args_for(url, true, cookies, proxy)
     }
 
+    /// The proxy never enters argv (M-24). `run_probe_json` hands it to yt-dlp through
+    /// the environment instead.
     fn probe_args_for(
         &self,
         url: &str,
         flat_playlist: bool,
         cookies: &CookieChannel,
-        proxy: &ProxySettings,
+        _proxy: &ProxySettings,
     ) -> Vec<String> {
         let mut args = vec!["-J".to_string(), "--no-warnings".to_string()];
         if flat_playlist {
@@ -703,14 +706,11 @@ impl YtDlpExtractorToolchain {
         &self,
         url: &str,
         format: &str,
-        dest_dir: &std::path::Path,
+        out_tmpl: &std::path::Path,
         media_extras: &MediaExtrasOptions,
         cookies: &CookieChannel,
-        proxy: &ProxySettings,
-        output_template: &str,
         referer: Option<&str>,
     ) -> Vec<String> {
-        let out_tmpl = dest_dir.join(output_template);
         let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
         let format_selector = quality_id_to_ytdlp_format(format, ffmpeg_present);
 
@@ -1265,16 +1265,8 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
         let (cookies, _cookie_copy) = cookies.with_private_cookie_file()?;
-        let args = self.download_args(
-            url,
-            format,
-            dest_dir,
-            media_extras,
-            &cookies,
-            proxy,
-            output_template,
-            referer,
-        );
+        let out_tmpl = dest_dir.join(output_template);
+        let args = self.download_args(url, format, &out_tmpl, media_extras, &cookies, referer);
 
         let launcher = self.effective_launcher();
         let (cmd, _doh_guard) = ytdlp_command_with_optional_doh_dns(&launcher, &args, url, proxy)?;
@@ -1316,8 +1308,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
                 let path_line = stdout
                     .lines()
                     .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .last()
+                    .rfind(|l| !l.is_empty())
                     .ok_or_else(|| "yt-dlp download produced no output path".to_string())?;
 
                 let path = PathBuf::from(path_line);
@@ -1645,7 +1636,7 @@ fn launch_site_standard_qualities() -> Vec<Quality> {
             label: if *id == "best" {
                 "Best available".to_string()
             } else {
-                format!("{id}")
+                id.to_string()
             },
             size_bytes: None,
             container: None,
@@ -1700,7 +1691,7 @@ fn playlist_entry_id(entry: &YtDlpEntry, item_url: &str) -> Option<String> {
 
         if let Some(slug) = parsed
             .path_segments()
-            .and_then(|segments| segments.filter(|segment| !segment.is_empty()).last())
+            .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
             .map(|segment| segment.to_string())
             .filter(|s| !s.is_empty())
         {
@@ -2298,6 +2289,12 @@ impl FakeYtDlpExtractor {
     /// Mark a URL as failing (simulates yt-dlp crash / non-zero exit).
     pub fn insert_failure(&mut self, url: &str) {
         self.failing_urls.push(url.to_string());
+    }
+}
+
+impl Default for FakeYtDlpExtractor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -3844,11 +3841,9 @@ esac
         let args = extractor.download_args(
             "https://example.com/v",
             "best",
-            Path::new("/tmp/dest"),
+            &Path::new("/tmp/dest").join("%(title)s.%(ext)s"),
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
-            &ProxySettings::default(),
-            "%(title)s.%(ext)s",
             Some("https://example.com/"),
         );
         let n = args.len();
@@ -3993,11 +3988,9 @@ esac
         let args = extractor.download_args(
             "https://example.com/v",
             "best",
-            Path::new("/tmp/dest"),
+            &Path::new("/tmp/dest").join("%(title)s.%(ext)s"),
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
-            &ProxySettings::default(),
-            "%(title)s.%(ext)s",
             None,
         );
         assert!(args.iter().any(|a| a == "--progress"), "{args:?}");

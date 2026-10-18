@@ -254,11 +254,6 @@ fn sweep_staging(sidecar_root: &Path) {
     }
 }
 
-/// Whether an installed sidecar needs updating relative to a desired version.
-pub fn needs_update(installed: &PluginManifest, desired_version: &str) -> bool {
-    installed.version != desired_version
-}
-
 /// Install (or replace) a plugin package into the sidecar layout.
 ///
 /// Copies `source_package` (a directory containing `yt_dlp_plugins/`) into

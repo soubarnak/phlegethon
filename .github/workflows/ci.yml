@@ -29,12 +29,20 @@ jobs:
           components: rustfmt, clippy
       - name: Format
         run: cargo fmt --all --check
-      - name: Clippy (report only)
-        # Report-only for now: the tree still has warnings. WS11 turns this on with -D warnings.
-        continue-on-error: true
-        run: cargo clippy --workspace --exclude phlegethon-tauri --all-targets --locked
+      - name: Clippy
+        run: cargo clippy --workspace --exclude phlegethon-tauri --all-targets --locked -- -D warnings
       - name: Tests (everything except the WebKit shell)
         run: cargo test --workspace --exclude phlegethon-tauri --locked
+
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Advisories, licenses, bans and sources (deny.toml)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
 
   plugins:
     name: Extractor plugins
@@ -116,6 +124,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+          components: clippy
       - name: System libraries
         run: |
           sudo apt-get update
@@ -131,6 +140,8 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm run build
+      - name: Clippy
+        run: cargo clippy -p phlegethon-tauri --all-targets --locked -- -D warnings
       - run: cargo test -p phlegethon-tauri --locked
       - name: Generated TypeScript types are current
         # ts-rs writes the IPC types from the Rust serde types (M-71). Fail when the committed

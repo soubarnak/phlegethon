@@ -158,6 +158,8 @@ impl From<EnqueueOutcome> for EnqueueResult {
     }
 }
 
+// Variant names are the IPC `type` tags the frontend matches; renaming them changes the wire format.
+#[allow(clippy::enum_variant_names)]
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]

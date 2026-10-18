@@ -20,17 +20,12 @@ fn truncate_error(mut text: String) -> String {
 }
 
 /// Intent hint from the extension; Download Core still classifies the final path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompanionIntent {
+    #[default]
     ProbeThenConfirm,
     EnqueueDirect,
-}
-
-impl Default for CompanionIntent {
-    fn default() -> Self {
-        Self::ProbeThenConfirm
-    }
 }
 
 /// Extension → NMH → shell enqueue request.

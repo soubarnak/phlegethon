@@ -230,7 +230,7 @@ impl DownloadArchive {
     /// Return all archive entries sorted by completion time (most recent first).
     pub fn list(&self) -> Vec<&ArchiveEntry> {
         let mut entries: Vec<&ArchiveEntry> = self.entries.values().collect();
-        entries.sort_by(|a, b| b.completed_at_unix_secs.cmp(&a.completed_at_unix_secs));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.completed_at_unix_secs));
         entries
     }
 
@@ -241,7 +241,7 @@ impl DownloadArchive {
             .values()
             .filter(|e| e.outcome == outcome)
             .collect();
-        entries.sort_by(|a, b| b.completed_at_unix_secs.cmp(&a.completed_at_unix_secs));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.completed_at_unix_secs));
         entries
     }
 

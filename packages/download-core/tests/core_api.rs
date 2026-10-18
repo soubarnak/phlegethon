@@ -658,10 +658,10 @@ fn discard_during_in_flight_transfer_stops_and_deletes_partials() {
 
         fn file_size(&self, url: &str) -> Result<u64, String> {
             let responses = self.responses.lock().unwrap();
-            Ok(responses
+            responses
                 .get(url)
                 .map(|b| b.len() as u64)
-                .ok_or_else(|| format!("no fake response for {url}"))?)
+                .ok_or_else(|| format!("no fake response for {url}"))
         }
     }
 
@@ -1726,7 +1726,7 @@ fn progress_events_show_cumulative_bytes_on_resume() {
             } => Some(*bytes_downloaded),
             _ => None,
         })
-        .last()
+        .next_back()
         .unwrap_or(0);
     assert!(
         partial_downloaded > 0,
@@ -1928,9 +1928,7 @@ fn assert_paced(clock: &ManualClock, bytes: u64, rate: u64) {
 
 #[test]
 fn default_transfer_is_uncapped() {
-    let content = b"this file is long enough to be split by a cap if one were set"
-        .repeat(1)
-        .to_vec();
+    let content = b"this file is long enough to be split by a cap if one were set".to_vec();
     let mut map = std::collections::HashMap::new();
     map.insert("https://example.com/uncapped.zip".into(), content.clone());
     let http = no_range_http(map);
@@ -2292,10 +2290,10 @@ fn pause_during_in_flight_transfer_stops_without_full_body() {
 
         fn file_size(&self, url: &str) -> Result<u64, String> {
             let responses = self.responses.lock().unwrap();
-            Ok(responses
+            responses
                 .get(url)
                 .map(|b| b.len() as u64)
-                .ok_or_else(|| format!("no fake response for {url}"))?)
+                .ok_or_else(|| format!("no fake response for {url}"))
         }
     }
 
@@ -2941,11 +2939,14 @@ fn probe_created_jobs_use_same_storage_rules() {
 ///
 /// Supports exact byte ranges and lets tests inspect how many requests
 /// were made and what ranges were used.
+/// (url, range) for one fetch call.
+type FetchCall = (String, Option<std::ops::Range<u64>>);
+
 #[derive(Clone)]
 struct TrackedFakeHttp {
     responses: Arc<Mutex<std::collections::HashMap<String, Vec<u8>>>>,
-    /// (url, range) for every fetch call made.
-    calls: Arc<Mutex<Vec<(String, Option<std::ops::Range<u64>>)>>>,
+    /// Every fetch call made, in order.
+    calls: Arc<Mutex<Vec<FetchCall>>>,
     range_supported: bool,
 }
 

@@ -459,10 +459,6 @@ impl Job {
         self.media_title.as_deref()
     }
 
-    pub fn ytdlp_output_spec(&self) -> Option<&str> {
-        self.ytdlp_output_spec.as_deref()
-    }
-
     pub fn set_ytdlp_output_spec(&mut self, spec: impl Into<String>) {
         self.ytdlp_output_spec = Some(spec.into());
     }
@@ -592,10 +588,6 @@ impl Job {
 
     pub fn set_expected_hash(&mut self, hash: ExpectedHash) {
         self.expected_hash = Some(hash);
-    }
-
-    pub fn clear_expected_hash(&mut self) {
-        self.expected_hash = None;
     }
 
     /// Final file path for this job under its Job Destination.

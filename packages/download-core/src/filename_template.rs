@@ -73,9 +73,8 @@ pub fn sanitize_filename(name: &str) -> String {
             || c == '<'
             || c == '>'
             || c == '|'
+            || c.is_control()
         {
-            out.push('_');
-        } else if c.is_control() {
             out.push('_');
         } else {
             out.push(c);

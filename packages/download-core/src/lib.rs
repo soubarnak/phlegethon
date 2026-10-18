@@ -35,7 +35,7 @@ mod transfer;
 mod url_input;
 pub mod ytdlp_extractor;
 pub use plugin_sidecar::{
-    bundled_manifest, ensure_bundled_plugins, install_plugin_package, load_manifest, needs_update,
+    bundled_manifest, ensure_bundled_plugins, install_plugin_package, load_manifest,
     plugin_dirs_path, version_is_newer, write_manifest, BundledInstall, PluginManifest,
     MANIFEST_FILENAME, PLUGIN_DIRS_REL, PLUGIN_PACKAGE_NAME,
 };
@@ -897,7 +897,7 @@ impl UnlockedTransferPlan {
                     format,
                     dest: dest.clone(),
                     output_spec,
-                    media_extras: media_extras.clone(),
+                    media_extras,
                     cookies,
                     proxy,
                     stop: stop.clone(),
@@ -2818,7 +2818,7 @@ impl Core {
             return false;
         };
         let mut found = false;
-        for (_, (probe_url, flag)) in self.probe_cancels.iter() {
+        for (probe_url, flag) in self.probe_cancels.values() {
             if *probe_url == key {
                 flag.store(true, Ordering::Release);
                 found = true;

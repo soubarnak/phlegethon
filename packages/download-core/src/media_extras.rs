@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::toolchain_discovery::{run_command_with_deadline_polling, CommandOutcome};
 
 /// User-facing toggles for optional media sidecars and embedding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaExtrasOptions {
     pub write_subs: bool,
@@ -25,22 +25,6 @@ pub struct MediaExtrasOptions {
     pub embed_metadata: bool,
     /// Remux to mp4 without re-encoding when the container differs.
     pub remux: bool,
-}
-
-impl Default for MediaExtrasOptions {
-    fn default() -> Self {
-        Self {
-            write_subs: false,
-            embed_subs: false,
-            write_chapters: false,
-            embed_chapters: false,
-            write_thumbnail: false,
-            embed_thumbnail: false,
-            write_metadata: false,
-            embed_metadata: false,
-            remux: false,
-        }
-    }
 }
 
 impl MediaExtrasOptions {

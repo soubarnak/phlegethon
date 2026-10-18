@@ -11,6 +11,7 @@ Top-level `Makefile` drives everything:
 - `make` / `make build`: runs `scripts/build-linux.sh` (`npm ci`, `npm run build`, then `cargo build --release --locked -p phlegethon-tauri -p phlegethon-nmh --features phlegethon-tauri/custom-protocol`). `SKIP_FRONTEND=1` reuses an existing `dist`.
 - `make test`: Rust (`cargo test --workspace --exclude phlegethon-tauri --locked`), the two Python plugin tests, the extension test, `scripts/test-scripts.sh` (version check, NMH installer, `make desktop`, tarball contents) and the frontend (`npm run typecheck && npm test`).
 - `make test-shell`: `cargo test -p phlegethon-tauri`. Needs webkit2gtk 4.1, gtk3, and libsoup3 dev packages, which is why the shell crate is excluded from `make test` and CI.
+- CI runs clippy with `-D warnings` (Rust and Tauri shell jobs) and `cargo deny check` (`deny.toml`: advisories, licenses, bans, sources). Run both locally before pushing.
 - `make dist`, `make xbps`, `make xbps-container` (xbps package in the pinned Void container; `CONTAINER_ENGINE` defaults to `podman`, `LIBC=musl` for musl), `make check-versions`, `make install PREFIX=/usr`, `make probe-check` (live URLs, needs network), `make e2e-ui` (WebDriver under xvfb), `make nmh-install EXT=<id>`.
 
 Frontend (`packages/tauri-shell/frontend`): `npm run dev` (Vite, strict port 1420, HMR on 1421), `npm run typecheck`, `npm test` (`vitest run`).

@@ -25,7 +25,7 @@ mod reference;
 
 use download_core::ProbeResult;
 use reference::{Entry, RunOptions, Verdict};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 struct Args {
@@ -128,7 +128,7 @@ fn print_result(result: &ProbeResult, secs: f64, json: bool) {
     }
 }
 
-fn run_check(path: &PathBuf, site: Option<&str>, opts: &RunOptions) -> ExitCode {
+fn run_check(path: &Path, site: Option<&str>, opts: &RunOptions) -> ExitCode {
     let file = match reference::load(path) {
         Ok(file) => file,
         Err(e) => {
@@ -139,7 +139,7 @@ fn run_check(path: &PathBuf, site: Option<&str>, opts: &RunOptions) -> ExitCode 
     let entries: Vec<&Entry> = file
         .entries
         .iter()
-        .filter(|e| site.map_or(true, |s| e.site.eq_ignore_ascii_case(s)))
+        .filter(|e| site.is_none_or(|s| e.site.eq_ignore_ascii_case(s)))
         .collect();
     if entries.is_empty() {
         eprintln!("no entries match --site {}", site.unwrap_or(""));
