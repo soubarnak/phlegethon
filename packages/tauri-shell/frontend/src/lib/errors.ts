@@ -10,7 +10,8 @@ export type ErrorCode =
   | "timeout"
   | "unsupported_url"
   | "geo_blocked"
-  | "not_found";
+  | "not_found"
+  | "toolchain_missing";
 
 const ERROR_CODES: readonly ErrorCode[] = [
   "needs_browser_cookies",
@@ -19,6 +20,7 @@ const ERROR_CODES: readonly ErrorCode[] = [
   "unsupported_url",
   "geo_blocked",
   "not_found",
+  "toolchain_missing",
 ];
 
 export interface ParsedError {

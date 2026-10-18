@@ -35,6 +35,7 @@ use std::time::Duration;
 /// `GenericExtractor`) → `PageSniff`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ExtractionTier {
     /// yt-dlp resolved a site-specific extractor.
     Dedicated,
@@ -55,6 +56,7 @@ impl ExtractionTier {
 /// How a probed item is fetched on confirm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum MediaFetchKind {
     /// Download through the Extractor Toolchain (yt-dlp) using a quality id.
     #[default]
@@ -139,6 +141,7 @@ pub fn is_generic_extractor_key(key: &str) -> bool {
 
 /// A single quality/format available for a media item.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Quality {
     /// Canonical identifier (e.g. "1080p", "720p", "best", "worst").
     pub id: String,
@@ -154,6 +157,7 @@ pub struct Quality {
 
 /// A single media item discovered during probing.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct MediaItem {
     /// Unique identifier within the probe result.
     pub id: String,
@@ -183,6 +187,7 @@ pub struct MediaItem {
 
 /// Result of probing a URL via the Extractor Toolchain.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProbeResult {
     /// The URL that was probed.
     pub url: String,

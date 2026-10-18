@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Checkbox, Dropdown, InlineNotification, NumberInput, TextInput, Toggle } from "@carbon/react";
 import { api } from "@/tauri/api";
 import type {
@@ -23,7 +23,8 @@ interface SettingsPageProps {
 
 const HEIGHTS = [4320, 2160, 1440, 1080, 720, 480, 360].map((h) => ({ id: h, label: `${h}p` }));
 
-const BROWSERS = [
+// A function, not a constant: t() at module scope runs before initLocale() (L-59).
+const browserOptions = () => [
   { id: "", label: t("settings.cookies.none") },
   { id: "firefox", label: "Firefox" },
   { id: "chrome", label: "Chrome" },
@@ -86,6 +87,7 @@ function Section({ id, title, hint, children }: { id?: string; title: string; hi
 
 export function SettingsPage({ notificationsEnabled, onNotificationsChange, onToolchainStatus }: SettingsPageProps) {
   const toasts = useToasts();
+  const browsers = useMemo(browserOptions, []);
 
   const [libraryRoot, setLibraryRoot] = useState("");
   const [activeLimit, setActiveLimit] = useState(3);
@@ -241,6 +243,8 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
                 void run(t("settings.libraryRoot"), async () => {
                   const applied = await api.setLibraryRoot(libraryRoot.trim());
                   setLibraryRoot(applied);
+                  const notes = await api.takeLibraryRootWarnings().catch(() => [] as string[]);
+                  notes.forEach((note) => toasts.warning(t("libraryRoot.warning"), note));
                 })
               }
             >
@@ -386,9 +390,9 @@ export function SettingsPage({ notificationsEnabled, onNotificationsChange, onTo
               id="cookies-browser"
               titleText={t("settings.cookies.browser")}
               label={t("settings.cookies.browser")}
-              items={BROWSERS}
+              items={browsers}
               itemToString={(i) => i?.label ?? ""}
-              selectedItem={BROWSERS.find((b) => b.id === (cookies.cookies_from_browser ?? "")) ?? BROWSERS[0]}
+              selectedItem={browsers.find((b) => b.id === (cookies.cookies_from_browser ?? "")) ?? browsers[0]}
               onChange={({ selectedItem }) =>
                 selectedItem && setCookies((c) => ({ ...c, cookies_from_browser: selectedItem.id || null }))
               }

@@ -126,11 +126,16 @@ pub fn lock_core(core: &Mutex<Core>) -> MutexGuard<'_, Core> {
 
 /// Serializable job row for platform shells.
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobSnapshot {
     pub job_id: String,
     pub url: String,
     pub destination: String,
     /// `pending` | `downloading` | `paused` | `failed` | `completed`.
+    #[cfg_attr(
+        feature = "ts",
+        ts(type = "\"pending\" | \"downloading\" | \"paused\" | \"failed\" | \"completed\"")
+    )]
     pub status: String,
     pub bytes_downloaded: u64,
     pub total_bytes: Option<u64>,
@@ -147,9 +152,17 @@ pub struct JobSnapshot {
 
 /// Match for a URL already active or queued in Core.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ActiveJobMatch {
     pub job_id: String,
     pub url: String,
+    /// A job status, or `probing` when only a pending probe matches (no job exists yet).
+    #[cfg_attr(
+        feature = "ts",
+        ts(
+            type = "\"pending\" | \"downloading\" | \"paused\" | \"failed\" | \"completed\" | \"probing\""
+        )
+    )]
     pub status: String,
     pub title: String,
 }
@@ -159,6 +172,7 @@ pub struct ActiveJobMatch {
 /// Unique id suffixes are not known until confirm; those slots use an ellipsis
 /// placeholder (`…`, U+2026) so the shell can show where files will land.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProbeDestinationPreview {
     pub path_display: String,
 }
@@ -334,6 +348,37 @@ impl ProbePlan {
         }
     }
 
+    /// The sniffer's blocking HEAD (`head_only`) or HEAD + capped GET on a helper
+    /// thread, so a cancelled probe returns within `CANCEL_POLL` instead of waiting
+    /// out the request. The abandoned request ends at its own deadline.
+    fn sniff_cancellable(&self, head_only: bool) -> Result<SniffOutcome, String> {
+        const CANCEL_POLL: Duration = Duration::from_millis(50);
+        let (sniffer, url, proxy) = (
+            Arc::clone(&self.sniffer),
+            self.url.clone(),
+            self.proxy.clone(),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = if head_only {
+                sniffer.sniff_head(&url, &proxy)
+            } else {
+                sniffer.sniff(&url, &proxy)
+            };
+            let _ = tx.send(outcome);
+        });
+        loop {
+            self.check_cancel()?;
+            match rx.recv_timeout(CANCEL_POLL) {
+                Ok(outcome) => return outcome,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("page sniffer stopped unexpectedly".to_string())
+                }
+            }
+        }
+    }
+
     fn policy(&self) -> ProbePolicy {
         ProbePolicy {
             allow_generic: !self.launch_site && self.settings.allow_generic,
@@ -375,7 +420,7 @@ impl ProbePlan {
                 content_length,
                 final_url,
                 filename,
-            }) = self.sniffer.sniff_head(&self.url, &self.proxy)
+            }) = self.sniff_cancellable(true)
             {
                 return Ok(direct_file_result(
                     &self.url,
@@ -412,7 +457,9 @@ impl ProbePlan {
         // Tier 3: Core's own HTML sniffer.
         let mut sniff_note = String::new();
         if self.settings.allow_page_sniff {
-            match self.sniffer.sniff(&self.url, &self.proxy) {
+            let sniffed = self.sniff_cancellable(false);
+            self.check_cancel()?;
+            match sniffed {
                 Ok(SniffOutcome::Page { title, media }) if !media.is_empty() => {
                     let items =
                         page_sniffer::media_items_from_sniff(&self.url, title.as_deref(), media);
@@ -1742,6 +1789,16 @@ impl Core {
             return Ok(None);
         }
 
+        // Check before the row goes: a refused delete keeps the job so the
+        // Discard can be retried, like `finalize_discard`.
+        if !completed && destination.exists() {
+            if let Err(err) = self.check_job_destination_deletable(&destination) {
+                self.jobs[pos].clear_discard_requested();
+                self.jobs[pos].clear_pause_requested();
+                return Err(err);
+            }
+        }
+
         self.jobs.remove(pos);
         self.job_signals.unregister(job_id);
         self.event_tx
@@ -1805,6 +1862,13 @@ impl Core {
     /// Refuses a folder that is, or contains, the Library Root: a Job
     /// Destination is job-owned and never a shared folder.
     fn delete_job_destination(&self, destination: &Path) -> Result<(), String> {
+        self.check_job_destination_deletable(destination)?;
+        std::fs::remove_dir_all(destination)
+            .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))
+    }
+
+    /// The guard shared by every path that deletes a Job Destination.
+    fn check_job_destination_deletable(&self, destination: &Path) -> Result<(), String> {
         if !destination.is_absolute()
             || self
                 .library_root
@@ -1815,8 +1879,7 @@ impl Core {
                 "refusing to delete {destination:?}: not a job-owned Job Destination"
             ));
         }
-        std::fs::remove_dir_all(destination)
-            .map_err(|e| format!("delete Job Destination {destination:?}: {e}"))
+        Ok(())
     }
 
     /// After an in-flight body read stops, either Discard or Pause.
@@ -2201,9 +2264,44 @@ impl Core {
     /// Returns `BlockedMidTransfer` without downloading when transfers are
     /// active; `NothingToApply` when the installed version is current.
     pub fn install_toolchain_latest(core: Arc<Mutex<Self>>) -> Result<SidecarApplyResult, String> {
+        Self::prefetch_then_apply(core, true)
+    }
+
+    /// Manual "apply available updates" (toolchain and plugins) with the Core mutex
+    /// released during the release lookup and download. Unlike
+    /// [`Self::install_toolchain_latest`] it still applies when only a plugin update
+    /// is due.
+    pub fn apply_sidecar_updates_outside_lock(
+        core: Arc<Mutex<Self>>,
+    ) -> Result<SidecarApplyResult, String> {
+        Self::prefetch_then_apply(core, false)
+    }
+
+    fn prefetch_then_apply(
+        core: Arc<Mutex<Self>>,
+        skip_when_toolchain_current: bool,
+    ) -> Result<SidecarApplyResult, String> {
         let (root, settings, source) = {
             let mut guard = lock_core(&core);
+            let snapshot = (
+                guard.require_sidecar_root()?.to_path_buf(),
+                guard.sidecar_update_settings.clone(),
+                Arc::clone(&guard.sidecar_update_source),
+            );
             if guard.transfers_active() {
+                if !skip_when_toolchain_current {
+                    // Only defer when something is due; the lookup runs off the lock.
+                    drop(guard);
+                    let check =
+                        check_sidecar_updates(&snapshot.0, &snapshot.1, snapshot.2.as_ref())?;
+                    if !check.toolchain.update_available && !check.plugin.update_available {
+                        return Ok(SidecarApplyResult {
+                            outcome: SidecarApplyOutcome::NothingToApply,
+                            applied: Vec::new(),
+                        });
+                    }
+                    guard = lock_core(&core);
+                }
                 // Remember the request so the idle poller applies it later (L-26).
                 guard.defer_sidecar_apply()?;
                 return Ok(SidecarApplyResult {
@@ -2211,16 +2309,12 @@ impl Core {
                     applied: Vec::new(),
                 });
             }
-            (
-                guard.require_sidecar_root()?.to_path_buf(),
-                guard.sidecar_update_settings.clone(),
-                Arc::clone(&guard.sidecar_update_source),
-            )
+            snapshot
         };
         // Network work (release lookup + asset download + checksum) outside the lock.
         let prefetched =
             sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref())?;
-        if prefetched.is_none() {
+        if skip_when_toolchain_current && prefetched.is_none() {
             return Ok(SidecarApplyResult {
                 outcome: SidecarApplyOutcome::NothingToApply,
                 applied: Vec::new(),
@@ -2296,24 +2390,6 @@ impl Core {
             }
         }
         Self::download_then_apply(core)
-    }
-
-    /// Manual "apply updates": download the pending toolchain release without the Core
-    /// lock (H-9), then swap it in under the lock, which re-checks for running work.
-    pub fn apply_sidecar_updates_outside_lock(
-        core: Arc<Mutex<Self>>,
-    ) -> Result<SidecarApplyResult, String> {
-        let (root, settings, source) = {
-            let guard = lock_core(&core);
-            (
-                guard.require_sidecar_root()?.to_path_buf(),
-                guard.sidecar_update_settings.clone(),
-                Arc::clone(&guard.sidecar_update_source),
-            )
-        };
-        sidecar_updates::prefetch_toolchain_update(&root, &settings, source.as_ref())?;
-        let mut guard = lock_core(&core);
-        guard.apply_sidecar_updates()
     }
 
     /// Fetch the pending toolchain release without the lock, then swap it in.
@@ -4175,5 +4251,154 @@ impl Core {
 impl Drop for Core {
     fn drop(&mut self) {
         let _ = self.flush_pending_progress();
+    }
+}
+
+#[cfg(test)]
+mod discard_guard_tests {
+    //! M-53: every Discard path refuses to delete a folder that is, or contains,
+    //! the Library Root. The queue loader already rejects such rows, so the job
+    //! is built in memory here.
+    use super::*;
+    use std::io::Write;
+
+    struct NoHttp;
+
+    impl HttpBackend for NoHttp {
+        fn fetch(
+            &self,
+            url: &str,
+            _range: Option<std::ops::Range<u64>>,
+            _sink: &mut dyn Write,
+        ) -> Result<FetchResult, String> {
+            Err(format!("no network in this test: {url}"))
+        }
+
+        fn supports_range(&self, url: &str) -> Result<bool, String> {
+            Err(format!("no network in this test: {url}"))
+        }
+
+        fn file_size(&self, url: &str) -> Result<u64, String> {
+            Err(format!("no network in this test: {url}"))
+        }
+    }
+
+    /// Core whose only job owns `destination`, with the Library Root at `root`.
+    fn core_with_job_at(root: &Path, destination_parent: &Path) -> (Core, String, PathBuf) {
+        let (mut core, _rx) = Core::new(Box::new(NoHttp), Box::new(FakeExtractorToolchain::new()));
+        let job = job::Job::new_with_source_at(
+            "https://example.com/file.zip".to_string(),
+            destination_parent.to_path_buf(),
+            None,
+        );
+        let (id, destination) = (job.id().to_string(), job.destination().to_path_buf());
+        core.jobs.push(job);
+        core.library_root = Some(root.to_path_buf());
+        (core, id, destination)
+    }
+
+    #[test]
+    fn discard_never_removes_a_folder_that_is_or_contains_the_library_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Parent of the job folder = shared folder; the Library Root sits inside the
+        // job's own folder (job destination contains the root), or equals it.
+        for root_is_inside in [true, false] {
+            for detached in [true, false] {
+                let shared = tmp
+                    .path()
+                    .join(format!("shared-{root_is_inside}-{detached}"));
+                let (mut core, id, destination) = core_with_job_at(&shared, &shared);
+                let root = if root_is_inside {
+                    destination.join("library")
+                } else {
+                    destination.clone()
+                };
+                std::fs::create_dir_all(&root).unwrap();
+                std::fs::write(root.join("keep.txt"), b"precious").unwrap();
+                core.library_root = Some(root.clone());
+
+                let err = if detached {
+                    core.discard_job_detached(&id).unwrap_err()
+                } else {
+                    core.discard_job(&id).unwrap_err()
+                };
+
+                assert!(err.contains("refusing to delete"), "got: {err}");
+                assert!(root.join("keep.txt").exists(), "files were removed");
+                assert!(
+                    core.list_job_snapshots().iter().any(|j| j.job_id == id),
+                    "a refused Discard keeps the job so it can be retried"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn discard_outside_lock_refuses_a_destination_that_holds_the_library_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join("shared");
+        let (core, id, destination) = core_with_job_at(&shared, &shared);
+        let root = destination.join("library");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("keep.txt"), b"precious").unwrap();
+        let core = Arc::new(Mutex::new(core));
+        core.lock().unwrap().library_root = Some(root.clone());
+
+        let err = Core::discard_job_outside_lock(Arc::clone(&core), &id).unwrap_err();
+
+        assert!(err.contains("refusing to delete"), "got: {err}");
+        assert!(root.join("keep.txt").exists());
+    }
+}
+
+#[cfg(test)]
+mod sniff_cancel_tests {
+    //! L-16: a cancelled probe does not wait for a hung sniffer request.
+    use super::*;
+
+    /// Blocks until `release` is dropped, standing in for a stalled HEAD/GET.
+    struct HungSniffer {
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl PageSniffer for HungSniffer {
+        fn sniff_head(&self, _: &str, _: &ProxySettings) -> Result<SniffOutcome, String> {
+            let _ = self.release.lock().unwrap().recv();
+            Ok(SniffOutcome::Nothing)
+        }
+
+        fn sniff(&self, _: &str, _: &ProxySettings) -> Result<SniffOutcome, String> {
+            let _ = self.release.lock().unwrap().recv();
+            Ok(SniffOutcome::Nothing)
+        }
+    }
+
+    #[test]
+    fn cancel_interrupts_a_hung_sniffer_head() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let plan = ProbePlan::standalone(
+            "https://example.com/page",
+            Arc::new(FakeExtractorToolchain::new()),
+            Arc::new(HungSniffer {
+                release: std::sync::Mutex::new(release_rx),
+            }),
+            ProbeTierSettings::default(),
+            CookieChannel::default(),
+            ProxySettings::default(),
+        )
+        .unwrap();
+        let cancel = plan.cancel_flag();
+        let started = Instant::now();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            cancel.store(true, Ordering::Release);
+        });
+
+        let err = plan.run().unwrap_err();
+
+        assert_eq!(err, "probe cancelled");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        canceller.join().unwrap();
+        drop(release_tx);
     }
 }

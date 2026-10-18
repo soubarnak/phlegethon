@@ -138,11 +138,6 @@ export function useJobs(): JobsState {
         }
         return;
       }
-      if (event.type === "JobsReordered") {
-        // Queue order changed: the snapshot carries the new order.
-        void refresh();
-        return;
-      }
       pendingProgress.current.delete(event.job_id);
       if (event.type === "JobCompleted" || event.type === "JobFailed") {
         const id = nextEventId.current++;

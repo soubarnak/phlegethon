@@ -28,9 +28,9 @@ use crate::sidecar_updates::{load_toolchain_manifest, toolchain_binary_path};
 use crate::toolchain_discovery::{
     classify_ytdlp_failure, detect_js_runtime, discover_ytdlp, error_code, find_in_path,
     is_executable_file, path_dirs_from_env, python_has_module, run_command_watched,
-    run_command_with_deadline_polling, tag_error, tool_version, ytdlp_js_runtime_args,
-    CommandOutcome, DiscoveryEnv, EjsStatus, JsRuntime, PlatformInfo, ToolInfo, ToolchainStatus,
-    YtDlpLauncher, YtDlpSource, ERROR_CODE_TIMEOUT,
+    run_command_with_deadline_polling, tag_error, tool_version, version_or_unknown,
+    ytdlp_js_runtime_args, CommandOutcome, DiscoveryEnv, EjsStatus, JsRuntime, PlatformInfo,
+    ToolInfo, ToolchainStatus, YtDlpLauncher, YtDlpSource, ERROR_CODE_TIMEOUT,
 };
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -487,8 +487,9 @@ impl YtDlpExtractorToolchain {
                 Duration::from_millis(20),
             ) {
                 Ok(CommandOutcome::Finished { status, stdout, .. }) if status.success() => {
-                    Some(String::from_utf8_lossy(&stdout).trim().to_string())
-                        .filter(|v| !v.is_empty())
+                    Some(String::from_utf8_lossy(&stdout).into_owned())
+                        .filter(|v| !v.trim().is_empty())
+                        .map(|v| version_or_unknown(&v))
                 }
                 _ => None,
             }

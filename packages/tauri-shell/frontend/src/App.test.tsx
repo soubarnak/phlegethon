@@ -69,7 +69,7 @@ describe("App", () => {
     const { handlers, setJobs } = baseHandlers({
       enqueue_url: () => {
         setJobs([job({ job_id: "j1", title: "file.zip", status: "pending", url: "https://example.com/file.zip" })]);
-        return { type: "EnqueueDirect", job_id: "j1", destination: "/lib/jobs/j1" };
+        return { type: "enqueue_direct", job_id: "j1", destination: "/lib/jobs/j1" };
       },
     });
     const ipc = installFakeIpc(handlers);
@@ -86,7 +86,7 @@ describe("App", () => {
     const url = "https://www.youtube.com/playlist?list=PL1";
     const items = [mediaItem({ id: "yt-a", title: "First", qualities: [quality("720p")] }), mediaItem({ id: "yt-b", title: "Second", qualities: [quality("720p")] })];
     const { handlers, setJobs } = baseHandlers({
-      enqueue_url: () => ({ type: "ProbeThenConfirm", url }),
+      enqueue_url: () => ({ type: "probe_then_confirm", url }),
       probe_url: () => probeResult(items, { url }),
       confirm_probe_selection: () => {
         setJobs([job({ job_id: "n1", title: "First", queue_index: 0 }), job({ job_id: "n2", title: "Second", queue_index: 1 })]);
@@ -108,7 +108,7 @@ describe("App", () => {
   it("a failed probe offers a plain download that queues the URL as a file", async () => {
     const url = "https://files.example.org/download?id=7";
     const { handlers } = baseHandlers({
-      enqueue_url: (a) => (a.forceDirect ? { type: "EnqueueDirect", job_id: "p1", destination: "/d" } : { type: "ProbeThenConfirm", url }),
+      enqueue_url: (a) => (a.forceDirect ? { type: "enqueue_direct", job_id: "p1", destination: "/d" } : { type: "probe_then_confirm", url }),
       probe_url: () => {
         throw "no downloadable media found for the page. yt-dlp: unsupported";
       },
@@ -202,7 +202,7 @@ describe("App", () => {
     });
 
     it("splits on commas and semicolons like the Core does", async () => {
-      const { handlers } = baseHandlers({ enqueue_url: (a) => ({ type: "EnqueueDirect", job_id: String(a.url), destination: "/d" }) });
+      const { handlers } = baseHandlers({ enqueue_url: (a) => ({ type: "enqueue_direct", job_id: String(a.url), destination: "/d" }) });
       const ipc = installFakeIpc(handlers);
       render(<App />);
       const user = userEvent.setup();
@@ -237,7 +237,7 @@ describe("App", () => {
       const { handlers } = baseHandlers({
         enqueue_url: (a) => {
           if (a.url === "https://b.example/2") throw "disk full";
-          return { type: "EnqueueDirect", job_id: String(a.url), destination: "/d" };
+          return { type: "enqueue_direct", job_id: String(a.url), destination: "/d" };
         },
       });
       const ipc = installFakeIpc(handlers);
@@ -255,7 +255,7 @@ describe("App", () => {
       const urlB = "https://b.example/watch?v=2";
       let release: (ids: string[]) => void = () => undefined;
       const { handlers } = baseHandlers({
-        enqueue_url: (a) => ({ type: "ProbeThenConfirm", url: String(a.url) }),
+        enqueue_url: (a) => ({ type: "probe_then_confirm", url: String(a.url) }),
         probe_url: (a) => probeResult([mediaItem({ id: `m-${a.url}`, qualities: [quality("720p")] })], { url: String(a.url) }),
         confirm_probe_selection: () => new Promise<string[]>((resolve) => (release = resolve)),
       });
