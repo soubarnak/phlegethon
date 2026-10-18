@@ -3,11 +3,20 @@
 use serde::{Deserialize, Serialize};
 
 /// Global proxy configuration. Empty / unset means direct connectivity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProxySettings {
     /// Proxy URL (`http://`, `socks4://`, `socks4a://`, `socks5://`).
     #[serde(default)]
     pub url: Option<String>,
+}
+
+/// Debug output never shows proxy credentials (M-24), so a logged setting cannot leak them.
+impl std::fmt::Debug for ProxySettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxySettings")
+            .field("url", &self.url.as_deref().map(strip_userinfo))
+            .finish()
+    }
 }
 
 impl ProxySettings {
@@ -249,6 +258,16 @@ fn cidr_contains(net: std::net::IpAddr, prefix: u8, ip: std::net::IpAddr) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_hides_credentials() {
+        let settings = ProxySettings {
+            url: Some("socks5://user:secret@proxy:1080".to_string()),
+        };
+        let shown = format!("{settings:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("socks5://proxy:1080"), "{shown}");
+    }
 
     #[test]
     fn validate_accepts_http_and_socks_schemes() {
