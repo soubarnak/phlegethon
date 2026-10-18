@@ -16,6 +16,7 @@ describe("core errors", () => {
   });
   it("has an actionable hint for cookie walls", () => {
     expect(errorHint("needs_browser_cookies")).toMatch(/Cookies/);
+    expect(errorHint("toolchain_missing")).toMatch(/Toolchain/);
     expect(errorHint(null)).toBeNull();
   });
 });

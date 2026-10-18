@@ -56,6 +56,8 @@ export const api = {
   processPending: () => invoke<void>("process_pending"),
   /** Companion intents that arrived before mount. Call once on mount, after subscribing to `companion-intent` (M-69). */
   takePendingIntents: () => invoke<CompanionIntent[]>("take_pending_intents"),
+  /** Notes from loading the Library Root (corrupt queue moved aside, rows skipped); drained on read (H-8). */
+  takeLibraryRootWarnings: () => invoke<string[]>("take_library_root_warnings"),
   pauseJob: (jobId: string) => invoke<void>("pause_job", { jobId }),
   resumeJob: (jobId: string) => invoke<void>("resume_job", { jobId }),
   retryJob: (jobId: string) => invoke<void>("retry_job", { jobId }),

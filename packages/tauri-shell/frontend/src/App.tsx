@@ -217,6 +217,17 @@ function Shell() {
     };
   }, []);
 
+  // The shell notes problems it found loading the Library Root (a corrupt queue file
+  // moved aside, rows skipped) before the webview existed; tell the user once (H-8).
+  const warnRef = useRef(toasts.warning);
+  warnRef.current = toasts.warning;
+  useEffect(() => {
+    api
+      .takeLibraryRootWarnings()
+      .then((warnings) => warnings.forEach((w) => warnRef.current(t("libraryRoot.warning"), w)))
+      .catch(() => undefined);
+  }, []);
+
   // ---- probe lifecycle
   // Remove by URL, not by position: a second close or a late confirm must not skip the next URL (M-63).
   const dropProbe = useCallback((url: string | null) => {
