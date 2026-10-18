@@ -19,7 +19,7 @@ describe("api", () => {
 
   it("sends the argument names the Rust commands take", async () => {
     const ipc = installFakeIpc({
-      enqueue_url: () => ({ type: "EnqueueDirect", job_id: "j", destination: "/d" }),
+      enqueue_url: () => ({ type: "enqueue_direct", job_id: "j", destination: "/d" }),
       discard_job: () => undefined,
       reorder_job: () => undefined,
       split_urls_cmd: () => [],

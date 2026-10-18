@@ -1,0 +1,4 @@
+[env]
+# Where `cargo test --features ts` (scripts/gen-ts-types.sh) writes the generated TypeScript types.
+TS_RS_EXPORT_DIR = { value = "packages/tauri-shell/frontend/src/tauri/generated", relative = true }
+TS_RS_LARGE_INT = "number"

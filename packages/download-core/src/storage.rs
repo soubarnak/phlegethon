@@ -576,25 +576,30 @@ pub fn reconcile_job(job: &mut Job) -> Result<(), String> {
                 job.set_bytes_received(part_len);
             }
         }
-        Err(_) if stored > 0 => match job.state() {
-            JobState::Pending => {
-                job.mark_failed();
-                job.set_last_error(Some(
-                    "The partial download is missing on disk; Retry starts over.".to_string(),
-                ));
-            }
-            // A user-Paused job stays Paused; Resume restarts from zero.
-            JobState::Paused => {
-                job.set_bytes_received(0);
-                job.set_last_error(Some(
-                    "The partial download is missing on disk; Resume starts over.".to_string(),
-                ));
-            }
-            JobState::Failed | JobState::Completed => {}
-        },
+        Err(_) if stored > 0 => handle_missing_part(job),
         Err(_) => {}
     }
     Ok(())
+}
+
+/// A job that had progress lost its `.part`: a Pending job fails, a user-Paused job
+/// stays Paused and restarts from zero on Resume. Either way the user sees why.
+fn handle_missing_part(job: &mut Job) {
+    match job.state() {
+        JobState::Pending => {
+            job.mark_failed();
+            job.set_last_error(Some(
+                "The partial download is missing on disk; Retry starts over.".to_string(),
+            ));
+        }
+        JobState::Paused => {
+            job.set_bytes_received(0);
+            job.set_last_error(Some(
+                "The partial download is missing on disk; Resume starts over.".to_string(),
+            ));
+        }
+        JobState::Failed | JobState::Completed => {}
+    }
 }
 
 /// A Segmented Transfer's `.part` is preallocated and written at independent
@@ -610,7 +615,7 @@ fn reconcile_segmented_job(job: &mut Job, part_path: &Path, stored: u64) -> Resu
         job.set_total_bytes(Some(table_total));
     } else if stored > 0 && job.state() != JobState::Completed && !part_path.exists() {
         job.clear_segments();
-        job.mark_failed();
+        handle_missing_part(job);
     } else {
         job.clear_segments();
         job.set_bytes_received(0);

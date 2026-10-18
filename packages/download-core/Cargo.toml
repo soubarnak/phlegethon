@@ -18,6 +18,11 @@ sha2 = "0.10"
 fs2 = "0.4"
 quick-xml = "0.42"
 libc = "0.2"
+ts-rs = { version = "12", optional = true }
+
+[features]
+# Generate TypeScript bindings for the types that cross the IPC boundary (`scripts/gen-ts-types.sh`).
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 tempfile = "3"

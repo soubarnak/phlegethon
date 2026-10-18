@@ -123,6 +123,7 @@ impl CompanionResponse {
 /// Enqueue outcome returned to the extension (mirrors shell enqueue result).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum CompanionResult {
     EnqueueDirect { job_id: String, destination: String },
     ProbeThenConfirm { url: String },

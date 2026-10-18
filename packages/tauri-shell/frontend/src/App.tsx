@@ -109,7 +109,7 @@ function Shell() {
   const enqueueOne = useCallback(
     async (url: string, forceDirect = false) => {
       const result = await api.enqueueUrl(url, destination, forceDirect);
-      if (result.type === "ProbeThenConfirm") {
+      if (result.type === "probe_then_confirm") {
         queueProbe(result.url);
       } else {
         await refresh();
@@ -215,6 +215,17 @@ function Shell() {
       cancelled = true;
       off?.();
     };
+  }, []);
+
+  // The shell notes problems it found loading the Library Root (a corrupt queue file
+  // moved aside, rows skipped) before the webview existed; tell the user once (H-8).
+  const warnRef = useRef(toasts.warning);
+  warnRef.current = toasts.warning;
+  useEffect(() => {
+    api
+      .takeLibraryRootWarnings()
+      .then((warnings) => warnings.forEach((w) => warnRef.current(t("libraryRoot.warning"), w)))
+      .catch(() => undefined);
   }, []);
 
   // ---- probe lifecycle

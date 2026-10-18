@@ -2,9 +2,16 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { QueueTable, type QueueActions } from "./QueueTable";
+import { ProgressBar } from "@carbon/react";
 import { job } from "@/test/mockApi";
 import { NARROW_QUERY } from "@/state/useMediaQuery";
 import type { JobRow } from "@/state/useJobs";
+
+// Counts renders of the per-row ProgressBar, to see which rows re-render (H-25).
+vi.mock("@carbon/react", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@carbon/react")>();
+  return { ...real, ProgressBar: vi.fn(real.ProgressBar) };
+});
 
 function row(overrides: Partial<JobRow> & { job_id: string }): JobRow {
   return { ...job(overrides), speed_bps: null, ...overrides } as JobRow;
@@ -161,5 +168,17 @@ it("batch discard leaves out selected rows the filter has hidden (M-68)", async 
       await user.click(bar.getByRole("button", { name: "Discard" }));
       expect(a.discard).toHaveBeenCalledWith(expect.arrayContaining(["dl", "pa", "fa", "ok", "gx"]));
     });
+  });
+  it("re-renders only the row whose job changed (H-25)", () => {
+    const acts = actions();
+    const a = row({ job_id: "a", title: "A", status: "downloading", bytes_downloaded: 1, total_bytes: 100, queue_index: 0 });
+    const b = row({ job_id: "b", title: "B", status: "downloading", bytes_downloaded: 1, total_bytes: 100, queue_index: 1 });
+    const { rerender } = render(<QueueTable jobs={[a, b]} actions={acts} hasAnyJobs />);
+    const renders = vi.mocked(ProgressBar);
+    renders.mockClear();
+    // useJobs keeps the object of every job whose fields did not change.
+    rerender(<QueueTable jobs={[a, { ...b, bytes_downloaded: 50 }]} actions={acts} hasAnyJobs />);
+    expect(renders).toHaveBeenCalledTimes(1);
+    expect(within(screen.getByTestId("queue-row-b")).getByText(/50 B \/ 100 B/)).toBeInTheDocument();
   });
 });

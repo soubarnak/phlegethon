@@ -1,9 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { ActiveJobMatch } from "@/tauri/types";
 import { DuplicateUrlModal, matchStatusLabel } from "./DuplicateUrlModal";
 
-const match = { job_id: "j1", url: "https://example.com/file.zip", status: "pending", title: "file.zip" };
+const match: ActiveJobMatch = { job_id: "j1", url: "https://example.com/file.zip", status: "pending", title: "file.zip" };
 
 describe("DuplicateUrlModal", () => {
   it("renders nothing without a match", () => {

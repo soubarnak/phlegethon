@@ -1,0 +1,69 @@
+{
+  "JobSnapshot": {
+    "job_id": "job-1",
+    "url": "https://example.com/a.iso",
+    "destination": "/lib/jobs/job-1",
+    "status": "downloading",
+    "bytes_downloaded": 1024,
+    "total_bytes": 4096,
+    "title": "a.iso",
+    "path": null,
+    "is_extractor": false,
+    "extraction_tier": "direct_file",
+    "last_error": null,
+    "queue_index": 2
+  },
+  "ActiveJobMatch": [
+    { "job_id": "job-1", "url": "https://example.com/a.iso", "status": "paused", "title": "a.iso" },
+    { "job_id": "", "url": "https://example.com/v", "status": "probing", "title": "https://example.com/v" }
+  ],
+  "ExtractionTier": ["dedicated", "generic_extractor", "page_sniff", "direct_file"],
+  "MediaFetchKind": ["extractor", "direct_http"],
+  "ProbeDestinationPreview": { "path_display": "/lib/jobs/…" },
+  "ProbeResult": {
+    "url": "https://example.com/v",
+    "items": [
+      {
+        "id": "v1",
+        "title": "Video",
+        "url": "https://example.com/v?id=1",
+        "qualities": [{ "id": "1080p", "label": "1080p", "size_bytes": 1000, "container": "mp4" }],
+        "archived": false,
+        "uploader": null,
+        "upload_date": "20260101",
+        "fetch_kind": "extractor",
+        "qualities_are_presets": false,
+        "referer": null
+      }
+    ],
+    "source_name": null,
+    "tier": "dedicated",
+    "extractor_key": "Example",
+    "warnings": ["note"]
+  },
+  "EventSummary": [
+    { "type": "JobProgress", "job_id": "j", "bytes_downloaded": 5, "total_bytes": null },
+    { "type": "JobCompleted", "job_id": "j", "bytes_written": 9, "path": "/lib/j/f.bin" },
+    { "type": "JobFailed", "job_id": "j", "error": "boom" },
+    { "type": "JobPaused", "job_id": "j" },
+    { "type": "JobResumed", "job_id": "j" },
+    { "type": "JobRetried", "job_id": "j" },
+    { "type": "JobDiscarded", "job_id": "j" },
+    { "type": "JobMirrorFailover", "job_id": "j", "previous_url": "https://a", "next_url": "https://b", "error": "e" }
+  ],
+  "EnqueueResult": [
+    { "type": "enqueue_direct", "job_id": "j", "destination": "/lib/jobs/j" },
+    { "type": "probe_then_confirm", "url": "https://example.com/v" }
+  ],
+  "CompanionResult": [
+    { "type": "enqueue_direct", "job_id": "j", "destination": "/lib/jobs/j" },
+    { "type": "probe_then_confirm", "url": "https://example.com/v" }
+  ],
+  "CompanionIntentEvent": [
+    {
+      "url": "https://example.com/a.iso",
+      "result": { "type": "enqueue_direct", "job_id": "j", "destination": "/lib/jobs/j" }
+    },
+    { "url": "https://example.com/v", "result": { "type": "probe_then_confirm", "url": "https://example.com/v" } }
+  ]
+}

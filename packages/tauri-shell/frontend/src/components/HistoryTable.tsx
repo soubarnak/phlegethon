@@ -27,7 +27,8 @@ interface HistoryTableProps {
   onRedownload: (url: string) => void;
 }
 
-const FILTERS: Array<{ id: HistoryFilter; label: string }> = [
+// Built on first render, not at module scope: t() at import time runs before initLocale() (L-59).
+const historyFilters = (): Array<{ id: HistoryFilter; label: string }> => [
   { id: "all", label: t("history.filter.all") },
   { id: "Completed", label: t("history.filter.completed") },
   { id: "Failed", label: t("history.filter.failed") },
@@ -36,7 +37,8 @@ const FILTERS: Array<{ id: HistoryFilter; label: string }> = [
 export function HistoryTable({ refreshKey, onRedownload }: HistoryTableProps) {
   const toasts = useToasts();
   const [entries, setEntries] = useState<ArchiveEntry[]>([]);
-  const [filter, setFilter] = useState(FILTERS[0]);
+  const filters = useMemo(historyFilters, []);
+  const [filter, setFilter] = useState(filters[0]);
   const [confirmClear, setConfirmClear] = useState(false);
 
   const load = useCallback(async () => {
@@ -95,7 +97,7 @@ export function HistoryTable({ refreshKey, onRedownload }: HistoryTableProps) {
           size="md"
           titleText={t("history.filter.label")}
           label={t("history.filter.label")}
-          items={FILTERS}
+          items={filters}
           itemToString={(i) => i?.label ?? ""}
           selectedItem={filter}
           onChange={({ selectedItem }) => selectedItem && setFilter(selectedItem)}
