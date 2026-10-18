@@ -23,6 +23,7 @@ import { buildBatchDiscardCopy, buildDiscardConfirmCopy, type DiscardConfirmCopy
 import { maybeNotify, loadDesktopNotificationsEnabled, saveDesktopNotificationsEnabled } from "@/lib/notifications";
 import { resolveDuplicateUrl, processUrlInput, type DuplicateResolution } from "@/lib/urlInput";
 import { errorToString } from "@/lib/errors";
+import { capToPromptKb } from "@/lib/bandwidthCap";
 import { t } from "@/lib/i18n";
 import { writeClipboardText } from "@/tauri/platform";
 import { useJobs, type JobRow } from "@/state/useJobs";
@@ -340,19 +341,31 @@ function Shell() {
       setExpectedHash: (job: JobSnapshot) => setHashRequest({ jobId: job.job_id, title: job.title }),
       viewMirrors: (job: JobSnapshot) => setMirrorsRequest({ jobId: job.job_id, title: job.title }),
       setJobCap: (job: JobSnapshot) =>
-        setPrompt({
-          title: t("queue.cap.title"),
-          label: t("queue.cap.label"),
-          placeholder: "0",
-          confirmLabel: t("settings.apply"),
-          validate: (v) => (/^\d+$/.test(v.trim()) ? null : t("queue.cap.invalid")),
-          onSubmit: (v) =>
-            guard(t("queue.cap.failed"), async () => {
-              const kb = Number(v.trim());
-              await api.setJobBandwidthCap(job.job_id, kb > 0 ? kb * 1024 : null);
-              toasts.success(kb > 0 ? t("queue.cap.set", { kb }) : t("queue.cap.cleared"));
-            }),
-        }),
+        void Promise.all([api.getJobBandwidthCap(job.job_id), api.getGlobalBandwidthCap()]).then(
+          ([jobCap, globalCap]) => {
+            // Show the limit in force now, so the prompt is not a blind edit.
+            const jobKb = capToPromptKb(jobCap);
+            const globalKb = capToPromptKb(globalCap);
+            const current = jobKb == null ? t("queue.cap.currentNone") : t("queue.cap.current", { kb: jobKb });
+            const global = globalKb == null ? "" : t("queue.cap.global", { kb: globalKb });
+            setPrompt({
+              title: t("queue.cap.title"),
+              label: t("queue.cap.label"),
+              placeholder: "0",
+              initialValue: String(jobKb ?? 0),
+              helperText: [current, global].filter(Boolean).join(" "),
+              confirmLabel: t("settings.apply"),
+              validate: (v) => (/^\d+$/.test(v.trim()) ? null : t("queue.cap.invalid")),
+              onSubmit: (v) =>
+                guard(t("queue.cap.failed"), async () => {
+                  const kb = Number(v.trim());
+                  await api.setJobBandwidthCap(job.job_id, kb > 0 ? kb * 1024 : null);
+                  toasts.success(kb > 0 ? t("queue.cap.set", { kb }) : t("queue.cap.cleared"));
+                }),
+            });
+          },
+          (err) => toasts.error(t("queue.cap.loadFailed"), err),
+        ),
     }),
     [guard, kick, toasts],
   );
@@ -508,6 +521,10 @@ export interface PromptRequest {
   title: string;
   label: string;
   placeholder?: string;
+  /** Pre-filled value, for editing a setting that already has one. */
+  initialValue?: string;
+  /** Shown under the field, for example the limit in force now. */
+  helperText?: string;
   confirmLabel: string;
   validate: (value: string) => string | null;
   onSubmit: (value: string) => void | Promise<void>;
