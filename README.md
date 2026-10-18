@@ -16,16 +16,22 @@ luxuretv.com and xxxbp.tv have their own extractor plugins in this repo.
 
 ## Install on Void Linux
 
-The release artifact is an xbps package. The quickest way is to download it from the [GitHub releases](https://github.com/soubarnak/phlegethon/releases): `phlegethon-<version>_1.x86_64.xbps` for glibc, `phlegethon-<version>_1.x86_64-musl.xbps` for musl.
+Each [GitHub release](https://github.com/soubarnak/phlegethon/releases) is a signed xbps repository. Add it once, then install:
 
 ```sh
-mkdir phlegethon-repo && cd phlegethon-repo
-curl -LO https://github.com/soubarnak/phlegethon/releases/download/v0.1.0/phlegethon-0.1.0_1.x86_64.xbps
-xbps-rindex -a *.xbps
-sudo xbps-install --repository="$PWD" phlegethon
+echo 'repository=https://github.com/soubarnak/phlegethon/releases/latest/download' | sudo tee /etc/xbps.d/20-phlegethon.conf
+sudo xbps-install -S phlegethon
 ```
 
-Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed, or when the workflow is run by hand with a `version` (it creates the tag on the commit it built, and refuses a version whose tag already exists). The same build runs locally in a pinned Void container. Podman is the default container engine; set `CONTAINER_ENGINE=docker` to use Docker instead:
+xbps picks the glibc or the musl index for your system. The first `xbps-install -S` shows the signing key fingerprint and asks whether to import the key. Import it only when the fingerprint is:
+
+```
+fa:d1:00:32:ce:b1:b9:fd:73:05:05:76:75:54:37:25
+```
+
+Do not pass `-y` on that first install, because it skips the fingerprint check. Later updates come from `sudo xbps-install -Su`.
+
+Releases are built by `.github/workflows/release.yml` when a `phlegethon-v*` tag is pushed, or when the workflow is run by hand with a `version` (it creates the tag on the commit it built, and refuses a version whose tag already exists). The same build runs locally in a pinned Void container. Podman is the default container engine; set `CONTAINER_ENGINE=docker` to use Docker instead:
 
 ```sh
 make dist              # frontend + source tarball
