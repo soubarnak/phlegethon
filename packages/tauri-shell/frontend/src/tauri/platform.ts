@@ -66,12 +66,3 @@ export async function notificationPort(): Promise<NotificationPort | null> {
     },
   };
 }
-
-export async function openExternal(url: string): Promise<void> {
-  if (!isTauri()) {
-    window.open(url, "_blank", "noopener");
-    return;
-  }
-  const { openUrl } = await import("@tauri-apps/plugin-opener");
-  await openUrl(url);
-}

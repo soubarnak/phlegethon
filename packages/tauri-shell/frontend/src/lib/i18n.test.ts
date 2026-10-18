@@ -77,6 +77,7 @@ describe("i18n", () => {
     { prefix: "error.hint.", builder: "lib/errors.ts" },
     { prefix: "toolchain.ejs.", builder: "components/ToolchainPanel.tsx" },
     { prefix: "toolchain.source.", builder: "components/ToolchainPanel.tsx" },
+    { prefix: "hash.algorithm.", builder: "components/ExpectedHashModal.tsx" },
   ];
 
   it("has no unused keys in en.json", () => {

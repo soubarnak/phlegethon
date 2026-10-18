@@ -17,7 +17,6 @@ import type {
   ProbeDestinationPreview,
   ProbeResult,
   PickFolderResult,
-  PlatformCapabilities,
   ProbeSelection,
   ProbeTierSettings,
   ProxySettings,
@@ -32,7 +31,6 @@ import type {
 export const api = {
   // ---- URL input / enqueue
   splitUrls: (text: string) => invoke<string[]>("split_urls_cmd", { text }),
-  normalizeUrl: (url: string) => invoke<string | null>("normalize_url_cmd", { url }),
   findActiveJobForUrl: (url: string) =>
     invoke<ActiveJobMatch | null>("find_active_job_for_url", { url }),
   enqueueUrl: (url: string, destination: string | null, forceDirect = false) =>
@@ -76,11 +74,9 @@ export const api = {
 
   // ---- Window / files
   pickFolder: (title?: string) => invoke<PickFolderResult>("pick_folder", { title: title ?? null }),
-  getPlatformCapabilities: () => invoke<PlatformCapabilities>("get_platform_capabilities"),
   notifyFallback: (summary: string, body: string) =>
     invoke<boolean>("notify_fallback", { summary, body }),
   isMainWindowFocused: () => invoke<boolean>("is_main_window_focused"),
-  focusMainWindow: () => invoke<void>("focus_main_window"),
 
   // ---- Settings
   getLibraryRoot: () => invoke<string | null>("get_library_root"),
@@ -126,10 +122,7 @@ export const api = {
 
   // ---- History
   listHistory: () => invoke<ArchiveEntry[]>("list_history"),
-  listHistoryByOutcome: (outcome: ArchiveOutcome) =>
-    invoke<ArchiveEntry[]>("list_history_by_outcome", { outcome }),
   removeHistoryEntry: (mediaId: string) => invoke<void>("remove_history_entry", { mediaId }),
-  historyLen: () => invoke<number>("history_len"),
   clearHistory: (outcome: ArchiveOutcome | null) => invoke<number>("clear_history", { outcome }),
 };
 

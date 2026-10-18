@@ -187,10 +187,3 @@ export interface PickFolderResult {
   path: string | null;
   method: PickerMethod;
 }
-
-export interface PlatformCapabilities {
-  folder_picker: PickerMethod;
-  portal: boolean;
-  wayland: boolean;
-  notify_send: boolean;
-}
