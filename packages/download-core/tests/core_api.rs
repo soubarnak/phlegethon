@@ -6689,6 +6689,11 @@ fn list_history_returns_completed_entries_newest_first() {
     assert!(history
         .iter()
         .all(|e| e.outcome == ArchiveOutcome::Completed));
+    // History sorts by size, so each Completed entry carries its finished file's byte count.
+    for entry in &history {
+        let on_disk = std::fs::metadata(&entry.destination).unwrap().len();
+        assert_eq!(entry.size_bytes, Some(on_disk), "size of {}", entry.media_id);
+    }
 }
 
 #[test]
