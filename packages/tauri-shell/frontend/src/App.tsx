@@ -38,6 +38,7 @@ import { HistoryTable } from "@/components/HistoryTable";
 import { SettingsPage } from "@/components/SettingsPage";
 import { PromptModal } from "@/components/PromptModal";
 import { ExpectedHashModal, type ExpectedHashRequest } from "@/components/ExpectedHashModal";
+import { MirrorsModal, type MirrorsRequest } from "@/components/MirrorsModal";
 import type { ActiveJobMatch } from "@/tauri/types";
 
 const TAB_QUEUE = 0;
@@ -72,6 +73,7 @@ function Shell() {
   const [discardIds, setDiscardIds] = useState<string[] | null>(null);
   const [prompt, setPrompt] = useState<PromptRequest | null>(null);
   const [hashRequest, setHashRequest] = useState<ExpectedHashRequest | null>(null);
+  const [mirrorsRequest, setMirrorsRequest] = useState<MirrorsRequest | null>(null);
   const jobsRef = useRef<JobRow[]>([]);
   jobsRef.current = jobs;
 
@@ -336,6 +338,7 @@ function Shell() {
             }),
         }),
       setExpectedHash: (job: JobSnapshot) => setHashRequest({ jobId: job.job_id, title: job.title }),
+      viewMirrors: (job: JobSnapshot) => setMirrorsRequest({ jobId: job.job_id, title: job.title }),
       setJobCap: (job: JobSnapshot) =>
         setPrompt({
           title: t("queue.cap.title"),
@@ -492,6 +495,11 @@ function Shell() {
       />
       <PromptModal request={prompt} onClose={() => setPrompt(null)} />
       <ExpectedHashModal request={hashRequest} onClose={() => setHashRequest(null)} />
+      <MirrorsModal
+        request={mirrorsRequest}
+        currentUrl={jobs.find((j) => j.job_id === mirrorsRequest?.jobId)?.url ?? null}
+        onClose={() => setMirrorsRequest(null)}
+      />
     </div>
   );
 }

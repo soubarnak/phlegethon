@@ -52,6 +52,7 @@ export interface QueueActions {
   addMirror: (job: JobRow) => void;
   setJobCap: (job: JobRow) => void;
   setExpectedHash: (job: JobRow) => void;
+  viewMirrors: (job: JobRow) => void;
   pauseMany: (jobIds: string[]) => void;
   resumeMany: (jobIds: string[]) => void;
   retryMany: (jobIds: string[]) => void;
@@ -221,6 +222,7 @@ const QueueRowCells = memo(function QueueRowCells({ job, actions, isLast }: Queu
               <OverflowMenuItem itemText={t("queue.action.addMirror")} disabled={job.is_extractor || job.status === "completed"} onClick={() => actions.addMirror(job)} />
               <OverflowMenuItem itemText={t("queue.action.bandwidthCap")} disabled={job.status === "completed"} onClick={() => actions.setJobCap(job)} />
               <OverflowMenuItem itemText={t("queue.action.expectedHash")} disabled={job.status === "completed"} onClick={() => actions.setExpectedHash(job)} />
+              <OverflowMenuItem itemText={t("queue.action.viewMirrors")} onClick={() => actions.viewMirrors(job)} />
               <OverflowMenuItem hasDivider isDelete itemText={t("queue.action.discard")} onClick={() => actions.discard([job.job_id])} />
             </OverflowMenu>
           </div>

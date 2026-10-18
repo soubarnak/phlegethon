@@ -156,6 +156,24 @@ describe("App", () => {
     );
   });
 
+  it("Mirrors from the row menu lists the job's Mirror Set and marks the URL in use", async () => {
+    const { handlers } = baseHandlers({
+      job_mirrors: () => ["https://one.example.com/f.iso", "https://two.example.com/f.iso"],
+    });
+    handlers.list_jobs = () => [job({ job_id: "mv", title: "Mirrored file", url: "https://two.example.com/f.iso", status: "downloading" })];
+    const ipc = installFakeIpc(handlers);
+    render(<App />);
+    const user = userEvent.setup();
+    const row = await screen.findByTestId("queue-row-mv");
+    await user.click(within(row).getByRole("button", { name: /actions for mirrored file/i }));
+    const menu = document.body.querySelector<HTMLElement>("[role=menu]")!;
+    await user.click(within(menu).getByText("Mirrors…"));
+    const list = await within(await screen.findByRole("dialog")).findByTestId("mirror-list");
+    expect(ipc.callsTo("job_mirrors")).toEqual([{ jobId: "mv" }]);
+    const items = within(list).getAllByRole("listitem");
+    expect(items.map((li) => li.textContent)).toEqual(["https://one.example.com/f.iso", "https://two.example.com/f.isoCurrent"]);
+  });
+
   it("History tab lists entries with working remove and clear actions", async () => {
     const entries = [{ media_id: "m1", title: "Saved video", url: "https://x/1", completed_at_unix_secs: 1, destination: "/d/m1", job_id: "j", outcome: "Completed" }];
     const { handlers } = baseHandlers({
