@@ -1,20 +1,26 @@
 name: Release
 
-# Builds the source tarball and the x86_64 xbps packages (glibc and musl) and publishes
-# them as a GitHub release. Two ways to release (the version must match every version
-# location, see scripts/check-versions.sh):
-#   - push a tag like v0.1.0, or
-#   - Actions > Release > Run workflow with `version` set to 0.1.0: the release and
-#     its v0.1.0 tag are created on the commit the workflow ran on. The run is refused
+# Builds the source tarball and the x86_64 xbps packages (glibc and musl), signs an xbps
+# repository over them and publishes everything as a GitHub release. Two ways to release
+# (the version must match every version location, see scripts/check-versions.sh):
+#   - push a tag like phlegethon-v0.1.0, or
+#   - Actions > Release > Run workflow with `version` set to 0.1.0: the release and its
+#     phlegethon-v0.1.0 tag are created on the commit the workflow ran on. The run is refused
 #     when that tag already exists, so a published release is never rebuilt.
 # Running it by hand with `version` empty builds everything without publishing.
 #
+# Users install from https://github.com/soubarnak/phlegethon/releases/latest/download, so
+# every release carries the full signed repository: <arch>-repodata, the packages and their
+# .sig2 files. After publishing, the bump job sets the new source checksum in the xbps
+# template on main.
+#
 # Third-party actions are pinned by commit SHA (the comment names the release); the
-# Void images and void-packages commit are pinned in packaging/void/images.env.
+# Void images and void-packages commit are pinned in packaging/void/images.env. The
+# repository signing key is the Actions secret XBPS_PRIVKEY and is never committed.
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["phlegethon-v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -23,9 +29,9 @@ on:
         default: ""
 
 env:
-  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || (inputs.version != '' && format('v{0}', inputs.version) || '') }}
+  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || (inputs.version != '' && format('phlegethon-v{0}', inputs.version) || '') }}
 
-# Jobs get read access only; the publish job asks for write access itself.
+# Jobs get read access only; the publish and bump jobs ask for write access themselves.
 permissions:
   contents: read
 
@@ -154,11 +160,33 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      CONTAINER_ENGINE: docker
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true
+      - name: Sign the xbps repository
+        # sign-repo.sh indexes each libc's package as <arch>-repodata and signs it, and signs
+        # each package (.sig2). The image comes from packaging/void/images.env.
+        env:
+          XBPS_PRIVKEY: ${{ secrets.XBPS_PRIVKEY }}
+        run: |
+          set -eu
+          if [ -z "$XBPS_PRIVKEY" ]; then
+            echo "::error::secret XBPS_PRIVKEY is empty. Add the repository signing key before publishing."
+            exit 1
+          fi
+          . packaging/void/images.env
+          umask 077
+          keyfile="$RUNNER_TEMP/xbps-privkey.pem"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$XBPS_PRIVKEY" >"$keyfile"
+          chmod 600 "$keyfile"
+          "$CONTAINER_ENGINE" run --rm -v "$PWD:/src" -v "$keyfile:/run/xbps-privkey.pem:ro" \
+            "$VOID_IMAGE_SIGN" sh /src/packaging/void/sign-repo.sh /src/artifacts /run/xbps-privkey.pem
       - name: Checksums
         working-directory: artifacts
         run: |
@@ -170,7 +198,14 @@ jobs:
           name: Phlegethon ${{ env.RELEASE_TAG }}
           # A manual run creates the tag on the commit it built.
           target_commitish: ${{ github.sha }}
-          files: artifacts/*
+          # The install instructions use releases/latest, so this release must be the latest.
+          make_latest: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.xbps
+            artifacts/*.xbps.sig2
+            artifacts/*-repodata
+            artifacts/SHA256SUMS
           fail_on_unmatched_files: true
           body: |
             Phlegethon ${{ env.RELEASE_TAG }} for Void Linux (x86_64).
@@ -179,15 +214,56 @@ jobs:
             | --- | --- |
             | `phlegethon-*.x86_64.xbps` | glibc Void |
             | `phlegethon-*.x86_64-musl.xbps` | musl Void |
+            | `*.xbps.sig2` | signature of each package |
+            | `x86_64-repodata`, `x86_64-musl-repodata` | signed repository index, one per libc |
             | `phlegethon-*.tar.gz` | source, with the prebuilt frontend, for xbps-src |
+            | `SHA256SUMS` | checksums of all the files above |
 
-            Install (pick the file for your libc):
+            Install from the release repository:
 
             ```sh
-            mkdir phlegethon-repo && cd phlegethon-repo
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/<file>.xbps
-            xbps-rindex -a *.xbps
-            sudo xbps-install --repository="$PWD" phlegethon
+            echo 'repository=https://github.com/${{ github.repository }}/releases/latest/download' | sudo tee /etc/xbps.d/20-phlegethon.conf
+            sudo xbps-install -S phlegethon
             ```
 
-            It pulls in yt-dlp, ffmpeg, nodejs, xdg-utils, xdg-desktop-portal and dbus. Also install a portal backend for your desktop, for example `xdg-desktop-portal-gtk`. Check the download against `SHA256SUMS`.
+            The signing key fingerprint is `fa:d1:00:32:ce:b1:b9:fd:73:05:05:76:75:54:37:25`. Check it when `xbps-install -S` shows it before you import the key.
+
+            It pulls in yt-dlp, ffmpeg, nodejs, xdg-utils, xdg-desktop-portal and dbus. Also install a portal backend for your desktop, for example `xdg-desktop-portal-gtk`.
+
+  bump:
+    name: Bump the template checksum on main
+    needs: release
+    if: github.ref_type == 'tag' || inputs.version != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: dist
+      - name: Commit the release checksum to main
+        # The checksum comes from the tarball that was just published, not from a carried value.
+        # main may have moved on to a newer version; then its template is left alone.
+        run: |
+          set -eu
+          version=${RELEASE_TAG#phlegethon-v}
+          template=packaging/void/srcpkgs/phlegethon/template
+          if ! grep -qx "version=$version" "$template"; then
+            echo "main is not at $version; leaving $template alone"
+            exit 0
+          fi
+          sum=$(sha256sum "dist/phlegethon-$version.tar.gz" | cut -d' ' -f1)
+          sed -i "s/^checksum=.*/checksum=$sum/" "$template"
+          if git diff --quiet -- "$template"; then
+            echo "checksum already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "$template"
+          git commit -m "Set xbps template checksum for $RELEASE_TAG"
+          git push origin HEAD:main
