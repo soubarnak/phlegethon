@@ -33,7 +33,7 @@ export default defineConfig({
       scss: {
         loadPaths: [path.resolve(frontendRoot, "node_modules")],
         quietDeps: true,
-        silenceDeprecations: ["mixed-decls", "global-builtin", "import", "color-functions"],
+        silenceDeprecations: ["global-builtin", "import", "color-functions"],
       },
     },
   },
