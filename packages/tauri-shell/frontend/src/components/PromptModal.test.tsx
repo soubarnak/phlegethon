@@ -49,4 +49,20 @@ describe("PromptModal", () => {
     await user.keyboard("{Enter}");
     expect(req.onSubmit).not.toHaveBeenCalled();
   });
+
+  it("starts from the initial value and shows the helper text under the field", async () => {
+    const req = request({
+      title: "Speed limit",
+      label: "Limit in KB/s",
+      initialValue: "512",
+      helperText: "Current limit for this job: 512 KB/s.",
+      validate: (v) => (/^\d+$/.test(v) ? null : "Enter a whole number"),
+    });
+    render(<PromptModal request={req} onClose={vi.fn()} />);
+    const input = await screen.findByLabelText("Limit in KB/s");
+    expect(input).toHaveValue("512");
+    expect(screen.getByText("Current limit for this job: 512 KB/s.")).toBeInTheDocument();
+    await userEvent.setup().type(input, "{Enter}");
+    expect(req.onSubmit).toHaveBeenCalledWith("512");
+  });
 });

@@ -138,6 +138,88 @@ describe("App", () => {
     await waitFor(() => expect(ipc.callsTo("discard_job")).toEqual([{ jobId: "d1" }]));
   });
 
+  it("Set expected hash from the row menu sends the digest for that job", async () => {
+    const { handlers } = baseHandlers({ set_job_expected_hash: () => undefined });
+    handlers.list_jobs = () => [job({ job_id: "h1", title: "Checked file", status: "pending" })];
+    const ipc = installFakeIpc(handlers);
+    render(<App />);
+    const user = userEvent.setup();
+    const row = await screen.findByTestId("queue-row-h1");
+    await user.click(within(row).getByRole("button", { name: /actions for checked file/i }));
+    const menu = document.body.querySelector<HTMLElement>("[role=menu]")!;
+    await user.click(within(menu).getByText("Set expected hash…"));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Digest"), "A".repeat(64));
+    await user.click(within(dialog).getByRole("button", { name: "Set hash" }));
+    await waitFor(() =>
+      expect(ipc.callsTo("set_job_expected_hash")).toEqual([{ jobId: "h1", algorithm: "sha-256", digest: "a".repeat(64) }]),
+    );
+  });
+
+  it("Mirrors from the row menu lists the job's Mirror Set and marks the URL in use", async () => {
+    const { handlers } = baseHandlers({
+      job_mirrors: () => ["https://one.example.com/f.iso", "https://two.example.com/f.iso"],
+    });
+    handlers.list_jobs = () => [job({ job_id: "mv", title: "Mirrored file", url: "https://two.example.com/f.iso", status: "downloading" })];
+    const ipc = installFakeIpc(handlers);
+    render(<App />);
+    const user = userEvent.setup();
+    const row = await screen.findByTestId("queue-row-mv");
+    await user.click(within(row).getByRole("button", { name: /actions for mirrored file/i }));
+    const menu = document.body.querySelector<HTMLElement>("[role=menu]")!;
+    await user.click(within(menu).getByText("Mirrors…"));
+    const list = await within(await screen.findByRole("dialog")).findByTestId("mirror-list");
+    expect(ipc.callsTo("job_mirrors")).toEqual([{ jobId: "mv" }]);
+    const items = within(list).getAllByRole("listitem");
+    expect(items.map((li) => li.textContent)).toEqual(["https://one.example.com/f.iso", "https://two.example.com/f.isoCurrent"]);
+  });
+
+  it("the speed-limit prompt starts from the job's current limit and shows the global one", async () => {
+    const { handlers } = baseHandlers({
+      get_job_bandwidth_cap: () => 512 * 1024,
+      get_global_bandwidth_cap: () => 2048 * 1024,
+      set_job_bandwidth_cap: () => undefined,
+    });
+    handlers.list_jobs = () => [job({ job_id: "c1", title: "Capped file", status: "downloading" })];
+    const ipc = installFakeIpc(handlers);
+    render(<App />);
+    const user = userEvent.setup();
+    const row = await screen.findByTestId("queue-row-c1");
+    await user.click(within(row).getByRole("button", { name: /actions for capped file/i }));
+    const menu = document.body.querySelector<HTMLElement>("[role=menu]")!;
+    await user.click(within(menu).getByText("Speed limit…"));
+
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByLabelText("Limit in KB/s (0 removes the limit)");
+    expect(input).toHaveValue("512");
+    expect(within(dialog).getByText("Current limit for this job: 512 KB/s. The global limit of 2048 KB/s also applies.")).toBeInTheDocument();
+    expect(ipc.callsTo("get_job_bandwidth_cap")).toEqual([{ jobId: "c1" }]);
+
+    await user.clear(input);
+    await user.type(input, "256");
+    await user.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(ipc.callsTo("set_job_bandwidth_cap")).toEqual([{ jobId: "c1", cap: 256 * 1024 }]));
+  });
+
+  it("the speed-limit prompt says when the job and the global cap are both uncapped", async () => {
+    const { handlers } = baseHandlers({
+      get_job_bandwidth_cap: () => null,
+      get_global_bandwidth_cap: () => null,
+    });
+    handlers.list_jobs = () => [job({ job_id: "c2", title: "Open file", status: "pending" })];
+    installFakeIpc(handlers);
+    render(<App />);
+    const user = userEvent.setup();
+    const row = await screen.findByTestId("queue-row-c2");
+    await user.click(within(row).getByRole("button", { name: /actions for open file/i }));
+    const menu = document.body.querySelector<HTMLElement>("[role=menu]")!;
+    await user.click(within(menu).getByText("Speed limit…"));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByLabelText("Limit in KB/s (0 removes the limit)")).toHaveValue("0");
+    expect(within(dialog).getByText("This job has no speed limit.")).toBeInTheDocument();
+  });
+
   it("History tab lists entries with working remove and clear actions", async () => {
     const entries = [{ media_id: "m1", title: "Saved video", url: "https://x/1", completed_at_unix_secs: 1, destination: "/d/m1", job_id: "j", outcome: "Completed" }];
     const { handlers } = baseHandlers({

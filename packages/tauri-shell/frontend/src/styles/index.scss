@@ -769,3 +769,18 @@ body {
 .ph-break {
   word-break: break-all;
 }
+
+.ph-mirrors {
+  display: grid;
+  gap: $spacing-03;
+  margin: 0;
+  padding-left: $spacing-05;
+
+  li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: $spacing-02;
+    min-width: 0;
+  }
+}
