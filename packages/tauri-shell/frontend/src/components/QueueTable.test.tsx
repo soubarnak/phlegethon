@@ -20,7 +20,7 @@ function row(overrides: Partial<JobRow> & { job_id: string }): JobRow {
 function actions(): QueueActions {
   return {
     pause: vi.fn(), resume: vi.fn(), retry: vi.fn(), discard: vi.fn(), moveUp: vi.fn(), moveDown: vi.fn(),
-    reveal: vi.fn(), open: vi.fn(), copyUrl: vi.fn(), addMirror: vi.fn(), setJobCap: vi.fn(),
+    reveal: vi.fn(), open: vi.fn(), copyUrl: vi.fn(), addMirror: vi.fn(), setJobCap: vi.fn(), setExpectedHash: vi.fn(),
     pauseMany: vi.fn(), resumeMany: vi.fn(), retryMany: vi.fn(),
   };
 }
@@ -92,6 +92,18 @@ describe("QueueTable", () => {
     await user.click(within(screen.getByTestId("queue-row-pa")).getByRole("button", { name: /actions for paused clip/i }));
     await user.click(menuItem("Discard"));
     expect(a.discard).toHaveBeenCalledWith(["pa"]);
+  });
+
+  it("Set expected hash opens for unfinished jobs and is disabled once completed", async () => {
+    const a = actions();
+    render(<QueueTable jobs={jobs} actions={a} hasAnyJobs />);
+    const user = userEvent.setup();
+    await user.click(within(screen.getByTestId("queue-row-fa")).getByRole("button", { name: /actions for failed clip/i }));
+    await user.click(menuItem("Set expected hash…"));
+    expect(a.setExpectedHash).toHaveBeenCalledWith(expect.objectContaining({ job_id: "fa" }));
+
+    await user.click(within(screen.getByTestId("queue-row-ok")).getByRole("button", { name: /actions for done clip/i }));
+    expect(menuItem("Set expected hash…").closest("button")).toBeDisabled();
   });
 
   it("filters by state and searches by text", async () => {

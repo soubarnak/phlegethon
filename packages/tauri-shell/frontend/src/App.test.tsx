@@ -138,6 +138,24 @@ describe("App", () => {
     await waitFor(() => expect(ipc.callsTo("discard_job")).toEqual([{ jobId: "d1" }]));
   });
 
+  it("Set expected hash from the row menu sends the digest for that job", async () => {
+    const { handlers } = baseHandlers({ set_job_expected_hash: () => undefined });
+    handlers.list_jobs = () => [job({ job_id: "h1", title: "Checked file", status: "pending" })];
+    const ipc = installFakeIpc(handlers);
+    render(<App />);
+    const user = userEvent.setup();
+    const row = await screen.findByTestId("queue-row-h1");
+    await user.click(within(row).getByRole("button", { name: /actions for checked file/i }));
+    const menu = document.body.querySelector<HTMLElement>("[role=menu]")!;
+    await user.click(within(menu).getByText("Set expected hash…"));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Digest"), "A".repeat(64));
+    await user.click(within(dialog).getByRole("button", { name: "Set hash" }));
+    await waitFor(() =>
+      expect(ipc.callsTo("set_job_expected_hash")).toEqual([{ jobId: "h1", algorithm: "sha-256", digest: "a".repeat(64) }]),
+    );
+  });
+
   it("History tab lists entries with working remove and clear actions", async () => {
     const entries = [{ media_id: "m1", title: "Saved video", url: "https://x/1", completed_at_unix_secs: 1, destination: "/d/m1", job_id: "j", outcome: "Completed" }];
     const { handlers } = baseHandlers({

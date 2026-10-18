@@ -37,6 +37,7 @@ import { DuplicateUrlModal } from "@/components/DuplicateUrlModal";
 import { HistoryTable } from "@/components/HistoryTable";
 import { SettingsPage } from "@/components/SettingsPage";
 import { PromptModal } from "@/components/PromptModal";
+import { ExpectedHashModal, type ExpectedHashRequest } from "@/components/ExpectedHashModal";
 import type { ActiveJobMatch } from "@/tauri/types";
 
 const TAB_QUEUE = 0;
@@ -70,6 +71,7 @@ function Shell() {
   const [duplicate, setDuplicate] = useState<{ match: ActiveJobMatch; resolve: (r: DuplicateResolution) => void } | null>(null);
   const [discardIds, setDiscardIds] = useState<string[] | null>(null);
   const [prompt, setPrompt] = useState<PromptRequest | null>(null);
+  const [hashRequest, setHashRequest] = useState<ExpectedHashRequest | null>(null);
   const jobsRef = useRef<JobRow[]>([]);
   jobsRef.current = jobs;
 
@@ -333,6 +335,7 @@ function Shell() {
               toasts.success(t("queue.mirror.added"));
             }),
         }),
+      setExpectedHash: (job: JobSnapshot) => setHashRequest({ jobId: job.job_id, title: job.title }),
       setJobCap: (job: JobSnapshot) =>
         setPrompt({
           title: t("queue.cap.title"),
@@ -488,6 +491,7 @@ function Shell() {
         }}
       />
       <PromptModal request={prompt} onClose={() => setPrompt(null)} />
+      <ExpectedHashModal request={hashRequest} onClose={() => setHashRequest(null)} />
     </div>
   );
 }
