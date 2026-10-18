@@ -130,6 +130,8 @@ export interface ArchiveEntry {
   destination: string;
   job_id: string;
   outcome: ArchiveOutcome;
+  /** Bytes of the finished file; null for Failed entries and for entries recorded before sizes were kept. */
+  size_bytes: number | null;
 }
 
 export interface ToolInfo {
