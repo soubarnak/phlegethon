@@ -78,6 +78,12 @@ impl ManualClock {
     }
 }
 
+impl Default for ManualClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Clock for ManualClock {
     fn now(&self) -> Duration {
         *self.now.lock().unwrap()
@@ -86,16 +92,6 @@ impl Clock for ManualClock {
     /// Sleeping advances the manual clock instead of waiting.
     fn sleep(&self, duration: Duration) {
         self.advance(duration);
-    }
-}
-
-/// Effective bytes/sec limit from optional global and per-job caps.
-pub fn effective_rate_bytes_per_sec(global: Option<u64>, per_job: Option<u64>) -> Option<u64> {
-    match (global, per_job) {
-        (Some(g), Some(j)) => Some(g.min(j)),
-        (Some(g), None) => Some(g),
-        (None, Some(j)) => Some(j),
-        (None, None) => None,
     }
 }
 
@@ -192,7 +188,6 @@ pub struct TransferWriter<'a, W: Write> {
     global: Option<SharedTokenBucket>,
     job: Option<SharedTokenBucket>,
     pause_requested: &'a AtomicBool,
-    written: u64,
     paused: bool,
     progress: Option<TransferProgress>,
 }
@@ -209,7 +204,6 @@ impl<'a, W: Write> TransferWriter<'a, W> {
             global,
             job,
             pause_requested,
-            written: 0,
             paused: false,
             progress: None,
         }
@@ -218,10 +212,6 @@ impl<'a, W: Write> TransferWriter<'a, W> {
     pub fn with_progress(mut self, progress: TransferProgress) -> Self {
         self.progress = Some(progress);
         self
-    }
-
-    pub fn bytes_written(&self) -> u64 {
-        self.written
     }
 
     pub fn was_paused(&self) -> bool {
@@ -327,7 +317,6 @@ impl<W: Write> Write for TransferWriter<'_, W> {
         if n < allowed {
             self.refund_unused((allowed - n) as u64);
         }
-        self.written += n as u64;
         if n > 0 {
             self.emit_progress(n as u64);
         }
@@ -373,7 +362,6 @@ mod tests {
             for _ in 0..50 {
                 writer.write_all(&[0u8; 8]).unwrap();
             }
-            writer.bytes_written()
         });
         // Nobody reads `rx`: with a blocking send the writer would hang on write two.
         let started = std::time::Instant::now();
@@ -384,16 +372,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(done.join().unwrap(), 400);
+        done.join().unwrap();
         drop(rx);
-    }
-
-    #[test]
-    fn effective_rate_is_min_of_global_and_per_job() {
-        assert_eq!(effective_rate_bytes_per_sec(Some(100), Some(10)), Some(10));
-        assert_eq!(effective_rate_bytes_per_sec(Some(5), Some(100)), Some(5));
-        assert_eq!(effective_rate_bytes_per_sec(Some(100), None), Some(100));
-        assert_eq!(effective_rate_bytes_per_sec(None, Some(50)), Some(50));
-        assert_eq!(effective_rate_bytes_per_sec(None, None), None);
     }
 }
