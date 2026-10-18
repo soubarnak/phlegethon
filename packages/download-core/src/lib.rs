@@ -113,11 +113,16 @@ use transfer::{
 
 /// Serializable job row for platform shells.
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobSnapshot {
     pub job_id: String,
     pub url: String,
     pub destination: String,
     /// `pending` | `downloading` | `paused` | `failed` | `completed`.
+    #[cfg_attr(
+        feature = "ts",
+        ts(type = "\"pending\" | \"downloading\" | \"paused\" | \"failed\" | \"completed\"")
+    )]
     pub status: String,
     pub bytes_downloaded: u64,
     pub total_bytes: Option<u64>,
@@ -134,9 +139,17 @@ pub struct JobSnapshot {
 
 /// Match for a URL already active or queued in Core.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ActiveJobMatch {
     pub job_id: String,
     pub url: String,
+    /// A job status, or `probing` when only a pending probe matches (no job exists yet).
+    #[cfg_attr(
+        feature = "ts",
+        ts(
+            type = "\"pending\" | \"downloading\" | \"paused\" | \"failed\" | \"completed\" | \"probing\""
+        )
+    )]
     pub status: String,
     pub title: String,
 }
@@ -146,6 +159,7 @@ pub struct ActiveJobMatch {
 /// Unique id suffixes are not known until confirm; those slots use an ellipsis
 /// placeholder (`…`, U+2026) so the shell can show where files will land.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProbeDestinationPreview {
     pub path_display: String,
 }

@@ -104,3 +104,14 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
       - run: cargo test -p phlegethon-tauri --locked
+      - name: Generated TypeScript types are current
+        # ts-rs writes the IPC types from the Rust serde types (M-71). Fail when the committed
+        # files differ, and when a type was added or removed without regenerating.
+        run: |
+          scripts/gen-ts-types.sh
+          if [ -n "$(git status --porcelain -- packages/tauri-shell/frontend/src/tauri/generated)" ]; then
+            git status --short -- packages/tauri-shell/frontend/src/tauri/generated
+            git diff -- packages/tauri-shell/frontend/src/tauri/generated
+            echo "::error::Generated TypeScript types are stale. Run scripts/gen-ts-types.sh and commit the result."
+            exit 1
+          fi

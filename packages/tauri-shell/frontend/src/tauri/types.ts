@@ -1,68 +1,26 @@
 /**
  * TypeScript mirrors of the Download Core / Tauri command serde shapes.
- * Keep field names snake_case to match Rust serialization.
+ *
+ * Types that cross the IPC boundary and have a Rust owner are generated from the serde types
+ * (`scripts/gen-ts-types.sh`, ts-rs) into `./generated` and re-exported here: do not hand-write
+ * them again. The rest are hand-written; keep field names snake_case to match Rust serialization.
  */
+import type { JobSnapshot } from "./generated/JobSnapshot";
 
-export type JobStatus = "pending" | "downloading" | "paused" | "failed" | "completed";
+export type { ActiveJobMatch } from "./generated/ActiveJobMatch";
+export type { CompanionIntentEvent as CompanionIntent } from "./generated/CompanionIntentEvent";
+export type { CompanionResult } from "./generated/CompanionResult";
+export type { EnqueueResult } from "./generated/EnqueueResult";
+export type { EventSummary as CoreEvent } from "./generated/EventSummary";
+export type { ExtractionTier } from "./generated/ExtractionTier";
+export type { JobSnapshot } from "./generated/JobSnapshot";
+export type { MediaFetchKind } from "./generated/MediaFetchKind";
+export type { MediaItem } from "./generated/MediaItem";
+export type { ProbeDestinationPreview } from "./generated/ProbeDestinationPreview";
+export type { ProbeResult } from "./generated/ProbeResult";
+export type { Quality } from "./generated/Quality";
 
-export type ExtractionTier = "dedicated" | "generic_extractor" | "page_sniff" | "direct_file";
-
-export type MediaFetchKind = "extractor" | "direct_http";
-
-export interface JobSnapshot {
-  job_id: string;
-  url: string;
-  destination: string;
-  status: JobStatus;
-  bytes_downloaded: number;
-  total_bytes: number | null;
-  title: string;
-  path: string | null;
-  is_extractor: boolean;
-  extraction_tier: ExtractionTier | null;
-  last_error: string | null;
-  queue_index: number;
-}
-
-export interface ActiveJobMatch {
-  job_id: string;
-  url: string;
-  status: string;
-  title: string;
-}
-
-export type EnqueueResult =
-  | { type: "EnqueueDirect"; job_id: string; destination: string }
-  | { type: "ProbeThenConfirm"; url: string };
-
-export interface Quality {
-  id: string;
-  label: string;
-  size_bytes: number | null;
-  container: string | null;
-}
-
-export interface MediaItem {
-  id: string;
-  title: string;
-  url: string;
-  qualities: Quality[];
-  archived: boolean;
-  uploader: string | null;
-  upload_date: string | null;
-  fetch_kind: MediaFetchKind;
-  qualities_are_presets: boolean;
-  referer: string | null;
-}
-
-export interface ProbeResult {
-  url: string;
-  items: MediaItem[];
-  source_name: string | null;
-  tier: ExtractionTier;
-  extractor_key: string | null;
-  warnings: string[];
-}
+export type JobStatus = JobSnapshot["status"];
 
 export interface ItemSelection {
   item_id: string;
@@ -102,10 +60,6 @@ export interface ProbeSelection {
   url: string;
   items: ItemSelection[];
   media_extras: MediaExtrasOptions | null;
-}
-
-export interface ProbeDestinationPreview {
-  path_display: string;
 }
 
 export interface ProbeTierSettings {
@@ -222,28 +176,6 @@ export interface ToolchainStatus {
   remote_components_enabled: boolean;
   impersonation_available: boolean;
   issues: string[];
-}
-
-export type CoreEvent =
-  | { type: "JobProgress"; job_id: string; bytes_downloaded: number; total_bytes: number | null }
-  | { type: "JobCompleted"; job_id: string; bytes_written: number; path: string }
-  | { type: "JobFailed"; job_id: string; error: string }
-  | { type: "JobPaused"; job_id: string }
-  | { type: "JobResumed"; job_id: string }
-  | { type: "JobRetried"; job_id: string }
-  | { type: "JobDiscarded"; job_id: string }
-  | { type: "JobsReordered"; from_index: number; to_index: number }
-  | { type: "JobMirrorFailover"; job_id: string; previous_url: string; next_url: string; error: string };
-
-/** What the shell did with a Chrome Companion hand-off (`CompanionResult` in companion-protocol). */
-export type CompanionResult =
-  | { type: "enqueue_direct"; job_id: string; destination: string }
-  | { type: "probe_then_confirm"; url: string };
-
-/** Payload of the `companion-intent` event. The shell has already enqueued a direct URL. */
-export interface CompanionIntent {
-  url: string;
-  result: CompanionResult;
 }
 
 /** Which mechanism the Rust side used for a folder choice. `manual` = ask for a typed path. */

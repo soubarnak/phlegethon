@@ -94,7 +94,8 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Clone)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 enum EnqueueResult {
     EnqueueDirect { job_id: String, destination: String },
     ProbeThenConfirm { url: String },
@@ -117,6 +118,7 @@ impl From<EnqueueOutcome> for EnqueueResult {
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 enum EventSummary {
     JobProgress {
         job_id: String,
@@ -1615,23 +1617,102 @@ pub fn run() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn enqueue_result_type_tags_match_frontend() {
-        let direct = EnqueueResult::EnqueueDirect {
-            job_id: "job-1".into(),
-            destination: "/tmp/x".into(),
-        };
-        let json = serde_json::to_value(&direct).unwrap();
-        assert_eq!(json["type"], "EnqueueDirect");
-        assert_eq!(json["job_id"], "job-1");
-        assert_eq!(json["destination"], "/tmp/x");
+    fn contract_samples() -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../frontend/src/tauri/contract/samples.json"
+        );
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read samples.json"))
+            .expect("parse samples.json")
+    }
 
-        let probe = EnqueueResult::ProbeThenConfirm {
-            url: "https://example.com".into(),
-        };
-        let json = serde_json::to_value(&probe).unwrap();
-        assert_eq!(json["type"], "ProbeThenConfirm");
-        assert_eq!(json["url"], "https://example.com");
+    // M-71: the frontend reads the same samples (src/tauri/contract.test.ts) and checks them
+    // against the TypeScript types generated from these serde types.
+    #[test]
+    fn enqueue_result_matches_the_contract_samples() {
+        let results = vec![
+            EnqueueResult::EnqueueDirect {
+                job_id: "j".into(),
+                destination: "/lib/jobs/j".into(),
+            },
+            EnqueueResult::ProbeThenConfirm {
+                url: "https://example.com/v".into(),
+            },
+        ];
+        assert_eq!(
+            serde_json::to_value(&results).unwrap(),
+            contract_samples()["EnqueueResult"]
+        );
+    }
+
+    #[test]
+    fn enqueue_result_and_companion_result_use_the_same_tags() {
+        let enqueue = EnqueueResult::from(EnqueueOutcome::ProbeThenConfirm { url: "u".into() });
+        let companion = companion::companion_result_from_outcome(
+            "u",
+            EnqueueOutcome::ProbeThenConfirm { url: "u".into() },
+        );
+        assert_eq!(
+            serde_json::to_value(enqueue).unwrap(),
+            serde_json::to_value(companion).unwrap()
+        );
+    }
+
+    #[test]
+    fn event_summary_matches_the_contract_samples() {
+        let events = vec![
+            EventSummary::JobProgress {
+                job_id: "j".into(),
+                bytes_downloaded: 5,
+                total_bytes: None,
+            },
+            EventSummary::JobCompleted {
+                job_id: "j".into(),
+                bytes_written: 9,
+                path: "/lib/j/f.bin".into(),
+            },
+            EventSummary::JobFailed {
+                job_id: "j".into(),
+                error: "boom".into(),
+            },
+            EventSummary::JobPaused { job_id: "j".into() },
+            EventSummary::JobResumed { job_id: "j".into() },
+            EventSummary::JobRetried { job_id: "j".into() },
+            EventSummary::JobDiscarded { job_id: "j".into() },
+            EventSummary::JobMirrorFailover {
+                job_id: "j".into(),
+                previous_url: "https://a".into(),
+                next_url: "https://b".into(),
+                error: "e".into(),
+            },
+        ];
+        assert_eq!(
+            serde_json::to_value(&events).unwrap(),
+            contract_samples()["EventSummary"]
+        );
+    }
+
+    #[test]
+    fn companion_intent_event_matches_the_contract_samples() {
+        let events = vec![
+            companion::CompanionIntentEvent {
+                url: "https://example.com/a.iso".into(),
+                result: companion_protocol::CompanionResult::EnqueueDirect {
+                    job_id: "j".into(),
+                    destination: "/lib/jobs/j".into(),
+                },
+            },
+            companion::CompanionIntentEvent {
+                url: "https://example.com/v".into(),
+                result: companion_protocol::CompanionResult::ProbeThenConfirm {
+                    url: "https://example.com/v".into(),
+                },
+            },
+        ];
+        assert_eq!(
+            serde_json::to_value(&events).unwrap(),
+            contract_samples()["CompanionIntentEvent"]
+        );
     }
 
     #[test]

@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ActiveJobMatch } from "@/tauri/types";
 import { processUrlInput, resolveDuplicateUrl, textFromDataTransfer } from "./urlInput";
 
 describe("resolveDuplicateUrl", () => {
-  const match = { job_id: "j", url: "https://x", status: "pending", title: "X" };
+  const match: ActiveJobMatch = { job_id: "j", url: "https://x", status: "pending", title: "X" };
   it("enqueues without asking when there is no duplicate", async () => {
     const confirmDuplicate = vi.fn();
     const r = await resolveDuplicateUrl(

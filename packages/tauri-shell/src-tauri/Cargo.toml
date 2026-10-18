@@ -21,6 +21,8 @@ crate-type = ["rlib"]
 # turns this on; plain `cargo build --release` (xbps-src, Makefile) must pass
 # `--features custom-protocol` or the window loads http://localhost:1420.
 custom-protocol = ["tauri/custom-protocol"]
+# Generate TypeScript bindings for the types that cross the IPC boundary (`scripts/gen-ts-types.sh`).
+ts = ["dep:ts-rs", "download-core/ts", "companion-protocol/ts"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -43,6 +45,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-single-instance = "2"
+ts-rs = { version = "12", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

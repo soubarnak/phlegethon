@@ -14,6 +14,7 @@ use tauri::{AppHandle, Manager};
 use crate::AppState;
 
 #[derive(Serialize, Clone)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub(crate) struct CompanionIntentEvent {
     pub(crate) url: String,
     pub(crate) result: CompanionResult,
