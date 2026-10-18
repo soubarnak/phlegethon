@@ -2,7 +2,7 @@
 
 use companion_protocol::{
     forward_to_shell, read_native_message, write_native_message, CompanionRequest,
-    CompanionResponse, PROTOCOL_VERSION,
+    CompanionResponse,
 };
 use std::io;
 use std::path::PathBuf;
@@ -104,7 +104,7 @@ fn run() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use companion_protocol::CompanionIntent;
+    use companion_protocol::{CompanionIntent, PROTOCOL_VERSION};
     use std::io::Cursor;
 
     fn allowed() -> Vec<String> {
