@@ -249,7 +249,9 @@ fn build_routing(proxy: &ProxySettings) -> Result<Routing, String> {
     proxy.validate()?;
     let proxied = match proxy.url.as_deref() {
         Some(url) => {
-            let proxy_cfg = ureq::Proxy::new(url).map_err(|e| format!("proxy {url}: {e}"))?;
+            let proxy_cfg = ureq::Proxy::new(url).map_err(|e| {
+                format!("proxy {}: {e}", crate::proxy_settings::strip_userinfo(url))
+            })?;
             base_agent_builder().proxy(proxy_cfg).build()
         }
         // No proxy configured in the app: honour HTTPS_PROXY / HTTP_PROXY / ALL_PROXY like

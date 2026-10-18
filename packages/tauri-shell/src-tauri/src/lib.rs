@@ -2058,3 +2058,113 @@ mod picker_method_tests {
         assert_eq!(detect_picker_method(&dirs, true), PickerMethod::Portal);
     }
 }
+
+/// L-50: every command in `generate_handler!` must be in the app manifest list in
+/// `build.rs` and granted in `capabilities/default.json`. Without the manifest Tauri
+/// allows every registered command from any window. Without the grant the frontend call
+/// fails at runtime. The three files are read as text, so the test needs no build.
+#[cfg(test)]
+mod command_gate_tests {
+    use std::collections::BTreeSet;
+
+    const LIB_RS: &str = include_str!("lib.rs");
+    const BUILD_RS: &str = include_str!("../build.rs");
+    const CAPABILITY: &str = include_str!("../capabilities/default.json");
+    const HANDLER_MACRO: &str = concat!("generate_handler", "![");
+    const MANIFEST_LIST: &str = "const COMMANDS: &[&str] = &[";
+
+    /// Command names in `generate_handler!`, last path segment only, in source order.
+    fn handler_commands() -> Vec<String> {
+        assert_eq!(
+            LIB_RS.matches(HANDLER_MACRO).count(),
+            1,
+            "expected exactly one generate_handler!"
+        );
+        let start = LIB_RS.find(HANDLER_MACRO).expect("generate_handler!") + HANDLER_MACRO.len();
+        let rest = &LIB_RS[start..];
+        let body = &rest[..rest.find("])").expect("end of generate_handler!")];
+        body.lines()
+            .map(|line| line.trim().trim_end_matches(',').trim())
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .map(|line| line.rsplit("::").next().unwrap_or(line).to_string())
+            .collect()
+    }
+
+    /// Quoted names in the `COMMANDS` list of `build.rs`, the app manifest.
+    fn manifest_commands() -> Vec<String> {
+        let start = BUILD_RS
+            .find(MANIFEST_LIST)
+            .expect("COMMANDS list in build.rs")
+            + MANIFEST_LIST.len();
+        let rest = &BUILD_RS[start..];
+        let body = &rest[..rest.find("];").expect("end of COMMANDS list")];
+        body.split('"')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 1)
+            .map(|(_, name)| name.to_string())
+            .collect()
+    }
+
+    /// Permissions listed in `capabilities/default.json`.
+    fn granted_permissions() -> BTreeSet<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(CAPABILITY).expect("parse capabilities/default.json");
+        capability["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .map(|p| p.as_str().expect("permission is a string").to_string())
+            .collect()
+    }
+
+    /// The permission Tauri generates for an app command: `allow-` and the name with
+    /// dashes in place of underscores.
+    fn allow_permission(command: &str) -> String {
+        format!("allow-{}", command.replace('_', "-"))
+    }
+
+    #[test]
+    fn manifest_lists_exactly_the_registered_commands() {
+        let handler = handler_commands();
+        let manifest = manifest_commands();
+        assert!(handler.len() > 60, "too few commands parsed: {handler:?}");
+        assert_eq!(
+            handler.iter().collect::<BTreeSet<_>>().len(),
+            handler.len(),
+            "duplicate in generate_handler!"
+        );
+        assert_eq!(
+            manifest.iter().collect::<BTreeSet<_>>().len(),
+            manifest.len(),
+            "duplicate in build.rs COMMANDS"
+        );
+        let handler: BTreeSet<String> = handler.into_iter().collect();
+        let manifest: BTreeSet<String> = manifest.into_iter().collect();
+        let missing: Vec<&String> = handler.difference(&manifest).collect();
+        let unregistered: Vec<&String> = manifest.difference(&handler).collect();
+        assert!(
+            missing.is_empty() && unregistered.is_empty(),
+            "build.rs COMMANDS lacks {missing:?}; it lists unregistered {unregistered:?}"
+        );
+    }
+
+    #[test]
+    fn every_registered_command_is_granted_and_no_grant_is_stale() {
+        let expected: BTreeSet<String> = handler_commands()
+            .iter()
+            .map(|c| allow_permission(c))
+            .collect();
+        // App command permissions have no plugin prefix; plugin grants contain a colon.
+        let granted: BTreeSet<String> = granted_permissions()
+            .into_iter()
+            .filter(|p| p.starts_with("allow-") && !p.contains(':'))
+            .collect();
+        let missing: Vec<&String> = expected.difference(&granted).collect();
+        let stale: Vec<&String> = granted.difference(&expected).collect();
+        assert!(
+            missing.is_empty(),
+            "not granted in capabilities/default.json: {missing:?}"
+        );
+        assert!(stale.is_empty(), "granted but not registered: {stale:?}");
+    }
+}

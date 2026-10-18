@@ -46,6 +46,50 @@ impl ProxySettings {
             .map(str::to_string);
         Self { url }
     }
+
+    /// The same setting with any `user[:password]@` removed. This is the form kept in
+    /// jobs.json.
+    pub fn without_credentials(&self) -> Self {
+        Self {
+            url: self.url.as_deref().map(strip_userinfo),
+        }
+    }
+
+    /// Whether the URL carries `user[:password]@`.
+    pub fn has_credentials(&self) -> bool {
+        self.url
+            .as_deref()
+            .is_some_and(|url| strip_userinfo(url) != url)
+    }
+
+    /// Take the credentials from `stored` when it names the same proxy as this setting.
+    ///
+    /// jobs.json keeps the URL without credentials and secrets.json keeps the full URL.
+    /// The full URL is used only when both are the same once credentials are removed, so
+    /// a credential is never sent to a different proxy.
+    pub fn with_credentials_from(&self, stored: &ProxySettings) -> Self {
+        match (self.url.as_deref(), stored.url.as_deref()) {
+            (Some(url), Some(full)) if strip_userinfo(full) == strip_userinfo(url) => Self {
+                url: Some(full.to_string()),
+            },
+            _ => self.clone(),
+        }
+    }
+}
+
+/// Remove `user[:password]@` from the authority of `url` and keep the rest of the text.
+/// Text without a scheme or without credentials comes back unchanged.
+pub(crate) fn strip_userinfo(url: &str) -> String {
+    let Some(scheme_end) = url.find("://").map(|i| i + 3) else {
+        return url.to_string();
+    };
+    let rest = &url[scheme_end..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_port)| host_port);
+    format!("{}{host_port}{tail}", &url[..scheme_end])
 }
 
 /// Hosts that bypass an environment proxy, parsed from `NO_PROXY` / `no_proxy`.
@@ -281,6 +325,69 @@ mod tests {
         assert!(NoProxy::parse("*").matches_url("https://example.com/"));
         assert!(!NoProxy::parse("").matches_url("https://example.com/"));
         assert!(!NoProxy::parse(" , ").matches_url("https://example.com/"));
+    }
+
+    #[test]
+    fn strip_userinfo_keeps_everything_but_the_credentials() {
+        assert_eq!(
+            strip_userinfo("socks5://user:secret@proxy:1080"),
+            "socks5://proxy:1080"
+        );
+        assert_eq!(
+            strip_userinfo("http://a:b@c@proxy:8080/x?y=1"),
+            "http://proxy:8080/x?y=1"
+        );
+        assert_eq!(
+            strip_userinfo("http://user@proxy:8080?x=1"),
+            "http://proxy:8080?x=1"
+        );
+        assert_eq!(
+            strip_userinfo("http://proxy.example.com:8080/"),
+            "http://proxy.example.com:8080/"
+        );
+        assert_eq!(strip_userinfo("no-scheme@host"), "no-scheme@host");
+    }
+
+    #[test]
+    fn credentials_are_detected_and_removed_for_storage() {
+        let with = ProxySettings {
+            url: Some("http://user:pw@proxy:8080".to_string()),
+        };
+        assert!(with.has_credentials());
+        assert_eq!(
+            with.without_credentials().url.as_deref(),
+            Some("http://proxy:8080")
+        );
+        let without = ProxySettings {
+            url: Some("http://proxy:8080".to_string()),
+        };
+        assert!(!without.has_credentials());
+        assert!(!ProxySettings::default().has_credentials());
+    }
+
+    #[test]
+    fn stored_credentials_apply_only_to_the_same_proxy() {
+        let stripped = ProxySettings {
+            url: Some("http://proxy:8080".to_string()),
+        };
+        let secret = ProxySettings {
+            url: Some("http://user:pw@proxy:8080".to_string()),
+        };
+        assert_eq!(stripped.with_credentials_from(&secret), secret);
+        // Same proxy host with a different port or scheme gets no credentials.
+        let moved = ProxySettings {
+            url: Some("http://proxy:9090".to_string()),
+        };
+        assert_eq!(moved.with_credentials_from(&secret), moved);
+        let other_scheme = ProxySettings {
+            url: Some("socks5://proxy:8080".to_string()),
+        };
+        assert_eq!(other_scheme.with_credentials_from(&secret), other_scheme);
+        // No stored secret leaves the setting as it is.
+        assert_eq!(
+            stripped.with_credentials_from(&ProxySettings::default()),
+            stripped
+        );
     }
 
     #[test]

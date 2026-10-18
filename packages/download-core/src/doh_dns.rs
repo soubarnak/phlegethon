@@ -53,9 +53,12 @@ pub fn resolve_a_records_with(proxy: &ProxySettings, host: &str) -> Result<Vec<I
 fn doh_agent(proxy: &ProxySettings) -> Result<ureq::Agent, String> {
     let builder = ureq::AgentBuilder::new();
     let builder = match proxy.normalized().url {
-        Some(url) => {
-            builder.proxy(ureq::Proxy::new(&url).map_err(|e| format!("DoH proxy {url}: {e}"))?)
-        }
+        Some(url) => builder.proxy(ureq::Proxy::new(&url).map_err(|e| {
+            format!(
+                "DoH proxy {}: {e}",
+                crate::proxy_settings::strip_userinfo(&url)
+            )
+        })?),
         None => builder.try_proxy_from_env(true),
     };
     Ok(builder.build())
