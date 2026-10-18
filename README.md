@@ -25,13 +25,16 @@ xbps-rindex -a *.xbps
 sudo xbps-install --repository="$PWD" phlegethon
 ```
 
-Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. The same build runs locally in a Void container:
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed, or when the workflow is run by hand with a `version` (it creates the tag on the commit it built, and refuses a version whose tag already exists). The same build runs locally in a pinned Void container. Podman is the default container engine; set `CONTAINER_ENGINE=docker` to use Docker instead:
 
 ```sh
-make dist      # frontend + source tarball
-docker run --rm --privileged -v "$PWD:/src" ghcr.io/void-linux/void-glibc-full /src/packaging/void/build-in-container.sh
-ls out/glibc/  # the .xbps
+make dist              # frontend + source tarball
+make xbps-container    # podman run --privileged on the Void image pinned in packaging/void/images.env
+make xbps-container LIBC=musl
+ls out/glibc/          # the .xbps
 ```
+
+The container needs `--privileged` for xbps-src's `uchroot` build chroot. GitHub Actions uses Docker. Rootless podman runs `binary-bootstrap` but then fails in the package step with `/dev/null: Read-only file system`, so a local rootless podman build does not finish yet. Rootful podman and Docker are untested here; on a Void host use `scripts/xbps-build.sh`.
 
 Or build it with xbps-src on your Void machine:
 
@@ -50,7 +53,7 @@ make
 sudo make install PREFIX=/usr
 ```
 
-Install a portal backend for your desktop so the folder chooser works: `xdg-desktop-portal-gtk`, `xdg-desktop-portal-kde` or `xdg-desktop-portal-wlr`. Without one the app falls back to `zenity`, `kdialog`, or a typed path.
+Install a portal backend for your desktop so the folder chooser works: `xdg-desktop-portal-gtk` or `xdg-desktop-portal-kde` (`xdg-desktop-portal-wlr` only does screen capture, not file choosing). Without one the app falls back to `zenity`, `kdialog`, or a typed path. On niri, sway and other tiling compositors you also need a notification daemon; see [docs/tiling-compositors.md](docs/tiling-compositors.md).
 
 ### glibc and musl
 

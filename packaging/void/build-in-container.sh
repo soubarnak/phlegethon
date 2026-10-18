@@ -1,9 +1,14 @@
 #!/bin/sh
 # Build the phlegethon xbps package with xbps-src inside a Void Linux container.
-# Used by the release workflow and for local builds:
+# Used by the release workflow and for local builds. From a checkout, `make dist` and then
+# `make xbps-container` run it on the pinned image with $CONTAINER_ENGINE (default podman;
+# the release workflow sets docker). The explicit command is:
 #
-#   docker run --rm --privileged -v "$PWD:/src" ghcr.io/void-linux/void-glibc-full \
+#   . packaging/void/images.env
+#   ${CONTAINER_ENGINE:-podman} run --rm --privileged -v "$PWD:/src" "$VOID_IMAGE_GLIBC" \
 #       /src/packaging/void/build-in-container.sh
+#
+# The container needs --privileged for the uchroot build chroot.
 #
 # Expects /src/dist/phlegethon-<version>.tar.gz (scripts/make-dist-tarball.sh).
 # Writes the package(s) to /src/out/<libc>/. Mirrors void-packages' own CI: a non-root
@@ -12,13 +17,19 @@
 # Environment:
 #   SRC=/src                     repository checkout
 #   OUT=$SRC/out                 where packages are copied
-#   VOID_PACKAGES_REF=master     void-packages branch to build against
+#   VOID_PACKAGES_REF=<commit>   void-packages commit to build against (default: the pin in
+#                                packaging/void/images.env; a branch name also works)
 #   EXTRA_CA_BUNDLE=<file>       extra CA certificates to trust (TLS-inspecting proxies)
 set -eu
 
 SRC=${SRC:-/src}
 OUT=${OUT:-$SRC/out}
-REF=${VOID_PACKAGES_REF:-master}
+REF=${VOID_PACKAGES_REF:-}
+if [ -z "$REF" ]; then
+	# shellcheck disable=SC1091
+	. "$SRC/packaging/void/images.env"
+	REF=$VOID_PACKAGES_REF
+fi
 WORK=/build
 
 libc=glibc
@@ -26,7 +37,6 @@ libc=glibc
 
 trust_extra_ca() { # $1 = root directory
 	[ -n "${EXTRA_CA_BUNDLE:-}" ] && [ -f "$EXTRA_CA_BUNDLE" ] || return 0
-	local f
 	bundle="$1/etc/ssl/certs/ca-certificates.crt"
 	[ -f "$bundle" ] || return 0
 	if ! grep -q "phlegethon-extra-ca" "$bundle"; then
@@ -72,7 +82,10 @@ tarball="$SRC/dist/phlegethon-$version.tar.gz"
 echo ">> void-packages ($REF)"
 mkdir -p "$WORK"
 if [ ! -d "$WORK/void-packages/.git" ]; then
-	git clone --depth 1 --branch "$REF" https://github.com/void-linux/void-packages "$WORK/void-packages"
+	# A shallow fetch of one ref works for a commit as well as for a branch.
+	git init -q "$WORK/void-packages"
+	git -C "$WORK/void-packages" fetch -q --depth 1 https://github.com/void-linux/void-packages "$REF"
+	git -C "$WORK/void-packages" checkout -q FETCH_HEAD
 fi
 cd "$WORK/void-packages"
 
@@ -99,7 +112,8 @@ sudo -Eu builder ./xbps-src -j"$(nproc)" pkg phlegethon
 
 mkdir -p "$OUT/$libc"
 cp hostdir/binpkgs/phlegethon-*.xbps "$OUT/$libc/"
-pkg=$(ls "$OUT/$libc"/phlegethon-"$version"_*.xbps | head -1)
+set -- "$OUT/$libc/phlegethon-${version}_"*.xbps
+pkg=$1
 
 echo ">> install check"
 xbps-rindex -a "$OUT/$libc"/*.xbps >/dev/null
@@ -111,6 +125,9 @@ for bin in /usr/bin/phlegethon /usr/bin/phlegethon-nmh; do
 		exit 1
 	}
 done
+# G-7: the packaged binary must embed the frontend (built with custom-protocol).
+tar -xzOf "$tarball" "phlegethon-$version/packages/tauri-shell/frontend/dist/index.html" >"$WORK/index.html"
+"$SRC/scripts/check-embedded-frontend.sh" /usr/bin/phlegethon "$WORK/index.html"
 test -f /usr/share/applications/phlegethon.desktop
 test -f /usr/share/licenses/phlegethon/LICENSE
 rm -f "$OUT/$libc"/*-repodata

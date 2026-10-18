@@ -40,5 +40,8 @@
     "vite": "^8.3.4",
     "vitest": "^5.0.4"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  }
 }

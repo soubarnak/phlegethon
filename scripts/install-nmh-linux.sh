@@ -9,18 +9,27 @@
 set -euo pipefail
 
 host_name=com.phlegethon.bridge
+need_value() { # $1 = option name, $2 = its value
+	[ $# -ge 2 ] && [ -n "$2" ] || {
+		echo "$1 needs a value" >&2
+		exit 2
+	}
+}
 ids=() host_path="" browsers=chrome,chromium,brave,vivaldi,edge system=0 uninstall=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--extension-id)
+		need_value "$@"
 		ids+=("$2")
 		shift 2
 		;;
 	--host-path)
+		need_value "$@"
 		host_path=$2
 		shift 2
 		;;
 	--browsers)
+		need_value "$@"
 		browsers=$2
 		shift 2
 		;;
@@ -33,7 +42,7 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	-h | --help)
-		sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -102,6 +111,18 @@ esac
 	exit 1
 }
 
+# The manifest is JSON: escape what a path may contain.
+json_string() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+case "$host_path" in
+*[[:cntrl:]]*)
+	echo "--host-path must not contain control characters" >&2
+	exit 2
+	;;
+esac
+json_host_path=$(json_string "$host_path")
+
 origins=""
 for id in "${ids[@]}"; do origins+="${origins:+,}\"chrome-extension://$id/\""; done
 
@@ -117,7 +138,7 @@ for b in "${browser_list[@]}"; do
 {
   "name": "$host_name",
   "description": "Phlegethon Download Manager bridge",
-  "path": "$host_path",
+  "path": "$json_host_path",
   "type": "stdio",
   "allowed_origins": [$origins]
 }

@@ -128,7 +128,7 @@ flowchart TD
 ### 5.3 Storage
 
 - **Library Root** — user-chosen base directory for all downloads.
-- **Job Destination** — per-job folder under the Library Root.
+- **Job Destination** — per-job folder, always owned by the job: unique under the Library Root by default, or a unique subfolder under a user-picked absolute parent when Save-to overrides it (see `CONTEXT.md`). The job never treats a shared user folder as its destination.
 - Batch / channel jobs use a **dedicated subfolder** derived from the source.
 
 ### 5.4 Transfer behavior (all job types)

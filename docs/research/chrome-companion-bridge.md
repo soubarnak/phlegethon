@@ -1,3 +1,5 @@
+> **Partly superseded (2026-10-16).** This note was written when Phlegethon targeted Windows 11 and Debian with a WinUI shell. [ADR 0001](../adr/0001-drop-windows-shell.md) dropped Windows: the only shell is Tauri 2 on Void Linux. The native-messaging recommendation still holds. The Windows registry, `--parent-window`, WinUI and Debian installer sections do not apply. The implemented design, including the filesystem socket between the host and the shell, is in [ADR 0005](../adr/0005-companion-filesystem-socket.md) and [docs/companion-setup.md](../companion-setup.md).
+
 # Research: Chrome Companion → desktop bridge
 
 **Ticket:** [#4](https://github.com/soubarnak/phlegethon/issues/4)  

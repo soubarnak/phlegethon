@@ -5,6 +5,7 @@
 #   scripts/setup-void.sh --runtime-only  only what a packaged install needs
 #   scripts/setup-void.sh --dry-run       print the xbps-install command and exit
 #   scripts/setup-void.sh -y              do not ask for confirmation
+#   scripts/setup-void.sh --force         run even when xbps-install is not found
 set -euo pipefail
 
 runtime_only=0 dry_run=0 assume_yes=0 force=0
