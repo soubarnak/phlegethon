@@ -162,6 +162,46 @@ describe("App", () => {
     await waitFor(() => expect(ipc.callsTo("clear_history")).toEqual([{ outcome: null }]));
   });
 
+  describe("History Download again", () => {
+    const completed = [{ media_id: "m1", title: "Saved video", url: "https://x/1", completed_at_unix_secs: 1, destination: "/d/m1.mp4", job_id: "j", outcome: "Completed", size_bytes: 10 }];
+
+    async function downloadAgainFromHistory(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(await screen.findByRole("tab", { name: "History" }));
+      const row = await screen.findByTestId("history-row-m1");
+      await user.click(within(row).getByRole("button", { name: /actions for saved video/i }));
+      const menu = document.body.querySelector<HTMLElement>("[role=menu]")!;
+      await user.click(within(menu).getByText("Download again"));
+    }
+
+    it("queues the URL when no job is active for it", async () => {
+      const { handlers } = baseHandlers({
+        list_history: () => completed,
+        enqueue_url: () => ({ type: "enqueue_direct", job_id: "j2", destination: "/lib/jobs/j2" }),
+      });
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      const user = userEvent.setup();
+      await downloadAgainFromHistory(user);
+      await waitFor(() => expect(ipc.callsTo("enqueue_url")).toHaveLength(1));
+      expect(ipc.callsTo("enqueue_url")[0]).toMatchObject({ url: "https://x/1", forceDirect: false });
+      expect(ipc.callsTo("find_active_job_for_url")).toEqual([{ url: "https://x/1" }]);
+    });
+
+    it("asks before queueing a URL that already has an active job, and Cancel leaves it alone", async () => {
+      const { handlers, setJobs } = baseHandlers({ list_history: () => completed });
+      setJobs([job({ job_id: "active", url: "https://x/1", title: "Saved video", status: "pending" })]);
+      const ipc = installFakeIpc(handlers);
+      render(<App />);
+      const user = userEvent.setup();
+      await downloadAgainFromHistory(user);
+      const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveTextContent("already in the queue");
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      expect(ipc.callsTo("enqueue_url")).toHaveLength(0);
+    });
+  });
+
   it("shows an error, not the empty-queue tile, when the queue cannot be loaded", async () => {
     installFakeIpc(baseHandlers({ list_jobs: () => Promise.reject("core unavailable") }).handlers);
     render(<App />);
