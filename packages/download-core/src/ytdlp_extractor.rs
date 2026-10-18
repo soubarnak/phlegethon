@@ -1351,7 +1351,11 @@ struct ProgressTracker {
     carry: Vec<u8>,
     /// Per file: (downloaded, total), in the order the files first appeared.
     files: Vec<(String, u64, Option<u64>)>,
+    /// The last report, for duplicate suppression.
     last: Option<ExtractorProgress>,
+    /// The last report that had a total. A report without one must not reset the share
+    /// that later reports are held to.
+    peak: Option<ExtractorProgress>,
 }
 
 impl ProgressTracker {
@@ -1371,6 +1375,9 @@ impl ProgressTracker {
             return None;
         }
         self.last = Some(progress);
+        if progress.total_bytes.is_some() {
+            self.peak = Some(progress);
+        }
         Some(progress)
     }
 
@@ -1428,23 +1435,23 @@ impl ProgressTracker {
         }
     }
 
-    /// Raise `progress` so its percentage is not below the last one reported.
+    /// Raise `progress` so its percentage is not below the last share reported with a total.
     ///
     /// The total grows when the second file's size becomes known, so the raw pair can
     /// fall from 1000/1000 (100 %) to 1100/1200 (92 %). The total stays the largest seen
     /// and the downloaded figure is raised to the share the last report had. The
     /// downloaded figure is not allowed past the total.
     fn monotone(&self, progress: ExtractorProgress) -> ExtractorProgress {
-        let (Some(last), Some(total)) = (self.last, progress.total_bytes) else {
+        let (Some(peak), Some(total)) = (self.peak, progress.total_bytes) else {
             return progress;
         };
-        let Some(last_total) = last.total_bytes.filter(|t| *t > 0) else {
+        let Some(peak_total) = peak.total_bytes.filter(|t| *t > 0) else {
             return progress;
         };
-        let total = total.max(last_total);
-        // The smallest downloaded figure whose share of `total` is at least `last`'s share.
-        let floor = (u128::from(last.downloaded_bytes) * u128::from(total))
-            .div_ceil(u128::from(last_total));
+        let total = total.max(peak_total);
+        // The smallest downloaded figure whose share of `total` is at least `peak`'s share.
+        let floor = (u128::from(peak.downloaded_bytes) * u128::from(total))
+            .div_ceil(u128::from(peak_total));
         let floor = u64::try_from(floor).unwrap_or(u64::MAX);
         ExtractorProgress {
             downloaded_bytes: progress.downloaded_bytes.max(floor).min(total),
@@ -4016,12 +4023,46 @@ esac
     }
 
     #[test]
-    fn monotone_clamp_keeps_the_largest_total_and_never_exceeds_it() {
+    fn reported_percent_holds_across_a_line_with_no_known_total() {
         let mut tracker = ProgressTracker::default();
-        tracker.last = Some(ExtractorProgress {
-            downloaded_bytes: 300,
-            total_bytes: Some(1000),
-        });
+        let mut seen: Vec<ExtractorProgress> = Vec::new();
+        let lines = [
+            progress_line("finished", "1000", "1000", "v.f137.mp4"),
+            // yt-dlp gave no total for the audio file yet, so the total is unknown here.
+            progress_line("downloading", "50", "NA", "v.f140.m4a"),
+            progress_line("downloading", "100", "200", "v.f140.m4a"),
+        ];
+        for line in &lines {
+            seen.extend(tracker.feed(line.as_bytes()));
+        }
+        let known: Vec<&ExtractorProgress> =
+            seen.iter().filter(|p| p.total_bytes.is_some()).collect();
+        assert!(
+            known.windows(2).all(|w| {
+                let (a, b) = (w[0], w[1]);
+                a.downloaded_bytes as u128 * b.total_bytes.unwrap() as u128
+                    <= b.downloaded_bytes as u128 * a.total_bytes.unwrap() as u128
+            }),
+            "percent went backwards: {seen:?}"
+        );
+        assert_eq!(
+            seen.last(),
+            Some(&ExtractorProgress {
+                downloaded_bytes: 1200,
+                total_bytes: Some(1200)
+            })
+        );
+    }
+
+    #[test]
+    fn monotone_clamp_keeps_the_largest_total_and_never_exceeds_it() {
+        let tracker = ProgressTracker {
+            peak: Some(ExtractorProgress {
+                downloaded_bytes: 300,
+                total_bytes: Some(1000),
+            }),
+            ..Default::default()
+        };
         // A smaller total later must not lower the reported total.
         let raised = tracker.monotone(ExtractorProgress {
             downloaded_bytes: 10,
