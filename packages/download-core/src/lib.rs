@@ -897,7 +897,7 @@ impl UnlockedTransferPlan {
                     format,
                     dest: dest.clone(),
                     output_spec,
-                    media_extras: media_extras.clone(),
+                    media_extras,
                     cookies,
                     proxy,
                     stop: stop.clone(),
@@ -2818,7 +2818,7 @@ impl Core {
             return false;
         };
         let mut found = false;
-        for (_, (probe_url, flag)) in self.probe_cancels.iter() {
+        for (probe_url, flag) in self.probe_cancels.values() {
             if *probe_url == key {
                 flag.store(true, Ordering::Release);
                 found = true;

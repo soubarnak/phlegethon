@@ -70,7 +70,7 @@ fn reference_urls_resolve_with_the_real_toolchain() {
     for entry in file.entries.iter().filter(|e| {
         filter
             .as_deref()
-            .map_or(true, |f| e.site.eq_ignore_ascii_case(f))
+            .is_none_or(|f| e.site.eq_ignore_ascii_case(f))
     }) {
         rows.push(reference::run_entry(entry, &opts).0);
     }

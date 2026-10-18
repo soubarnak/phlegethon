@@ -123,7 +123,7 @@ pub fn evaluate(expect: &Expect, outcome: &Result<ProbeResult, String>) -> Verdi
         }
     };
     let tier = tier_name(result.tier);
-    if !expect.tiers.is_empty() && !expect.tiers.iter().any(|t| *t == tier) {
+    if !expect.tiers.is_empty() && !expect.tiers.contains(&tier) {
         return Verdict::Fail(format!("tier {tier}, expected one of {:?}", expect.tiers));
     }
     if let Some(prefix) = &expect.extractor_key_prefix {
@@ -156,21 +156,11 @@ pub fn evaluate(expect: &Expect, outcome: &Result<ProbeResult, String>) -> Verdi
     Verdict::Pass
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct RunOptions {
     pub settings: ProbeTierSettings,
     pub cookies: CookieChannel,
     pub proxy: ProxySettings,
-}
-
-impl Default for RunOptions {
-    fn default() -> Self {
-        Self {
-            settings: ProbeTierSettings::default(),
-            cookies: CookieChannel::default(),
-            proxy: ProxySettings::default(),
-        }
-    }
 }
 
 /// Probe with the real toolchain found on this machine, the same way the app does.
@@ -190,7 +180,7 @@ pub fn probe(url: &str, opts: &RunOptions) -> (Result<ProbeResult, String>, f64)
             url,
             extractor,
             sniffer,
-            opts.settings.clone(),
+            opts.settings,
             opts.cookies.clone(),
             opts.proxy.clone(),
         )?

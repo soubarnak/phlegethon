@@ -87,6 +87,11 @@ impl MirrorSet {
         self.urls.len()
     }
 
+    /// Whether the set holds no mirrors.
+    pub fn is_empty(&self) -> bool {
+        self.urls.is_empty()
+    }
+
     /// Index of the active mirror.
     pub fn current_index(&self) -> usize {
         self.current
