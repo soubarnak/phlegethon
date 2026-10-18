@@ -184,6 +184,28 @@ fn can_create_destroy_and_set_library_root() {
     drop(core); // destroy — no panic
 }
 
+#[test]
+fn proxy_credentials_reload_from_secrets_and_stay_out_of_jobs_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let proxy = "http://alice:hunter2@proxy.example.com:8080";
+    let (mut core, _rx) = make_core(Box::new(fake_http()));
+    core.set_library_root(root.clone()).unwrap();
+    core.set_proxy_settings(ProxySettings {
+        url: Some(proxy.into()),
+    })
+    .unwrap();
+    drop(core);
+
+    let jobs_json = std::fs::read_to_string(root.join(".phlegethon/jobs.json")).unwrap();
+    assert!(!jobs_json.contains("hunter2"), "{jobs_json}");
+    assert!(jobs_json.contains("http://proxy.example.com:8080"));
+
+    let (mut reloaded, _rx) = make_core(Box::new(fake_http()));
+    reloaded.set_library_root(root).unwrap();
+    assert_eq!(reloaded.proxy_settings().url.as_deref(), Some(proxy));
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance: enqueue_direct classification
 // ---------------------------------------------------------------------------

@@ -21,7 +21,11 @@ pub const PHLEGETHON_DIR: &str = ".phlegethon";
 /// Filename for the persisted job queue index.
 pub const JOBS_FILENAME: &str = "jobs.json";
 
+/// Filename for proxy credentials, beside the queue index. Written owner-only (0600).
+pub const SECRETS_FILENAME: &str = "secrets.json";
+
 const QUEUE_VERSION: u32 = 1;
+const SECRETS_VERSION: u32 = 1;
 
 /// Default maximum concurrent transferring jobs.
 pub const DEFAULT_ACTIVE_JOB_LIMIT: u32 = 3;
@@ -224,6 +228,58 @@ pub fn queue_path(library_root: &Path) -> PathBuf {
     library_root.join(PHLEGETHON_DIR).join(JOBS_FILENAME)
 }
 
+/// Path to the credentials file under a Library Root.
+pub fn secrets_path(library_root: &Path) -> PathBuf {
+    library_root.join(PHLEGETHON_DIR).join(SECRETS_FILENAME)
+}
+
+/// On-disk representation of secrets.json. It holds the proxy URL with its credentials,
+/// so it has no `Debug` impl that could print them.
+#[derive(Serialize, Deserialize)]
+struct SecretsFile {
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_url: Option<String>,
+}
+
+/// Read the proxy URL with its credentials. A missing file gives `None`.
+fn load_proxy_secret(library_root: &Path) -> Result<Option<String>, String> {
+    let path = secrets_path(library_root);
+    let raw = match fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    // The parser error is left out: it can quote the content it failed on.
+    let file: SecretsFile = serde_json::from_slice(&raw)
+        .map_err(|_| format!("{} is not a valid secrets file", path.display()))?;
+    if file.version != SECRETS_VERSION {
+        return Err(format!("{} has an unknown version", path.display()));
+    }
+    Ok(file.proxy_url)
+}
+
+/// Write the proxy URL with its credentials, owner-only. Without credentials the file is
+/// removed, so an old secret does not outlive the proxy it belonged to.
+fn save_proxy_secret(library_root: &Path, proxy_url: Option<&str>) -> Result<(), String> {
+    let path = secrets_path(library_root);
+    let Some(url) = proxy_url else {
+        return match fs::remove_file(&path) {
+            Ok(()) => crate::fsutil::sync_dir(&library_root.join(PHLEGETHON_DIR))
+                .map_err(|e| format!("sync {}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("remove {}: {e}", path.display())),
+        };
+    };
+    let file = SecretsFile {
+        version: SECRETS_VERSION,
+        proxy_url: Some(url.to_string()),
+    };
+    let raw = serde_json::to_string_pretty(&file).map_err(|e| format!("serialize secrets: {e}"))?;
+    crate::fsutil::write_atomic_private(&path, raw.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))
+}
+
 /// Everything read from `jobs.json`, ready for [`Core::set_library_root`] to
 /// commit in one step.
 ///
@@ -325,7 +381,16 @@ pub fn load_queue(library_root: &Path) -> Result<LoadedQueue, String> {
             CookieChannel::default()
         }
     };
-    loaded.proxy_settings = queue.proxy_settings.normalized();
+    let stored_proxy = queue.proxy_settings.normalized();
+    loaded.proxy_settings = match load_proxy_secret(library_root) {
+        Ok(secret) => stored_proxy.with_credentials_from(&ProxySettings { url: secret }),
+        Err(reason) => {
+            loaded.warnings.push(format!(
+                "Proxy credentials were not loaded ({reason}); the proxy is used without them."
+            ));
+            stored_proxy
+        }
+    };
     loaded.filename_template =
         match crate::filename_template::validate_filename_template(&queue.filename_template) {
             Ok(()) => queue.filename_template.trim().to_string(),
@@ -512,13 +577,34 @@ pub fn build_queue(
     }
 }
 
-/// Atomically write the queue index to disk.
+/// Atomically write the queue index to disk. Proxy credentials go to `secrets.json`, and
+/// `jobs.json` keeps the proxy URL without them.
+///
+/// The secret is written first, so an interrupted save never leaves a stripped URL behind
+/// without its credentials. A `jobs.json` from before this split loses its credentials at
+/// its first save. A job's `last_error` that echoes the full proxy URL is stored with the
+/// credentials removed.
 pub fn save_queue(library_root: &Path, queue: &PersistedQueue) -> Result<(), String> {
     let dir = library_root.join(PHLEGETHON_DIR);
     fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
+    let proxy = &queue.proxy_settings;
+    let full_proxy_url = proxy.url.as_deref().filter(|_| proxy.has_credentials());
+    save_proxy_secret(library_root, full_proxy_url)?;
+
+    let mut public = queue.clone();
+    public.proxy_settings = proxy.without_credentials();
+    if let Some(full) = full_proxy_url {
+        let stripped = crate::proxy_settings::strip_userinfo(full);
+        for job in &mut public.jobs {
+            if let Some(error) = job.last_error.as_mut() {
+                *error = error.replace(full, &stripped);
+            }
+        }
+    }
+
     let path = dir.join(JOBS_FILENAME);
-    let raw = serde_json::to_string_pretty(queue).map_err(|e| format!("serialize queue: {e}"))?;
+    let raw = serde_json::to_string_pretty(&public).map_err(|e| format!("serialize queue: {e}"))?;
     crate::fsutil::write_atomic(&path, raw.as_bytes())
         .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
@@ -705,6 +791,173 @@ mod tests {
         let loaded = load_queue(&root).unwrap().jobs;
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id(), queue.jobs[0].id);
+    }
+
+    const PROXY_WITH_CREDS: &str = "socks5://alice:hunter2@proxy.example.com:1080";
+    const PROXY_STRIPPED: &str = "socks5://proxy.example.com:1080";
+
+    fn queue_with_proxy(root: &Path, proxy: ProxySettings) -> PersistedQueue {
+        let job = Job::new("https://example.com/file.zip".into(), root.to_path_buf());
+        build_queue(
+            &[job],
+            None,
+            DEFAULT_ACTIVE_JOB_LIMIT,
+            &DefaultQualityPolicy::default(),
+            false,
+            &MediaExtrasOptions::default(),
+            &CookieChannel::default(),
+            &proxy,
+            DEFAULT_FILENAME_TEMPLATE,
+            &ProbeTierSettings::default(),
+        )
+    }
+
+    fn proxy(url: &str) -> ProxySettings {
+        ProxySettings {
+            url: Some(url.to_string()),
+        }
+    }
+
+    #[test]
+    fn proxy_credentials_are_kept_out_of_jobs_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        save_queue(&root, &queue_with_proxy(&root, proxy(PROXY_WITH_CREDS))).unwrap();
+
+        let jobs_json = fs::read_to_string(queue_path(&root)).unwrap();
+        assert!(!jobs_json.contains("alice"), "{jobs_json}");
+        assert!(!jobs_json.contains("hunter2"), "{jobs_json}");
+        assert!(jobs_json.contains(PROXY_STRIPPED), "{jobs_json}");
+
+        let secrets = fs::read_to_string(secrets_path(&root)).unwrap();
+        assert!(secrets.contains(PROXY_WITH_CREDS), "{secrets}");
+
+        let loaded = load_queue(&root).unwrap();
+        assert_eq!(loaded.proxy_settings.url.as_deref(), Some(PROXY_WITH_CREDS));
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    }
+
+    #[test]
+    fn proxy_credentials_echoed_in_a_job_error_are_kept_out_of_jobs_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let mut queue = queue_with_proxy(&root, proxy(PROXY_WITH_CREDS));
+        queue.jobs[0].last_error = Some(format!("proxy {PROXY_WITH_CREDS}: refused"));
+        save_queue(&root, &queue).unwrap();
+
+        let jobs_json = fs::read_to_string(queue_path(&root)).unwrap();
+        assert!(!jobs_json.contains("hunter2"), "{jobs_json}");
+        assert!(
+            jobs_json.contains(&format!("proxy {PROXY_STRIPPED}: refused")),
+            "{jobs_json}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secrets_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        save_queue(&root, &queue_with_proxy(&root, proxy(PROXY_WITH_CREDS))).unwrap();
+        let mode = fs::metadata(secrets_path(&root))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn old_format_jobs_json_is_migrated_on_first_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        // A jobs.json written before the split, with the credentials inline.
+        let legacy = queue_with_proxy(&root, proxy(PROXY_WITH_CREDS));
+        fs::create_dir_all(root.join(PHLEGETHON_DIR)).unwrap();
+        fs::write(
+            queue_path(&root),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(!secrets_path(&root).exists());
+
+        let loaded = load_queue(&root).unwrap();
+        assert_eq!(loaded.proxy_settings.url.as_deref(), Some(PROXY_WITH_CREDS));
+
+        save_queue(&root, &queue_with_proxy(&root, loaded.proxy_settings)).unwrap();
+        let jobs_json = fs::read_to_string(queue_path(&root)).unwrap();
+        assert!(!jobs_json.contains("hunter2"), "{jobs_json}");
+        assert!(secrets_path(&root).exists());
+        assert_eq!(
+            load_queue(&root).unwrap().proxy_settings.url.as_deref(),
+            Some(PROXY_WITH_CREDS)
+        );
+    }
+
+    #[test]
+    fn missing_secrets_file_loads_proxy_without_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        save_queue(&root, &queue_with_proxy(&root, proxy(PROXY_WITH_CREDS))).unwrap();
+        fs::remove_file(secrets_path(&root)).unwrap();
+
+        let loaded = load_queue(&root).unwrap();
+        assert_eq!(loaded.proxy_settings.url.as_deref(), Some(PROXY_STRIPPED));
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(loaded.jobs.len(), 1);
+    }
+
+    #[test]
+    fn unreadable_secrets_file_warns_and_does_not_fail_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        save_queue(&root, &queue_with_proxy(&root, proxy(PROXY_WITH_CREDS))).unwrap();
+        fs::write(secrets_path(&root), b"{ alice:hunter2").unwrap();
+
+        let loaded = load_queue(&root).expect("a bad secrets file must not fail the load");
+        assert_eq!(loaded.proxy_settings.url.as_deref(), Some(PROXY_STRIPPED));
+        assert_eq!(loaded.jobs.len(), 1);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("Proxy credentials")),
+            "{:?}",
+            loaded.warnings
+        );
+        assert!(
+            !loaded.warnings.iter().any(|w| w.contains("hunter2")),
+            "{:?}",
+            loaded.warnings
+        );
+    }
+
+    #[test]
+    fn stored_credentials_are_not_sent_to_a_different_proxy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let other = "socks5://other.example.com:1080";
+        save_queue(&root, &queue_with_proxy(&root, proxy(other))).unwrap();
+        fs::write(
+            secrets_path(&root),
+            format!("{{\"version\":1,\"proxy_url\":\"{PROXY_WITH_CREDS}\"}}"),
+        )
+        .unwrap();
+
+        let loaded = load_queue(&root).unwrap();
+        assert_eq!(loaded.proxy_settings.url.as_deref(), Some(other));
+    }
+
+    #[test]
+    fn clearing_the_proxy_removes_the_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        save_queue(&root, &queue_with_proxy(&root, proxy(PROXY_WITH_CREDS))).unwrap();
+        assert!(secrets_path(&root).exists());
+
+        save_queue(&root, &queue_with_proxy(&root, ProxySettings::default())).unwrap();
+        assert!(!secrets_path(&root).exists());
+        assert_eq!(load_queue(&root).unwrap().proxy_settings.url, None);
     }
 
     #[test]

@@ -27,8 +27,19 @@ pub(crate) fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
 /// `path`, then fsyncs the parent directory. The temp file is removed on any
 /// error, and concurrent writers never share a temp name.
 pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+    write_atomic_with_mode(path, data, None)
+}
+
+/// [`write_atomic`] for a file that holds secrets. The temp file is created with mode
+/// 0600 before any data is written, and the renamed file keeps that mode, so no other
+/// user can read it, not even briefly.
+pub(crate) fn write_atomic_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    write_atomic_with_mode(path, data, Some(0o600))
+}
+
+fn write_atomic_with_mode(path: &Path, data: &[u8], mode: Option<u32>) -> io::Result<()> {
     let tmp = temp_sibling(path);
-    let result = write_synced(&tmp, data).and_then(|()| rename_durable(&tmp, path));
+    let result = write_synced(&tmp, data, mode).and_then(|()| rename_durable(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -82,11 +93,25 @@ pub(crate) fn copy_aside_corrupt(path: &Path) -> io::Result<PathBuf> {
     Ok(target)
 }
 
-fn write_synced(tmp: &Path, data: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(tmp)?;
+fn write_synced(tmp: &Path, data: &[u8], mode: Option<u32>) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    if let Some(mode) = mode {
+        set_create_mode(&mut options, mode);
+    }
+    let mut file = options.open(tmp)?;
     file.write_all(data)?;
     file.sync_all()
 }
+
+#[cfg(unix)]
+fn set_create_mode(options: &mut OpenOptions, mode: u32) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(mode);
+}
+
+#[cfg(not(unix))]
+fn set_create_mode(_options: &mut OpenOptions, _mode: u32) {}
 
 pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
     let name = path
@@ -189,6 +214,20 @@ mod tests {
         ] {
             assert!(!is_single_component(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_write_is_owner_only_even_over_a_wider_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.json");
+        write_atomic(&path, b"public first").unwrap();
+        write_atomic_private(&path, b"secret").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"secret");
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(names(dir.path()), vec!["secrets.json"]);
     }
 
     #[test]
