@@ -17,7 +17,7 @@ export function PromptModal({ request, onClose }: PromptModalProps) {
   useReturnFocus(request != null);
 
   useEffect(() => {
-    setValue("");
+    setValue(request?.initialValue ?? "");
     setTouched(false);
   }, [request]);
 
@@ -48,6 +48,7 @@ export function PromptModal({ request, onClose }: PromptModalProps) {
         data-modal-primary-focus
         labelText={request.label}
         placeholder={request.placeholder}
+        helperText={request.helperText}
         value={value}
         invalid={invalid}
         invalidText={error ?? ""}

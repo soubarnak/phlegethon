@@ -429,10 +429,7 @@ pub fn save_sidecar_runtime_state(
         .map_err(|e| format!("write sidecar state {}: {e}", path.display()))
 }
 
-fn pinned_version<'a>(
-    settings: &'a SidecarUpdateSettings,
-    component: SidecarComponent,
-) -> Option<&'a str> {
+fn pinned_version(settings: &SidecarUpdateSettings, component: SidecarComponent) -> Option<&str> {
     match component {
         SidecarComponent::Toolchain => settings
             .toolchain_pin

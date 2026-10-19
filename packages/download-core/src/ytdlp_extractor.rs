@@ -660,6 +660,7 @@ impl YtDlpExtractorToolchain {
     /// extracting each video. Multi-item probes keep standard quality presets
     /// from flat parse so the probe sheet opens without N+1 yt-dlp calls.
     /// `--plugin-dirs` is included when configured (Launch Site Extractor Plugins).
+    #[cfg(test)]
     pub(crate) fn probe_args(
         &self,
         url: &str,
@@ -669,12 +670,14 @@ impl YtDlpExtractorToolchain {
         self.probe_args_for(url, true, cookies, proxy)
     }
 
+    /// The proxy never enters argv (M-24). `run_probe_json` hands it to yt-dlp through
+    /// the environment instead.
     fn probe_args_for(
         &self,
         url: &str,
         flat_playlist: bool,
         cookies: &CookieChannel,
-        proxy: &ProxySettings,
+        _proxy: &ProxySettings,
     ) -> Vec<String> {
         let mut args = vec!["-J".to_string(), "--no-warnings".to_string()];
         if flat_playlist {
@@ -703,14 +706,11 @@ impl YtDlpExtractorToolchain {
         &self,
         url: &str,
         format: &str,
-        dest_dir: &std::path::Path,
+        out_tmpl: &std::path::Path,
         media_extras: &MediaExtrasOptions,
         cookies: &CookieChannel,
-        proxy: &ProxySettings,
-        output_template: &str,
         referer: Option<&str>,
     ) -> Vec<String> {
-        let out_tmpl = dest_dir.join(output_template);
         let ffmpeg_present = ffmpeg_available(self.config.ffmpeg_dir.as_deref());
         let format_selector = quality_id_to_ytdlp_format(format, ffmpeg_present);
 
@@ -1265,16 +1265,8 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
             .map_err(|e| format!("create download dir {}: {e}", dest_dir.display()))?;
 
         let (cookies, _cookie_copy) = cookies.with_private_cookie_file()?;
-        let args = self.download_args(
-            url,
-            format,
-            dest_dir,
-            media_extras,
-            &cookies,
-            proxy,
-            output_template,
-            referer,
-        );
+        let out_tmpl = dest_dir.join(output_template);
+        let args = self.download_args(url, format, &out_tmpl, media_extras, &cookies, referer);
 
         let launcher = self.effective_launcher();
         let (cmd, _doh_guard) = ytdlp_command_with_optional_doh_dns(&launcher, &args, url, proxy)?;
@@ -1316,8 +1308,7 @@ impl ExtractorToolchain for YtDlpExtractorToolchain {
                 let path_line = stdout
                     .lines()
                     .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .last()
+                    .rfind(|l| !l.is_empty())
                     .ok_or_else(|| "yt-dlp download produced no output path".to_string())?;
 
                 let path = PathBuf::from(path_line);
@@ -1351,7 +1342,11 @@ struct ProgressTracker {
     carry: Vec<u8>,
     /// Per file: (downloaded, total), in the order the files first appeared.
     files: Vec<(String, u64, Option<u64>)>,
+    /// The last report, for duplicate suppression.
     last: Option<ExtractorProgress>,
+    /// The last report that had a total. A report without one must not reset the share
+    /// that later reports are held to.
+    peak: Option<ExtractorProgress>,
 }
 
 impl ProgressTracker {
@@ -1366,11 +1361,14 @@ impl ProgressTracker {
         if !changed {
             return None;
         }
-        let progress = self.aggregate();
+        let progress = self.monotone(self.aggregate());
         if self.last == Some(progress) {
             return None;
         }
         self.last = Some(progress);
+        if progress.total_bytes.is_some() {
+            self.peak = Some(progress);
+        }
         Some(progress)
     }
 
@@ -1425,6 +1423,30 @@ impl ProgressTracker {
         ExtractorProgress {
             downloaded_bytes: total.map_or(downloaded, |t| downloaded.min(t)),
             total_bytes: total,
+        }
+    }
+
+    /// Raise `progress` so its percentage is not below the last share reported with a total.
+    ///
+    /// The total grows when the second file's size becomes known, so the raw pair can
+    /// fall from 1000/1000 (100 %) to 1100/1200 (92 %). The total stays the largest seen
+    /// and the downloaded figure is raised to the share the last report had. The
+    /// downloaded figure is not allowed past the total.
+    fn monotone(&self, progress: ExtractorProgress) -> ExtractorProgress {
+        let (Some(peak), Some(total)) = (self.peak, progress.total_bytes) else {
+            return progress;
+        };
+        let Some(peak_total) = peak.total_bytes.filter(|t| *t > 0) else {
+            return progress;
+        };
+        let total = total.max(peak_total);
+        // The smallest downloaded figure whose share of `total` is at least `peak`'s share.
+        let floor = (u128::from(peak.downloaded_bytes) * u128::from(total))
+            .div_ceil(u128::from(peak_total));
+        let floor = u64::try_from(floor).unwrap_or(u64::MAX);
+        ExtractorProgress {
+            downloaded_bytes: progress.downloaded_bytes.max(floor).min(total),
+            total_bytes: Some(total),
         }
     }
 }
@@ -1645,7 +1667,7 @@ fn launch_site_standard_qualities() -> Vec<Quality> {
             label: if *id == "best" {
                 "Best available".to_string()
             } else {
-                format!("{id}")
+                id.to_string()
             },
             size_bytes: None,
             container: None,
@@ -1700,7 +1722,7 @@ fn playlist_entry_id(entry: &YtDlpEntry, item_url: &str) -> Option<String> {
 
         if let Some(slug) = parsed
             .path_segments()
-            .and_then(|segments| segments.filter(|segment| !segment.is_empty()).last())
+            .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
             .map(|segment| segment.to_string())
             .filter(|s| !s.is_empty())
         {
@@ -2298,6 +2320,12 @@ impl FakeYtDlpExtractor {
     /// Mark a URL as failing (simulates yt-dlp crash / non-zero exit).
     pub fn insert_failure(&mut self, url: &str) {
         self.failing_urls.push(url.to_string());
+    }
+}
+
+impl Default for FakeYtDlpExtractor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -3844,11 +3872,9 @@ esac
         let args = extractor.download_args(
             "https://example.com/v",
             "best",
-            Path::new("/tmp/dest"),
+            &Path::new("/tmp/dest").join("%(title)s.%(ext)s"),
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
-            &ProxySettings::default(),
-            "%(title)s.%(ext)s",
             Some("https://example.com/"),
         );
         let n = args.len();
@@ -3953,6 +3979,112 @@ esac
     }
 
     #[test]
+    fn reported_percent_never_drops_when_the_audio_file_adds_to_the_total() {
+        let mut tracker = ProgressTracker::default();
+        let mut seen: Vec<ExtractorProgress> = Vec::new();
+        let lines = [
+            progress_line("finished", "1000", "1000", "v.f137.mp4"),
+            progress_line("downloading", "100", "200", "v.f140.m4a"),
+            progress_line("downloading", "150", "200", "v.f140.m4a"),
+            progress_line("finished", "200", "200", "v.f140.m4a"),
+        ];
+        for line in &lines {
+            seen.extend(tracker.feed(line.as_bytes()));
+        }
+        let share = |p: &ExtractorProgress| {
+            p.downloaded_bytes as f64 / p.total_bytes.expect("total known") as f64
+        };
+        assert_eq!(
+            seen.first(),
+            Some(&ExtractorProgress {
+                downloaded_bytes: 1000,
+                total_bytes: Some(1000)
+            })
+        );
+        assert!(
+            seen.windows(2).all(|w| share(&w[0]) <= share(&w[1])),
+            "percent went backwards: {seen:?}"
+        );
+        assert!(seen
+            .iter()
+            .all(|p| p.downloaded_bytes <= p.total_bytes.unwrap()));
+        assert_eq!(
+            seen.last(),
+            Some(&ExtractorProgress {
+                downloaded_bytes: 1200,
+                total_bytes: Some(1200)
+            })
+        );
+    }
+
+    #[test]
+    fn reported_percent_holds_across_a_line_with_no_known_total() {
+        let mut tracker = ProgressTracker::default();
+        let mut seen: Vec<ExtractorProgress> = Vec::new();
+        let lines = [
+            progress_line("finished", "1000", "1000", "v.f137.mp4"),
+            // yt-dlp gave no total for the audio file yet, so the total is unknown here.
+            progress_line("downloading", "50", "NA", "v.f140.m4a"),
+            progress_line("downloading", "100", "200", "v.f140.m4a"),
+        ];
+        for line in &lines {
+            seen.extend(tracker.feed(line.as_bytes()));
+        }
+        let known: Vec<&ExtractorProgress> =
+            seen.iter().filter(|p| p.total_bytes.is_some()).collect();
+        assert!(
+            known.windows(2).all(|w| {
+                let (a, b) = (w[0], w[1]);
+                a.downloaded_bytes as u128 * b.total_bytes.unwrap() as u128
+                    <= b.downloaded_bytes as u128 * a.total_bytes.unwrap() as u128
+            }),
+            "percent went backwards: {seen:?}"
+        );
+        assert_eq!(
+            seen.last(),
+            Some(&ExtractorProgress {
+                downloaded_bytes: 1200,
+                total_bytes: Some(1200)
+            })
+        );
+    }
+
+    #[test]
+    fn monotone_clamp_keeps_the_largest_total_and_never_exceeds_it() {
+        let tracker = ProgressTracker {
+            peak: Some(ExtractorProgress {
+                downloaded_bytes: 300,
+                total_bytes: Some(1000),
+            }),
+            ..Default::default()
+        };
+        // A smaller total later must not lower the reported total.
+        let raised = tracker.monotone(ExtractorProgress {
+            downloaded_bytes: 10,
+            total_bytes: Some(500),
+        });
+        assert_eq!(
+            raised,
+            ExtractorProgress {
+                downloaded_bytes: 300,
+                total_bytes: Some(1000)
+            }
+        );
+        // A raw figure above the total is capped at the total.
+        let capped = tracker.monotone(ExtractorProgress {
+            downloaded_bytes: 2000,
+            total_bytes: Some(1000),
+        });
+        assert_eq!(capped.downloaded_bytes, 1000);
+        // An unknown total is passed through, not turned into a percentage.
+        let unknown = ExtractorProgress {
+            downloaded_bytes: 42,
+            total_bytes: None,
+        };
+        assert_eq!(tracker.monotone(unknown), unknown);
+    }
+
+    #[test]
     fn progress_lines_split_across_reads_and_noise_are_handled() {
         let mut tracker = ProgressTracker::default();
         let line = progress_line("downloading", "50", "100", "a.mp4");
@@ -3993,11 +4125,9 @@ esac
         let args = extractor.download_args(
             "https://example.com/v",
             "best",
-            Path::new("/tmp/dest"),
+            &Path::new("/tmp/dest").join("%(title)s.%(ext)s"),
             &MediaExtrasOptions::default(),
             &CookieChannel::default(),
-            &ProxySettings::default(),
-            "%(title)s.%(ext)s",
             None,
         );
         assert!(args.iter().any(|a| a == "--progress"), "{args:?}");

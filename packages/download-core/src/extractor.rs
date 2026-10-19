@@ -381,6 +381,8 @@ pub trait ExtractorToolchain: Send + Sync {
     }
 
     /// Default: not supported (clear HTTP jobs use the HTTP backend instead).
+    // Trait signature is public API; bundling the arguments would change every implementor.
+    #[allow(clippy::too_many_arguments)]
     fn download(
         &self,
         _url: &str,
@@ -449,6 +451,9 @@ struct FakeProbeResponse {
     source_name: Option<String>,
     items: Vec<MediaItem>,
 }
+
+/// One batch entry: `(id, title, url, [(quality id, label)])`.
+type BatchItem<'a> = (&'a str, &'a str, &'a str, Vec<(&'a str, &'a str)>);
 
 impl FakeExtractorToolchain {
     /// Create an empty fake (all URLs fail).
@@ -620,12 +625,7 @@ impl FakeExtractorToolchain {
     /// Insert a multi-item probe response (batch/channel).
     ///
     /// `source_name` is used for the Job Destination subfolder.
-    pub fn insert_batch(
-        &mut self,
-        url: &str,
-        source_name: &str,
-        items: Vec<(&str, &str, &str, Vec<(&str, &str)>)>,
-    ) {
+    pub fn insert_batch(&mut self, url: &str, source_name: &str, items: Vec<BatchItem<'_>>) {
         let media_items: Vec<MediaItem> = items
             .into_iter()
             .map(|(id, title, item_url, qualities)| MediaItem {
@@ -798,7 +798,7 @@ impl ExtractorToolchain for FakeExtractorToolchain {
                     .append(true)
                     .open(&path)
                     .map_err(|e| format!("open partial {path:?}: {e}"))?;
-                write!(file, "chunk:{chunk}:{url}:{format}\n")
+                writeln!(file, "chunk:{chunk}:{url}:{format}")
                     .map_err(|e| format!("write partial {path:?}: {e}"))?;
                 *slow.chunks_written.lock().unwrap() = chunk + 1;
                 std::thread::sleep(slow.chunk_delay);

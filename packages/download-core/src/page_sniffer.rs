@@ -241,6 +241,54 @@ fn looks_like_preview(url: &str) -> bool {
         || lower.contains("/thumb")
 }
 
+/// Ad and tracker hosts. A URL on one of these hosts, or on a subdomain of one, is never
+/// offered. The list is short and conservative on purpose.
+const AD_TRACKER_HOSTS: &[&str] = &[
+    "doubleclick.net",
+    "googlesyndication.com",
+    "googleadservices.com",
+    "google-analytics.com",
+    "googletagmanager.com",
+    "adservice.google.com",
+    "scorecardresearch.com",
+];
+
+/// Path segments that mark ad creatives and ad servers. They apply only to URLs that are
+/// not media, so a video on a CDN under `/ads/` is still offered.
+const AD_PATH_SEGMENTS: &[&str] = &["ads", "adserver", "adserving"];
+
+/// Exact host or dot-suffix match, the same rule as `launch_sites::find`.
+fn host_matches(host: &str, domain: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|rest| rest.ends_with('.'))
+}
+
+/// Whether `url` is an ad or tracker request that must not be offered as media.
+fn is_ad_or_tracker(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    let host = parsed
+        .host_str()
+        .unwrap_or("")
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if AD_TRACKER_HOSTS
+        .iter()
+        .any(|domain| host_matches(&host, domain))
+    {
+        return true;
+    }
+    if classify_player_media_url(url).is_some() {
+        return false;
+    }
+    parsed.path_segments().is_some_and(|mut segments| {
+        segments.any(|s| AD_PATH_SEGMENTS.contains(&s.to_ascii_lowercase().as_str()))
+    })
+}
+
 /// Extract media URLs from an HTML document. Pure; no network.
 pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
     // The first `<base href>` is the base for every relative URL in the document.
@@ -254,7 +302,7 @@ pub fn sniff_html(base: &Url, html: &str) -> Vec<SniffedMedia> {
     let mut seen: HashSet<String> = HashSet::new();
 
     let mut push = |url: String, kind: SniffedKind, label: Option<String>, source: SniffSource| {
-        if looks_like_preview(&url) {
+        if looks_like_preview(&url) || is_ad_or_tracker(&url) {
             return;
         }
         if seen.insert(url.clone()) {
@@ -962,6 +1010,67 @@ mod tests {
         assert_eq!(media.len(), 1);
         assert_eq!(media[0].url, "https://cdn.example.com/a/b_1080.mp4?t=1");
         assert_eq!(media[0].source, SniffSource::InlineScript);
+    }
+
+    #[test]
+    fn ad_and_tracker_hosts_are_filtered_including_subdomains() {
+        for url in [
+            "https://doubleclick.net/pixel.mp4",
+            "https://ad.doubleclick.net/ddm/clip.mp4",
+            "https://pagead2.googlesyndication.com/clip.mp4",
+            "https://www.google-analytics.com/collect.mp4",
+            "https://www.googletagmanager.com/gtm.js",
+            "https://adservice.google.com/clip.mp4",
+            "https://cdn.scorecardresearch.com/beacon.mp4",
+        ] {
+            assert!(is_ad_or_tracker(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn ad_host_match_needs_a_dot_boundary() {
+        for url in [
+            "https://notdoubleclick.net/clip.mp4",
+            "https://doubleclick.net.example.com/clip.mp4",
+            "https://example.com/doubleclick.net/clip.mp4",
+        ] {
+            assert!(!is_ad_or_tracker(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn ad_path_segments_filter_only_non_media_urls() {
+        assert!(is_ad_or_tracker("https://example.com/ads/banner.gif"));
+        assert!(is_ad_or_tracker("https://example.com/adserver/tag"));
+        // Media on a CDN under an ad-looking path is still offered.
+        assert!(!is_ad_or_tracker(
+            "https://cdn.example.net/ads/promo/clip.mp4"
+        ));
+        assert!(!is_ad_or_tracker(
+            "https://cdn.example.net/ads/hls/index.m3u8"
+        ));
+        assert!(!is_ad_or_tracker("https://cdn.example.net/ads/hls/seg.ts"));
+    }
+
+    #[test]
+    fn real_media_urls_on_cdns_are_not_filtered() {
+        for url in [
+            "https://video-cdn.example.net/hls/abc123/index.m3u8",
+            "https://cdn.example.net/files/movie.mp4?sig=1",
+            "https://media.example.org/v/clip_1080.webm",
+            "https://adsl-cdn.example.net/clip.mp4",
+        ] {
+            assert!(!is_ad_or_tracker(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn ad_urls_are_not_offered_by_sniff_html() {
+        let html = r#"<video src="https://ad.doubleclick.net/ddm/clip.mp4"></video>
+            <video src="https://cdn.example.net/ads/promo/clip.mp4"></video>"#;
+        let media = sniff_html(&base(), html);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].url, "https://cdn.example.net/ads/promo/clip.mp4");
     }
 
     #[test]

@@ -38,15 +38,16 @@ check_fails() { # name, then a command that must fail
 # --- check-versions.sh -------------------------------------------------------------
 check "check-versions: the tree agrees" scripts/check-versions.sh
 version=$(awk -F'"' '/^\[workspace.package\]/{f=1} f&&/^version/{print $2; exit}' Cargo.toml)
-check "check-versions: accepts v<version>" scripts/check-versions.sh "v$version"
+check "check-versions: accepts phlegethon-v<version>" scripts/check-versions.sh "phlegethon-v$version"
 check_fails "check-versions: rejects another version" scripts/check-versions.sh 9.9.9
+check_fails "check-versions: rejects phlegethon-v9.9.9" scripts/check-versions.sh phlegethon-v9.9.9
 
 # A copy of the tree with one location changed must be rejected.
 copy="$tmp/tree"
 mkdir -p "$copy/scripts" "$copy/packages/tauri-shell/src-tauri" "$copy/packages/tauri-shell/frontend" \
 	"$copy/packages/chrome-companion" "$copy/packaging/void/srcpkgs/phlegethon" "$copy/packaging/linux"
 cp scripts/check-versions.sh "$copy/scripts/"
-cp Cargo.toml README.md "$copy/"
+cp Cargo.toml "$copy/"
 cp packages/tauri-shell/src-tauri/Cargo.toml packages/tauri-shell/src-tauri/tauri.conf.json "$copy/packages/tauri-shell/src-tauri/"
 cp packages/tauri-shell/frontend/package.json packages/tauri-shell/frontend/package-lock.json "$copy/packages/tauri-shell/frontend/"
 cp packages/chrome-companion/manifest.json "$copy/packages/chrome-companion/"
@@ -56,12 +57,13 @@ check "check-versions: copy of the tree agrees" "$copy/scripts/check-versions.sh
 sed -i 's/"version": "[^"]*"/"version": "7.7.7"/' "$copy/packages/chrome-companion/manifest.json"
 check_fails "check-versions: a changed extension manifest is caught" "$copy/scripts/check-versions.sh"
 cp packages/chrome-companion/manifest.json "$copy/packages/chrome-companion/"
-sed -i 's#/releases/download/v[0-9.]*/phlegethon-[0-9.]*_#/releases/download/v7.7.7/phlegethon-7.7.7_#' "$copy/README.md"
-check_fails "check-versions: a changed README URL is caught" "$copy/scripts/check-versions.sh"
 
-cp README.md "$copy/README.md"
 sed -i 's/<release version="[^"]*"/<release version="7.7.7"/' "$copy/packaging/linux/com.phlegethon.app.metainfo.xml"
 check_fails "check-versions: a stale metainfo release is caught" "$copy/scripts/check-versions.sh"
+
+# --- sign-repo.sh ------------------------------------------------------------------
+check "sign-repo: parses" sh -n packaging/void/sign-repo.sh
+check_fails "sign-repo: refuses an empty signing key" sh packaging/void/sign-repo.sh "$tmp" /dev/null
 
 # --- install-nmh-linux.sh ----------------------------------------------------------
 home="$tmp/home"

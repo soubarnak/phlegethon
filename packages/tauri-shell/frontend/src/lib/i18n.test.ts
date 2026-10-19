@@ -71,16 +71,25 @@ describe("i18n", () => {
     sources(path.resolve(__dirname, "..")).map((file) => ({ file, text: readFileSync(file, "utf8") }));
   const placeholders = (value: string) => new Set([...value.matchAll(/\{([a-zA-Z0-9_]+)\}/g)].map((m) => m[1]));
 
+  // Key families built at runtime, so no literal t("...") names their members. `builder` is the
+  // file that builds the key from a template. The test fails if that template goes away.
+  const DYNAMIC_KEY_FAMILIES = [
+    { prefix: "error.hint.", builder: "lib/errors.ts" },
+    { prefix: "toolchain.ejs.", builder: "components/ToolchainPanel.tsx" },
+    { prefix: "toolchain.source.", builder: "components/ToolchainPanel.tsx" },
+    { prefix: "hash.algorithm.", builder: "components/ExpectedHashModal.tsx" },
+  ];
+
   it("has no unused keys in en.json", () => {
+    for (const { prefix, builder } of DYNAMIC_KEY_FAMILIES) {
+      const builderText = readFileSync(path.resolve(__dirname, "..", builder), "utf8");
+      expect(builderText, `${builder} no longer builds ${prefix}\${...}`).toContain(`\`${prefix}\${`);
+      expect(Object.keys(table).some((key) => key.startsWith(prefix)), `no keys for ${prefix}`).toBe(true);
+    }
+    const dynamic = (key: string) => DYNAMIC_KEY_FAMILIES.some(({ prefix }) => key.startsWith(prefix));
     const files = allSources();
-    const used = (key: string) => {
-      const dynamicPrefix = key.slice(0, key.lastIndexOf(".") + 1);
-      return files.some(
-        ({ text }) =>
-          text.includes(`"${key}"`) || text.includes(`'${key}'`) || (dynamicPrefix && text.includes(`${dynamicPrefix}\${`)),
-      );
-    };
-    expect(Object.keys(table).filter((key) => !used(key))).toEqual([]);
+    const literal = (key: string) => files.some(({ text }) => text.includes(`"${key}"`) || text.includes(`'${key}'`));
+    expect(Object.keys(table).filter((key) => !dynamic(key) && !literal(key))).toEqual([]);
   });
 
   it("passes the placeholders each string expects", () => {

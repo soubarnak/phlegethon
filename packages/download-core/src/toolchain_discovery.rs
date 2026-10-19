@@ -695,6 +695,9 @@ pub fn run_command_with_deadline_polling(
     run_command_observing(cmd, stop, deadline, poll_interval, None)
 }
 
+/// Callback that receives each stdout chunk while a child runs.
+type ChunkObserver<'a> = &'a mut dyn FnMut(&[u8]);
+
 /// [`run_command_with_deadline_polling`] that also hands every new chunk of stdout to
 /// `observer` while the child runs (called from the polling thread, once per poll).
 /// The full output is still returned at the end.
@@ -703,7 +706,7 @@ pub fn run_command_observing(
     stop: Option<&AtomicBool>,
     deadline: Option<Instant>,
     poll_interval: Duration,
-    observer: Option<&mut dyn FnMut(&[u8])>,
+    observer: Option<ChunkObserver<'_>>,
 ) -> Result<CommandOutcome, String> {
     run_command_watched(cmd, stop, deadline, None, poll_interval, observer)
 }
@@ -717,7 +720,7 @@ pub fn run_command_watched(
     deadline: Option<Instant>,
     stall: Option<Duration>,
     poll_interval: Duration,
-    mut observer: Option<&mut dyn FnMut(&[u8])>,
+    mut observer: Option<ChunkObserver<'_>>,
 ) -> Result<CommandOutcome, String> {
     if stop.is_some_and(|s| s.load(Ordering::Acquire)) {
         return Ok(CommandOutcome::Stopped);

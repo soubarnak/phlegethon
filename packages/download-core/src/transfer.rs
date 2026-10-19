@@ -26,7 +26,6 @@ pub struct SingleFetchParams {
 
 pub struct SingleFetchOutcome {
     pub fetch: Result<FetchResult, String>,
-    pub bytes_written: u64,
     pub paused: bool,
 }
 
@@ -50,7 +49,6 @@ fn run_single_fetch(params: &SingleFetchParams) -> SingleFetchOutcome {
         Err(e) => {
             return SingleFetchOutcome {
                 fetch: Err(format!("open partial {:?}: {e}", params.part_path)),
-                bytes_written: 0,
                 paused: false,
             };
         }
@@ -72,23 +70,17 @@ fn run_single_fetch(params: &SingleFetchParams) -> SingleFetchOutcome {
         params.if_range.as_deref(),
         &mut limited,
     );
-    let bytes_written = limited.bytes_written();
     let paused = limited.was_paused();
     drop(limited);
 
     if let Err(err) = part_file.flush().and_then(|()| part_file.sync_all()) {
         return SingleFetchOutcome {
             fetch: Err(format!("flush partial {:?}: {err}", params.part_path)),
-            bytes_written,
             paused,
         };
     }
 
-    SingleFetchOutcome {
-        fetch,
-        bytes_written,
-        paused,
-    }
+    SingleFetchOutcome { fetch, paused }
 }
 
 pub struct SegmentFetchParams {

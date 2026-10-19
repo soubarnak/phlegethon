@@ -53,9 +53,12 @@ pub fn resolve_a_records_with(proxy: &ProxySettings, host: &str) -> Result<Vec<I
 fn doh_agent(proxy: &ProxySettings) -> Result<ureq::Agent, String> {
     let builder = ureq::AgentBuilder::new();
     let builder = match proxy.normalized().url {
-        Some(url) => {
-            builder.proxy(ureq::Proxy::new(&url).map_err(|e| format!("DoH proxy {url}: {e}"))?)
-        }
+        Some(url) => builder.proxy(ureq::Proxy::new(&url).map_err(|e| {
+            format!(
+                "DoH proxy {}: {e}",
+                crate::proxy_settings::strip_userinfo(&url)
+            )
+        })?),
         None => builder.try_proxy_from_env(true),
     };
     Ok(builder.build())
@@ -139,8 +142,8 @@ mod tests {
     #[test]
     fn system_dns_diverges_helper_detects_disjoint_sets() {
         // Direct unit of the overlap logic via local copies.
-        let doh = vec![IpAddr::V4(Ipv4Addr::new(104, 16, 3, 81))];
-        let system = vec![IpAddr::V4(Ipv4Addr::new(202, 83, 21, 14))];
+        let doh = [IpAddr::V4(Ipv4Addr::new(104, 16, 3, 81))];
+        let system = [IpAddr::V4(Ipv4Addr::new(202, 83, 21, 14))];
         assert!(!system.iter().any(|ip| doh.contains(ip)));
     }
 }

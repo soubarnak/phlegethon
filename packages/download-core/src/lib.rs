@@ -35,7 +35,7 @@ mod transfer;
 mod url_input;
 pub mod ytdlp_extractor;
 pub use plugin_sidecar::{
-    bundled_manifest, ensure_bundled_plugins, install_plugin_package, load_manifest, needs_update,
+    bundled_manifest, ensure_bundled_plugins, install_plugin_package, load_manifest,
     plugin_dirs_path, version_is_newer, write_manifest, BundledInstall, PluginManifest,
     MANIFEST_FILENAME, PLUGIN_DIRS_REL, PLUGIN_PACKAGE_NAME,
 };
@@ -897,7 +897,7 @@ impl UnlockedTransferPlan {
                     format,
                     dest: dest.clone(),
                     output_spec,
-                    media_extras: media_extras.clone(),
+                    media_extras,
                     cookies,
                     proxy,
                     stop: stop.clone(),
@@ -1488,7 +1488,7 @@ impl Core {
             return Ok(());
         }
         self.jobs[job_index].set_last_error(Some(error.clone()));
-        self.record_media_identity(job_id, job_index);
+        self.record_media_identity(job_id, job_index, None);
         let persisted = self.persist_queue_now();
         self.event_tx
             .send(CoreEvent::JobFailed {
@@ -2818,7 +2818,7 @@ impl Core {
             return false;
         };
         let mut found = false;
-        for (_, (probe_url, flag)) in self.probe_cancels.iter() {
+        for (probe_url, flag) in self.probe_cancels.values() {
             if *probe_url == key {
                 flag.store(true, Ordering::Release);
                 found = true;
@@ -4121,7 +4121,7 @@ impl Core {
         if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
             self.jobs[job_index].set_filename(name);
         }
-        self.record_media_identity(job_id, job_index);
+        self.record_media_identity(job_id, job_index, Some(bytes_written));
         // Persist before announcing, so a restart never contradicts the event.
         let persisted = self.persist_queue_now();
         self.event_tx
@@ -4143,8 +4143,9 @@ impl Core {
     /// Record a finished media job in the Download Archive.
     ///
     /// Best effort: the archive is History, not queue state, so a failed save
-    /// is logged and never blocks the job's own terminal state.
-    fn record_media_identity(&mut self, job_id: &str, job_index: usize) {
+    /// is logged and never blocks the job's own terminal state. `size_bytes` is the finished file's
+    /// size for a Completed job and None for a Failed one.
+    fn record_media_identity(&mut self, job_id: &str, job_index: usize, size_bytes: Option<u64>) {
         let Some(media_id) = self.jobs[job_index].media_id().map(str::to_string) else {
             return;
         };
@@ -4170,6 +4171,7 @@ impl Core {
             } else {
                 download_archive::ArchiveOutcome::Failed
             },
+            size_bytes,
         };
         self.download_archive.record(entry);
         if let Some(root) = &self.library_root {

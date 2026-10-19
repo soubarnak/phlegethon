@@ -2,7 +2,7 @@
 
 Bug, gap and UI report for Phlegethon at commit `110a1ff` on `main`, compiled on 2026-10-15.
 
-This report covers the whole repository except `prototypes/`. It lists defects, a UI layout pass aimed at niri and other tiling Wayland compositors, functional improvements, and gaps between the code, the glossary in `CONTEXT.md`, the tests and CI. It does not change any code. Terms such as Download Core, Platform Shell, Job Destination, Library Root, Discard, Launch Site and Resumable Transfer are used as `CONTEXT.md` defines them.
+This report covers the whole repository except `prototypes/`. It lists defects, a UI layout pass aimed at niri and other tiling Wayland compositors, functional improvements, and gaps between the code, the glossary in `CONTEXT.md`, the tests and CI. It does not change any code. Section 11 records which pull request fixed each finding; the rest of the report describes the code as it was at `110a1ff`. Terms such as Download Core, Platform Shell, Job Destination, Library Root, Discard, Launch Site and Resumable Transfer are used as `CONTEXT.md` defines them.
 
 ## Contents
 
@@ -16,6 +16,7 @@ This report covers the whole repository except `prototypes/`. It lists defects, 
 8. [CODE_REVIEW.md reconciliation](#8-code_reviewmd-reconciliation)
 9. [Method and limitations](#9-method-and-limitations)
 10. [Not inspected](#10-not-inspected)
+11. [Status](#11-status)
 
 ## 1. How to read this report
 
@@ -881,3 +882,206 @@ Several "fixed" roadmap items still carry defects listed here: resume (B-2, H-10
 - Fixture HTML contents beyond targeted searches, and the bodies of most `core_api.rs` tests (names only).
 - The musl `.xbps` package contents, and whether `openssl-devel` and `librsvg-devel` build dependencies are needed.
 - `cargo audit`, which is not installed.
+
+## 11. Status
+
+Status of each finding after the fix workstreams (GitHub issues #68 to #80). The PR column names the pull requests that carry the fix.
+
+| ID | Status | PR |
+| --- | --- | --- |
+| B-1 | Fixed | #85 |
+| B-2 | Fixed | #91, #99 |
+| H-1 | Fixed | #84 |
+| H-2 | Fixed | #94, #99 |
+| H-3 | Fixed | #94, #99 |
+| H-4 | Fixed | #95, #99 |
+| H-5 | Fixed | #91, #99 |
+| H-6 | Fixed | #96, #99 |
+| H-7 | Fixed | #113 |
+| H-8 | Fixed | #113, #133 |
+| H-9 | Fixed | #96, #108, #115, #128, #133 |
+| H-10 | Fixed | #114, #126 |
+| H-11 | Fixed | #98 |
+| H-12 | Fixed | #102 |
+| H-13 | Fixed | #118 |
+| H-14 | Fixed | #108 |
+| H-15 | Fixed | #88 |
+| H-16 | Fixed | #103 |
+| H-17 | Fixed | #109 |
+| H-18 | Fixed | #104 |
+| H-19 | Fixed | #110 |
+| H-20 | Fixed | #128 |
+| H-21 | Fixed | #105, #125 |
+| H-22 | Fixed | #107 |
+| H-23 | Fixed | #129 |
+| H-24 | Fixed | #123 |
+| H-25 | Fixed | #86, #100, #130 |
+| M-1 | Fixed | #113 |
+| M-2 | Fixed | #113 |
+| M-3 | Fixed | #96 / #99 |
+| M-4 | Fixed | #113 |
+| M-5 | Fixed | #113 |
+| M-6 | Fixed | #113 |
+| M-7 | Fixed | #113, #133 |
+| M-8 | Fixed | #113 |
+| M-9 | Fixed | #97 / #99 |
+| M-10 | Fixed | #94 / #99 |
+| M-11 | Fixed | #113 |
+| M-12 | Fixed | #113 |
+| M-13 | Fixed | #96 / #99 |
+| M-14 | Fixed | #91 / #99 |
+| M-15 | Fixed | #95 / #99 |
+| M-16 | Fixed | #88 |
+| M-17 | Fixed | #88 |
+| M-18 | Fixed | #113 |
+| M-19 | Fixed | #113 |
+| M-20 | Fixed | #118 |
+| M-21 | Fixed | #109 |
+| M-22 | Fixed | #127 |
+| M-23 | Fixed | #127 |
+| M-24 | Fixed | #139 (secrets.json, ADR 0007) |
+| M-25 | Fixed | #123 / #126 |
+| M-26 | Fixed | #123, #126, #133 |
+| M-27 | Fixed | #118 |
+| M-28 | Fixed | #123 / #126 |
+| M-29 | Partial | #114, #126, #139 (percentage is monotone; the total is not known up front) |
+| M-30 | Fixed | #118 |
+| M-31 | Fixed | #129 |
+| M-32 | Fixed | #129 |
+| M-33 | Fixed | #129 |
+| M-34 | Fixed | #129 |
+| M-35 | Fixed | #129 |
+| M-36 | Fixed | #129 |
+| M-37 | Fixed | #129 |
+| M-38 | Fixed | #129 |
+| M-39 | Fixed | #107 |
+| M-40 | Fixed | #123 |
+| M-41 | Fixed | #129 |
+| M-42 | Fixed | #129 |
+| M-43 | Fixed | #129 |
+| M-44 | Fixed | #89 |
+| M-45 | Fixed | #89 |
+| M-46 | Fixed | #89 |
+| M-47 | Fixed | #110 |
+| M-48 | Fixed | #104 |
+| M-49 | Fixed | #104 |
+| M-50 | Fixed | #104 |
+| M-51 | Fixed | #101, #105, #125 |
+| M-52 | Fixed | #110 |
+| M-53 | Fixed | #115, #133 (Discard guard regression) |
+| M-54 | Fixed | #115 |
+| M-55 | Fixed | #132 |
+| M-56 | Fixed | #106 |
+| M-57 | Fixed | #106 |
+| M-58 | Fixed | #110 |
+| M-59 | Fixed | #90, #100 |
+| M-60 | Fixed | #90, #100 |
+| M-61 | Fixed | #92, #100 |
+| M-62 | Fixed | #120 |
+| M-63 | Fixed | #92, #100 |
+| M-64 | Fixed | #92, #100 |
+| M-65 | Fixed | #86, #100 |
+| M-66 | Fixed | #93, #100 |
+| M-67 | Fixed | #92, #100 |
+| M-68 | Fixed | #120 |
+| M-69 | Fixed | #110 |
+| M-70 | Fixed | #86, #100 |
+| M-71 | Fixed | #130 |
+| L-1 | Fixed | #113 |
+| L-2 | Fixed | #113 |
+| L-3 | Fixed | #113 |
+| L-4 | Fixed | #113 |
+| L-5 | Fixed | #97 |
+| L-6 | Fixed | #113 |
+| L-7 | Fixed | #97 |
+| L-8 | Fixed | #113 |
+| L-9 | Fixed | #113 |
+| L-10 | Fixed | #113 |
+| L-11 | Fixed | #113 |
+| L-12 | Fixed | #113 |
+| L-13 | Fixed | #91 |
+| L-14 | Fixed | #97 |
+| L-15 | Fixed | #109 |
+| L-16 | Fixed | #118, #133 |
+| L-17 | Fixed | #118 |
+| L-18 | Fixed | #118, #139 |
+| L-19 | Fixed | #123 |
+| L-20 | Fixed | #123 |
+| L-21 | Fixed | #123 |
+| L-22 | Fixed | #123 |
+| L-23 | Fixed | #123 |
+| L-24 | Fixed | #107 |
+| L-25 | Fixed | #107 |
+| L-26 | Fixed | #129 |
+| L-27 | Fixed | #129 |
+| L-28 | Fixed | #123, #128 |
+| L-29 | Fixed | #133 |
+| L-30 | Fixed | #129 |
+| L-31 | Fixed | #107 |
+| L-32 | Fixed | #107 |
+| L-33 | Fixed | #111 |
+| L-34 | Fixed | #112 |
+| L-35 | Fixed | #89 |
+| L-36 | Fixed | #89 |
+| L-37 | Fixed | #89 |
+| L-38 | Fixed | #89 |
+| L-39 | Fixed | #89 |
+| L-40 | Fixed | #89 |
+| L-41 | Fixed | #89 |
+| L-42 | Fixed | #89 |
+| L-43 | Fixed | #105 |
+| L-44 | Fixed | #105, #133 |
+| L-45 | Fixed | #101 / #125 |
+| L-46 | Fixed | #104 |
+| L-47 | Fixed | #106 |
+| L-48 | Fixed | #106 |
+| L-49 | Fixed | #132 |
+| L-50 | Fixed | #110, #139 |
+| L-51 | Fixed | #110 |
+| L-52 | Fixed | #110 |
+| L-53 | Fixed | #119 |
+| L-54 | Fixed | #100 |
+| L-55 | Fixed | #100 |
+| L-56 | Fixed | #100 |
+| L-57 | Fixed | #100 |
+| L-58 | Fixed | #100 |
+| L-59 | Fixed | #130 |
+| L-60 | Fixed | #100 |
+| L-61 | Fixed | #100 |
+| UI-1 | Fixed | #87 |
+| UI-2 | Fixed | #87 |
+| UI-3 | Fixed | #120 |
+| UI-4 | Fixed | #87 |
+| UI-5 | Fixed | #87 |
+| UI-6 | Fixed | #120 |
+| UI-7 | Fixed | #120 |
+| UI-8 | Fixed | #120 |
+| UI-9 | Fixed | #120 |
+| UI-10 | Fixed | #120 |
+| UI-11 | Fixed | #120 |
+| UI-12 | Open | needs a niri session |
+| UI-13 | Open | needs a niri session |
+| UI-14 | Fixed | #120 |
+| UI-15 | Fixed | #120 |
+| UI-16 | Fixed | #120 |
+| UI-17 | Open | needs a niri session |
+| UI-18 | Fixed | #120 |
+| G-1 | Fixed | #83 |
+| G-2 | Fixed | #131 |
+| G-3 | Fixed | #131 |
+| G-4 | Fixed | #131 |
+| G-5 | Fixed | #131, #139 |
+| G-6 | Fixed | #83 |
+| G-7 | Fixed | #131 |
+| G-8 | Fixed | #131, #139 |
+| G-9 | Fixed | #131 |
+| G-10 | Fixed | #131, #139 |
+| G-11 | Fixed | #131 |
+| G-12 | Fixed | #131 |
+| G-13 | Fixed | #131 |
+| G-14 | Fixed | #131 |
+| G-15 | Fixed | #131 |
+| G-16 | Fixed | #131 |
+| G-17 | Fixed | #131 |
+| G-18 | Fixed | #131 |
+| G-19 | Fixed | #131 |

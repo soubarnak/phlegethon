@@ -213,6 +213,7 @@ fn entry(media_id: &str, job_id: &str, outcome: ArchiveOutcome) -> ArchiveEntry 
         destination: std::path::PathBuf::from("/tmp/x"),
         job_id: job_id.to_string(),
         outcome,
+        size_bytes: None,
     }
 }
 

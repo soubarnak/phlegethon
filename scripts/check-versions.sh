@@ -2,17 +2,19 @@
 # Check that every place that carries the application version agrees (G-5).
 #
 #   scripts/check-versions.sh              all locations must agree with each other
-#   scripts/check-versions.sh <version>    all locations must equal <version> (a tag's v prefix is stripped)
+#   scripts/check-versions.sh <version>    all locations must equal <version>; a release tag
+#                                          phlegethon-v<version> (or v<version>) is stripped to it
 #
 # Locations: Cargo.toml [workspace.package], the shell crate, tauri.conf.json, the
 # frontend package.json and package-lock.json (two entries), the Chrome extension
-# manifest.json, the xbps template, the AppStream metainfo and the release URL in
-# README.md. The yt-dlp plugin sidecar has its own version (see
+# manifest.json, the xbps template and the AppStream metainfo. The README names no version
+# (it installs from releases/latest). The yt-dlp plugin sidecar has its own version (see
 # packages/extractor-plugins/plugins-manifest.json).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 want=${1:-}
+want=${want#phlegethon-}
 want=${want#v}
 
 json() { # file, python expression over the parsed document `d`
@@ -46,8 +48,6 @@ add "packages/tauri-shell/frontend/package-lock.json (packages[''])" "$(json pac
 add "packages/chrome-companion/manifest.json" "$(json packages/chrome-companion/manifest.json "d['version']")"
 add "packaging/void/srcpkgs/phlegethon/template" "$(sed -n 's/^version=//p' packaging/void/srcpkgs/phlegethon/template)"
 add "packaging/linux/com.phlegethon.app.metainfo.xml (newest release)" "$(sed -n 's/^[[:space:]]*<release version="\([^"]*\)".*/\1/p' packaging/linux/com.phlegethon.app.metainfo.xml | head -1)"
-readme=$(sed -n 's#.*/releases/download/v\([0-9][0-9.]*\)/phlegethon-.*#\1#p' README.md | sort -u | paste -sd,)
-add "README.md (release URL)" "$readme"
 
 [ -n "$want" ] || want=${values[0]}
 bad=0

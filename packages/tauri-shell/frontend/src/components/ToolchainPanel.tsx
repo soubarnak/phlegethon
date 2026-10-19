@@ -57,7 +57,9 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [applying, setApplying] = useState(false);
   const [update, setUpdate] = useState<SidecarUpdateCheckResult | null>(null);
+  const updateAvailable = update != null && (update.toolchain.update_available || update.plugin.update_available);
   const [settings, setSettings] = useState<SidecarUpdateSettings>({
     check_on_launch: true,
     channel: "stable",
@@ -154,6 +156,35 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
       toasts.error(t("toolchain.checkFailed"), err);
     } finally {
       setChecking(false);
+    }
+  };
+
+  /** Apply the updates the last check reported. Only the Core decides whether it can run now. */
+  const applyUpdates = async () => {
+    setApplying(true);
+    try {
+      const result = await api.applySidecarUpdates();
+      switch (result.outcome) {
+        case "applied":
+          toasts.success(t("toolchain.updatesApplied"));
+          break;
+        case "nothing_to_apply":
+          toasts.info(t("toolchain.upToDate"));
+          break;
+        case "blocked_mid_transfer":
+          toasts.warning(t("toolchain.blocked"));
+          break;
+        default:
+          toasts.info(t("toolchain.deferred"));
+      }
+      if (result.outcome === "applied") {
+        await load(true);
+        await check();
+      }
+    } catch (err) {
+      toasts.error(t("toolchain.applyFailed"), err);
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -269,7 +300,7 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
         <Button kind="primary" size="md" disabled={installing} onClick={() => void install()}>
           {installing ? <InlineLoading description={t("toolchain.installing")} /> : t("toolchain.install")}
         </Button>
-        <Button kind="tertiary" size="md" disabled={checking} onClick={() => void check()}>
+        <Button kind="tertiary" size="md" disabled={checking || applying} onClick={() => void check()}>
           {checking ? <InlineLoading description={t("toolchain.checking")} /> : t("toolchain.check")}
         </Button>
         <Button kind="ghost" size="md" disabled={loading} onClick={() => void load(true)}>
@@ -289,6 +320,11 @@ export function ToolchainPanel({ onStatus }: ToolchainPanelProps) {
               {c.pinned_version ? ` · ${t("toolchain.pinnedTo", { version: c.pinned_version })}` : ""}
             </p>
           ))}
+          {updateAvailable && (
+            <Button kind="primary" size="md" disabled={applying || checking} onClick={() => void applyUpdates()}>
+              {applying ? <InlineLoading description={t("toolchain.applying")} /> : t("toolchain.applyUpdates")}
+            </Button>
+          )}
         </div>
       )}
 

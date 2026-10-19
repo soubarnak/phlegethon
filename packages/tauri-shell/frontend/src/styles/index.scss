@@ -684,7 +684,47 @@ body {
   max-width: 100%;
 }
 
-// Compact history: the timestamp joins the status on a second line (UI-1).
+// Search, filter, sort and Clear wrap onto as many rows as the column needs (UI-5).
+.ph-history__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: $spacing-03;
+  margin-bottom: $spacing-03;
+
+  .cds--search {
+    flex: 1 1 16rem;
+    min-width: 0;
+  }
+}
+
+.ph-history__toolbar-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-03;
+
+  .cds--dropdown__wrapper {
+    min-width: 10rem;
+  }
+}
+
+.ph-history__clear {
+  display: flex;
+  align-items: center;
+  gap: $spacing-03;
+  margin-left: auto;
+}
+
+.ph-history__hint {
+  @include type-style("helper-text-01");
+  color: var(--cds-text-secondary);
+}
+
+.ph-history__col--size {
+  white-space: nowrap;
+}
+
+// Compact history: the timestamp and size join the status on a second line (UI-1).
 @include below($ph-bp-md) {
   .ph-scroll .cds--data-table,
   .ph-scroll .cds--data-table thead,
@@ -699,13 +739,34 @@ body {
 
   .ph-scroll .cds--data-table tbody tr {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas:
-      "title actions"
-      "status when";
+      "title title actions"
+      "status size when";
     align-items: center;
     height: auto;
     padding-bottom: $spacing-03;
+  }
+
+  .ph-history__toolbar-controls {
+    flex: 1 1 100%;
+    min-width: 0;
+
+    .cds--dropdown__wrapper {
+      flex: 1 1 0;
+      min-width: 0;
+    }
+  }
+
+  .ph-history__clear {
+    flex: 1 1 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .ph-history__pagination {
+    flex-wrap: wrap;
+    height: auto;
   }
 
   .ph-scroll .cds--data-table tbody td {
@@ -731,8 +792,24 @@ body {
     white-space: nowrap;
   }
 
+  .ph-history__col--size {
+    grid-area: size;
+    justify-self: end;
+  }
+
   .ph-history__col--actions {
     grid-area: actions;
+  }
+}
+
+// Carbon hides the page-size and page selects in a container under 42rem, which would leave
+// no way to pick 25, 50 or 100 per page in a narrow column. Keep them shown (UI-5).
+.ph-history__pagination {
+  .cds--pagination__left > .cds--pagination__text,
+  .cds--pagination__right > .cds--pagination__text,
+  .cds--select__item-count,
+  .cds--select__page-number {
+    display: flex;
   }
 }
 
@@ -768,4 +845,19 @@ body {
 
 .ph-break {
   word-break: break-all;
+}
+
+.ph-mirrors {
+  display: grid;
+  gap: $spacing-03;
+  margin: 0;
+  padding-left: $spacing-05;
+
+  li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: $spacing-02;
+    min-width: 0;
+  }
 }

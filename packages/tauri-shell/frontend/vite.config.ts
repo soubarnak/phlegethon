@@ -33,7 +33,7 @@ export default defineConfig({
       scss: {
         loadPaths: [path.resolve(frontendRoot, "node_modules")],
         quietDeps: true,
-        silenceDeprecations: ["mixed-decls", "global-builtin", "import", "color-functions"],
+        silenceDeprecations: ["global-builtin", "import", "color-functions"],
       },
     },
   },
@@ -44,6 +44,19 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari15",
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    // Vite 8 (Rolldown) replaces output.manualChunks with codeSplitting groups.
+    // Vendor code stays in static imports, so nothing is lazy-loaded.
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            { name: "react", test: /node_modules\/(react|react-dom|scheduler)\//, priority: 30 },
+            { name: "carbon-icons", test: /node_modules\/@carbon\/icons/, priority: 20 },
+            { name: "carbon", test: /node_modules\/(@carbon|carbon-)/, priority: 10 },
+          ],
+        },
+      },
+    },
   },
   test: {
     environment: "jsdom",

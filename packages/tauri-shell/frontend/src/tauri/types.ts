@@ -130,6 +130,8 @@ export interface ArchiveEntry {
   destination: string;
   job_id: string;
   outcome: ArchiveOutcome;
+  /** Bytes of the finished file; null for Failed entries and for entries recorded before sizes were kept. */
+  size_bytes: number | null;
 }
 
 export interface ToolInfo {
@@ -184,11 +186,4 @@ export type PickerMethod = "portal" | "zenity" | "kdialog" | "manual";
 export interface PickFolderResult {
   path: string | null;
   method: PickerMethod;
-}
-
-export interface PlatformCapabilities {
-  folder_picker: PickerMethod;
-  portal: boolean;
-  wayland: boolean;
-  notify_send: boolean;
 }

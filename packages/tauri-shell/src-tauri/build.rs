@@ -1,3 +1,85 @@
+//! Build script. Lists every app command in the app manifest, so Tauri only
+//! allows the commands that `capabilities/default.json` grants.
+
+/// Application commands registered in `src/lib.rs` (`generate_handler!`).
+/// Each name gets an `allow-<name with dashes>` permission that a capability must
+/// grant. Keep this list in step with `generate_handler!`; the `command_gate_tests`
+/// module in `src/lib.rs` fails when they differ.
+const COMMANDS: &[&str] = &[
+    "enqueue_url",
+    "probe_url",
+    "cancel_probe",
+    "clear_pending_probe",
+    "enrich_probe_item_qualities",
+    "get_probe_tier_settings",
+    "set_probe_tier_settings",
+    "get_toolchain_status",
+    "install_toolchain_latest",
+    "get_default_quality_policy",
+    "set_default_quality_policy",
+    "get_global_bandwidth_cap",
+    "set_global_bandwidth_cap",
+    "set_job_bandwidth_cap",
+    "get_job_bandwidth_cap",
+    "add_job_mirror",
+    "job_mirrors",
+    "set_job_expected_hash",
+    "preview_filename_template",
+    "clear_history",
+    "confirm_probe_selection",
+    "preview_probe_destination",
+    "get_library_root",
+    "set_library_root",
+    "pick_folder",
+    "get_platform_capabilities",
+    "notify_fallback",
+    "process_pending",
+    "list_jobs",
+    "normalize_url_cmd",
+    "split_urls_cmd",
+    "find_active_job_for_url",
+    "pause_job",
+    "resume_job",
+    "retry_job",
+    "discard_job",
+    "get_active_job_limit",
+    "set_active_job_limit",
+    "get_audio_only_mode",
+    "set_audio_only_mode",
+    "get_default_media_extras",
+    "set_default_media_extras",
+    "get_media_extras_capabilities",
+    "get_cookie_channel",
+    "set_cookie_channel",
+    "get_proxy_settings",
+    "set_proxy_settings",
+    "get_sidecar_update_settings",
+    "set_sidecar_update_settings",
+    "check_sidecar_updates",
+    "apply_sidecar_updates",
+    "pin_sidecar_version",
+    "unpin_sidecar_version",
+    "rollback_sidecar",
+    "get_filename_template",
+    "set_filename_template",
+    "select_default_quality",
+    "reorder_job",
+    "reveal_output",
+    "open_output",
+    "is_main_window_focused",
+    "focus_main_window",
+    "take_pending_intents",
+    "take_library_root_warnings",
+    "list_history",
+    "list_history_by_outcome",
+    "remove_history_entry",
+    "history_len",
+];
+
 fn main() {
-    tauri_build::build()
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
+    )
+    .expect("tauri build script failed");
 }

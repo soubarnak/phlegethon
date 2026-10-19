@@ -8,17 +8,19 @@
 #   ${CONTAINER_ENGINE:-podman} run --rm --privileged -v "$PWD:/src" "$VOID_IMAGE_GLIBC" \
 #       /src/packaging/void/build-in-container.sh
 #
-# The container needs --privileged for the uchroot build chroot.
+# The container needs --privileged for the chroot style (uchroot) and the /dev/shm mounts.
 #
 # Expects /src/dist/phlegethon-<version>.tar.gz (scripts/make-dist-tarball.sh).
-# Writes the package(s) to /src/out/<libc>/. Mirrors void-packages' own CI: a non-root
-# builder user, the uchroot chroot style, then binary-bootstrap and pkg.
+# Writes the package(s) to /src/out/<libc>/. Follows void-packages' own CI: binary-bootstrap,
+# then pkg. The chroot style depends on the engine (see XBPS_CHROOT_CMD below).
 #
 # Environment:
 #   SRC=/src                     repository checkout
 #   OUT=$SRC/out                 where packages are copied
 #   VOID_PACKAGES_REF=<commit>   void-packages commit to build against (default: the pin in
 #                                packaging/void/images.env; a branch name also works)
+#   XBPS_CHROOT_CMD=uchroot|ethereal  chroot style (default: ethereal in a rootless container,
+#                                uchroot otherwise)
 #   EXTRA_CA_BUNDLE=<file>       extra CA certificates to trust (TLS-inspecting proxies)
 set -eu
 
@@ -34,6 +36,25 @@ WORK=/build
 
 libc=glibc
 [ -e /lib/ld-musl-x86_64.so.1 ] || [ -n "$(ls /lib/ld-musl-*.so.1 2>/dev/null)" ] && libc=musl
+
+# Chroot style. uchroot (xbps-uchroot) bind-mounts /dev read-only inside the chroot. In a
+# rootless container that makes /dev/null read-only too, and xbps-src then stops at its first
+# redirect to /dev/null with "/dev/null: Read-only file system". A rootless engine therefore uses
+# ethereal: the container root is the build root (the masterdir is a symlink to /), so no
+# mounts are made and the container is the chroot. Rootful Docker keeps uchroot.
+if [ -z "${XBPS_CHROOT_CMD:-}" ]; then
+	# uid_map: "<inside> <outside> <count>". Root outside (0) means rootful Docker.
+	read -r _ outer _ </proc/self/uid_map
+	if [ "$outer" = 0 ]; then XBPS_CHROOT_CMD=uchroot; else XBPS_CHROOT_CMD=ethereal; fi
+fi
+case $XBPS_CHROOT_CMD in
+uchroot | ethereal) ;;
+*)
+	echo "XBPS_CHROOT_CMD must be uchroot or ethereal, not $XBPS_CHROOT_CMD" >&2
+	exit 1
+	;;
+esac
+echo ">> chroot style: $XBPS_CHROOT_CMD"
 
 trust_extra_ca() { # $1 = root directory
 	[ -n "${EXTRA_CA_BUNDLE:-}" ] && [ -f "$EXTRA_CA_BUNDLE" ] || return 0
@@ -96,19 +117,36 @@ sed -i "s/^checksum=.*/checksum=$sum/" srcpkgs/phlegethon/template
 mkdir -p "hostdir/sources/phlegethon-$version"
 cp "$tarball" "hostdir/sources/phlegethon-$version/"
 
-grep -q '^XBPS_CHROOT_CMD=' etc/conf 2>/dev/null || {
-	echo XBPS_CHROOT_CMD=uchroot >>etc/conf
-	echo XBPS_ALLOW_RESTRICTED=yes >>etc/conf
+touch etc/conf
+sed -i -e '/^XBPS_CHROOT_CMD=/d' -e '/^XBPS_ALLOW_CHROOT_BREAKOUT=/d' etc/conf
+echo "XBPS_CHROOT_CMD=$XBPS_CHROOT_CMD" >>etc/conf
+if [ "$XBPS_CHROOT_CMD" = ethereal ]; then
+	# The container is disposable and is the build root, so xbps-src may run as root.
+	echo XBPS_ALLOW_CHROOT_BREAKOUT=yes >>etc/conf
+	ln -sfn / masterdir
+	xbps-uhelper arch >/.xbps_chroot_init
+fi
+grep -q '^XBPS_ALLOW_RESTRICTED=' etc/conf || echo XBPS_ALLOW_RESTRICTED=yes >>etc/conf
+if [ "$XBPS_CHROOT_CMD" = uchroot ]; then
+	chown -R builder:builder "$WORK"
+fi
+
+# xbps-src runs as the builder user under uchroot, and as root under ethereal.
+xbs() {
+	if [ "$XBPS_CHROOT_CMD" = ethereal ]; then
+		./xbps-src "$@"
+	else
+		sudo -Eu builder ./xbps-src "$@"
+	fi
 }
-chown -R builder:builder "$WORK"
 
 echo ">> binary-bootstrap"
-sudo -Eu builder ./xbps-src binary-bootstrap
+xbs binary-bootstrap
 trust_extra_ca "$WORK/void-packages/masterdir-$(xbps-uhelper arch)"
 for d in masterdir*; do trust_extra_ca "$WORK/void-packages/$d"; done
 
 echo ">> building phlegethon-$version"
-sudo -Eu builder ./xbps-src -j"$(nproc)" pkg phlegethon
+xbs -j"$(nproc)" pkg phlegethon
 
 mkdir -p "$OUT/$libc"
 cp hostdir/binpkgs/phlegethon-*.xbps "$OUT/$libc/"

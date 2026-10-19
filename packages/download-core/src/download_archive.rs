@@ -34,6 +34,9 @@ pub struct ArchiveEntry {
     pub job_id: String,
     #[serde(default = "default_outcome")]
     pub outcome: ArchiveOutcome,
+    /// Bytes of the finished file. None for Failed entries and for entries written before sizes were kept.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 /// v1 compatibility: entries without `outcome` default to Completed.
@@ -230,7 +233,7 @@ impl DownloadArchive {
     /// Return all archive entries sorted by completion time (most recent first).
     pub fn list(&self) -> Vec<&ArchiveEntry> {
         let mut entries: Vec<&ArchiveEntry> = self.entries.values().collect();
-        entries.sort_by(|a, b| b.completed_at_unix_secs.cmp(&a.completed_at_unix_secs));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.completed_at_unix_secs));
         entries
     }
 
@@ -241,7 +244,7 @@ impl DownloadArchive {
             .values()
             .filter(|e| e.outcome == outcome)
             .collect();
-        entries.sort_by(|a, b| b.completed_at_unix_secs.cmp(&a.completed_at_unix_secs));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.completed_at_unix_secs));
         entries
     }
 
@@ -300,12 +303,17 @@ mod tests {
             destination: root.join("jobs").join("job-1"),
             job_id: "job-1".to_string(),
             outcome: ArchiveOutcome::Completed,
+            size_bytes: Some(4096),
         });
         archive.save(&root).unwrap();
 
         let loaded = DownloadArchive::load(&root).unwrap();
         assert!(loaded.contains("yt-abc123"));
         assert_eq!(loaded.entries.get("yt-abc123").unwrap().title, "Example");
+        assert_eq!(
+            loaded.entries.get("yt-abc123").unwrap().size_bytes,
+            Some(4096)
+        );
     }
 
     #[test]
@@ -319,6 +327,7 @@ mod tests {
             destination: PathBuf::from("/tmp/old"),
             job_id: "job-old".to_string(),
             outcome: ArchiveOutcome::Completed,
+            size_bytes: None,
         });
         archive.record(ArchiveEntry {
             media_id: "new".to_string(),
@@ -328,6 +337,7 @@ mod tests {
             destination: PathBuf::from("/tmp/new"),
             job_id: "job-new".to_string(),
             outcome: ArchiveOutcome::Completed,
+            size_bytes: None,
         });
 
         let list = archive.list();
@@ -347,6 +357,7 @@ mod tests {
             destination: PathBuf::from("/tmp/c1"),
             job_id: "jc1".to_string(),
             outcome: ArchiveOutcome::Completed,
+            size_bytes: None,
         });
         archive.record(ArchiveEntry {
             media_id: "failed-1".to_string(),
@@ -356,6 +367,7 @@ mod tests {
             destination: PathBuf::from("/tmp/f1"),
             job_id: "jf1".to_string(),
             outcome: ArchiveOutcome::Failed,
+            size_bytes: None,
         });
 
         let completed = archive.list_by_outcome(ArchiveOutcome::Completed);
@@ -378,6 +390,7 @@ mod tests {
             destination: PathBuf::from("/tmp/test"),
             job_id: "job-test".to_string(),
             outcome: ArchiveOutcome::Completed,
+            size_bytes: None,
         });
 
         let removed = archive.remove("yt-abc");
@@ -420,5 +433,7 @@ mod tests {
         // v1 entries should get default outcome (Completed via serde default)
         let entry = loaded.entries.get("yt-abc").unwrap();
         assert_eq!(entry.outcome, ArchiveOutcome::Completed);
+        // Entries written before sizes were kept have no size; History sorts them last.
+        assert_eq!(entry.size_bytes, None);
     }
 }
