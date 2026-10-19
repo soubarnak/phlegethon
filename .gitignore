@@ -8,3 +8,8 @@ dist/
 .void-packages/
 out/
 graphify-out/
+
+# Local AI tool state
+.agents/
+.aider*
+.commandcode/
