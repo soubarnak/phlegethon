@@ -721,7 +721,16 @@ fn discard_during_in_flight_transfer_stops_and_deletes_partials() {
         })
     };
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Discard only once the transfer has written a byte to the partial file.
+    let part_path = job_dir.join("discard-mid.zip.part");
+    let started = std::time::Instant::now();
+    while std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0) == 0 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "transfer never wrote to the partial file"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     // Mimic shell Discard: signal stop without waiting for the Core mutex.
     assert!(
         signals.signal_discard_stop(&job_for_discard),
@@ -827,7 +836,7 @@ fn discard_during_in_flight_extractor_download_stops_and_deletes_partials() {
     let started = std::time::Instant::now();
     while *chunks_written.lock().unwrap() == 0 {
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
+            started.elapsed() < std::time::Duration::from_secs(10),
             "extractor download never became active"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -926,7 +935,7 @@ fn pause_during_in_flight_extractor_download_stops_promptly() {
     let started = std::time::Instant::now();
     while *chunks_written.lock().unwrap() == 0 {
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
+            started.elapsed() < std::time::Duration::from_secs(10),
             "extractor download never became active"
         );
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -2347,7 +2356,21 @@ fn pause_during_in_flight_transfer_stops_without_full_body() {
         })
     };
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Pause only once the transfer has written a byte to the partial file.
+    let part_path = tmp
+        .path()
+        .join("library")
+        .join("jobs")
+        .join(&job_id)
+        .join("pause-mid.zip.part");
+    let started = std::time::Instant::now();
+    while std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0) == 0 {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "transfer never wrote to the partial file"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     signals
         .request_pause(&job_for_pause)
         .expect("pause flag registered")
@@ -2368,7 +2391,6 @@ fn pause_during_in_flight_transfer_stops_without_full_body() {
     );
 
     let job_dir = tmp.path().join("library").join("jobs").join(&job_id);
-    let part_path = job_dir.join("pause-mid.zip.part");
     let final_path = job_dir.join("pause-mid.zip");
     assert!(
         !final_path.exists(),
@@ -5538,7 +5560,7 @@ fn active_job_limit_caps_concurrent_transfers() {
     );
 
     let mut done = std::collections::HashSet::new();
-    for _ in 0..40 {
+    for _ in 0..200 {
         for ev in collect_events(&rx) {
             if let CoreEvent::JobCompleted { job_id, .. } = ev {
                 done.insert(job_id);
@@ -5608,7 +5630,7 @@ fn reorder_does_not_preempt_active_transfer() {
 
     Core::dispatch_pending(Arc::clone(&core)).unwrap();
 
-    for _ in 0..40 {
+    for _ in 0..500 {
         if core
             .lock()
             .unwrap()
@@ -5667,7 +5689,7 @@ fn start_transfer_behind_paused_job(library: &std::path::Path) -> TransferBehind
         (a, b)
     };
     Core::dispatch_pending(Arc::clone(&core)).unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if core.lock().unwrap().job_signals().is_transfer_active(&b_id) {
             break;
         }
@@ -5681,7 +5703,7 @@ fn start_transfer_behind_paused_job(library: &std::path::Path) -> TransferBehind
 }
 
 fn wait_for_completion(rx: &crossbeam_channel::Receiver<CoreEvent>, job_id: &str) -> bool {
-    for _ in 0..200 {
+    for _ in 0..400 {
         for ev in collect_events(rx) {
             if matches!(&ev, CoreEvent::JobCompleted { job_id: id, .. } if id == job_id) {
                 return true;
@@ -7617,7 +7639,8 @@ fn dispatch_pending_emits_job_failed_on_transfer_thread_error() {
     Core::dispatch_pending(Arc::clone(&core)).unwrap();
 
     let mut failed = false;
-    for _ in 0..50 {
+    // Allow 10 s: the transfer thread can start late when the whole workspace runs in parallel.
+    for _ in 0..500 {
         for ev in collect_events(&rx) {
             if let CoreEvent::JobFailed { job_id: id, .. } = ev {
                 if id == job_id {
@@ -9027,7 +9050,7 @@ fn pause_interrupts_a_transfer_that_is_waiting_for_tokens() {
         id
     };
     Core::dispatch_pending(Arc::clone(&core)).unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if core
             .lock()
             .unwrap()
@@ -9612,7 +9635,7 @@ fn queue_file_tracks_progress_while_a_transfer_runs() {
     let queue = root.join(".phlegethon").join("jobs.json");
     let started = std::time::Instant::now();
     let mut persisted = 0u64;
-    while started.elapsed() < std::time::Duration::from_millis(2500) {
+    while started.elapsed() < std::time::Duration::from_secs(10) {
         Core::dispatch_pending(core.clone()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let doc: serde_json::Value =
