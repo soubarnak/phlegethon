@@ -7,12 +7,12 @@ It downloads from almost any link:
 | Link is... | What happens |
 | --- | --- |
 | A file (video, audio, archive) | Plain HTTP with resume and segmented transfer |
-| A site yt-dlp knows (YouTube, xHamster, ...) | yt-dlp's own extractor, with a quality list |
+| A site yt-dlp knows (YouTube, Vimeo, ...) | yt-dlp's own extractor, with a quality list |
 | A site yt-dlp only handles generically | Generic extraction, shown with a warning |
 | A page that embeds a video | The page is scanned for the media URL |
 | Nothing works | A clear error and a "Try plain download" button |
 
-luxuretv.com and xxxbp.tv have their own extractor plugins in this repo.
+Sites that yt-dlp cannot handle on its own can have an extractor plugin in this repo.
 
 ## Install on Void Linux
 
@@ -85,7 +85,7 @@ YouTube needs a JavaScript runtime. The app uses deno (2.3 or newer), node (22 o
 | History tab | Re-download or remove finished and failed items |
 | Settings | Library folder, job limit, default quality, filename template, cookies, proxy, bandwidth cap, extraction tiers, Toolchain |
 
-luxuretv sits behind a Cloudflare check. It works when yt-dlp has browser impersonation (**Settings, Toolchain** shows *Browser impersonation: Found*, which needs `curl_cffi`), or when you set **Settings, Cookies** to your browser. The cookie is tied to your browser and network, so use the same machine. Reference URLs and their latest results are in [docs/reference-urls.md](docs/reference-urls.md).
+A site behind a Cloudflare check works when yt-dlp has browser impersonation (**Settings, Toolchain** shows *Browser impersonation: Found*, which needs `curl_cffi`), or when you set **Settings, Cookies** to your browser. The cookie is tied to your browser and network, so use the same machine.
 
 ## Browser companion (optional)
 
@@ -117,7 +117,7 @@ A plain `cargo build --release` of the shell needs `--features phlegethon-tauri/
 | `packages/download-core` | Rust Download Core: queue, probe, tiers, HTTP and yt-dlp transfers |
 | `packages/tauri-shell` | Tauri 2 shell (`src-tauri`) and the React + IBM Carbon UI (`frontend`) |
 | `packages/shell-support` | Folder picker, notification and native-messaging helpers (no Tauri dependency) |
-| `packages/extractor-plugins` | yt-dlp plugins for luxuretv and xxxbp.tv |
+| `packages/extractor-plugins` | yt-dlp site plugins |
 | `packages/native-messaging-host`, `companion-protocol`, `chrome-companion` | Browser companion |
 | `packages/shell-strings` | User-facing strings |
 | `packaging/` | `.desktop`, icons, AppStream, the xbps template |
