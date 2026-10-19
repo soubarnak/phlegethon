@@ -939,12 +939,12 @@ Status of each finding after the fix workstreams (GitHub issues #68 to #80). The
 | M-21 | Fixed | #109 |
 | M-22 | Fixed | #127 |
 | M-23 | Fixed | #127 |
-| M-24 | Fixed | #WAVE4 (secrets.json, ADR 0007) |
+| M-24 | Fixed | #139 (secrets.json, ADR 0007) |
 | M-25 | Fixed | #123 / #126 |
 | M-26 | Fixed | #123, #126, #133 |
 | M-27 | Fixed | #118 |
 | M-28 | Fixed | #123 / #126 |
-| M-29 | Partial | #114, #126, #WAVE4 (percentage is monotone; the total is not known up front) |
+| M-29 | Partial | #114, #126, #139 (percentage is monotone; the total is not known up front) |
 | M-30 | Fixed | #118 |
 | M-31 | Fixed | #129 |
 | M-32 | Fixed | #129 |
@@ -1004,7 +1004,7 @@ Status of each finding after the fix workstreams (GitHub issues #68 to #80). The
 | L-15 | Fixed | #109 |
 | L-16 | Fixed | #118, #133 |
 | L-17 | Fixed | #118 |
-| L-18 | Fixed | #118, #WAVE4 |
+| L-18 | Fixed | #118, #139 |
 | L-19 | Fixed | #123 |
 | L-20 | Fixed | #123 |
 | L-21 | Fixed | #123 |
@@ -1036,7 +1036,7 @@ Status of each finding after the fix workstreams (GitHub issues #68 to #80). The
 | L-47 | Fixed | #106 |
 | L-48 | Fixed | #106 |
 | L-49 | Fixed | #132 |
-| L-50 | Fixed | #110, #WAVE4 |
+| L-50 | Fixed | #110, #139 |
 | L-51 | Fixed | #110 |
 | L-52 | Fixed | #110 |
 | L-53 | Fixed | #119 |
@@ -1070,12 +1070,12 @@ Status of each finding after the fix workstreams (GitHub issues #68 to #80). The
 | G-2 | Fixed | #131 |
 | G-3 | Fixed | #131 |
 | G-4 | Fixed | #131 |
-| G-5 | Fixed | #131, #WAVE4 |
+| G-5 | Fixed | #131, #139 |
 | G-6 | Fixed | #83 |
 | G-7 | Fixed | #131 |
-| G-8 | Fixed | #131, #WAVE4 |
+| G-8 | Fixed | #131, #139 |
 | G-9 | Fixed | #131 |
-| G-10 | Fixed | #131, #WAVE4 |
+| G-10 | Fixed | #131, #139 |
 | G-11 | Fixed | #131 |
 | G-12 | Fixed | #131 |
 | G-13 | Fixed | #131 |
