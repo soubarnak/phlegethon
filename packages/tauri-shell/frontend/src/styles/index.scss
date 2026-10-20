@@ -121,6 +121,44 @@ body {
 }
 
 // ---------------------------------------------------------------------------
+// Footer credit (a sibling of the main area, so it never scrolls with the queue)
+// ---------------------------------------------------------------------------
+
+.ph-credit {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: $spacing-03;
+  min-width: 0;
+  padding: $spacing-03 $spacing-06;
+  border-top: 1px solid var(--cds-border-subtle-01);
+  color: var(--cds-text-secondary);
+  @include type-style("helper-text-01");
+
+  // Narrow windows clip the text; they never widen the page.
+  > span:last-child {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.ph-credit__glyph {
+  flex: none;
+  height: 1.125rem;
+  aspect-ratio: 73 / 96;
+  background-color: currentColor;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+// ---------------------------------------------------------------------------
 // URL bar
 // ---------------------------------------------------------------------------
 
