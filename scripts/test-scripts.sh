@@ -146,6 +146,14 @@ else
 	echo "skip make-dist-tarball (build the frontend first)"
 fi
 
+# --- third-party notices ship with the package -------------------------------------------
+if grep -q 'THIRD_PARTY_NOTICES.md' Makefile && grep -q 'vlicense THIRD_PARTY_NOTICES.md' packaging/void/srcpkgs/phlegethon/template; then
+	pass "THIRD_PARTY_NOTICES.md is installed by make install and the xbps template"
+else fail "THIRD_PARTY_NOTICES.md is not installed by make install or the xbps template"; fi
+if grep -q 'SIL OPEN FONT LICENSE Version 1.1' THIRD_PARTY_NOTICES.md; then
+	pass "THIRD_PARTY_NOTICES.md carries the OFL text"
+else fail "THIRD_PARTY_NOTICES.md is missing the OFL text"; fi
+
 [ "$fails" -eq 0 ] || {
 	echo "$fails script test(s) failed" >&2
 	exit 1

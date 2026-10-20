@@ -35,4 +35,5 @@ do_install() {
 	done
 	vdoc docs/companion-setup.md
 	vlicense LICENSE
+	vlicense THIRD_PARTY_NOTICES.md
 }
