@@ -40,6 +40,7 @@ import { SettingsPage } from "@/components/SettingsPage";
 import { PromptModal } from "@/components/PromptModal";
 import { ExpectedHashModal, type ExpectedHashRequest } from "@/components/ExpectedHashModal";
 import { MirrorsModal, type MirrorsRequest } from "@/components/MirrorsModal";
+import { Credit } from "@/components/Credit";
 import type { ActiveJobMatch } from "@/tauri/types";
 
 const TAB_QUEUE = 0;
@@ -488,6 +489,7 @@ function Shell() {
           </Tabs>
         </div>
       </Content>
+      <Credit />
 
       <ProbeModal
         url={probeUrl}
