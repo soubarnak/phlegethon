@@ -3,6 +3,7 @@ import path from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import en from "@strings/en.json";
+import { EXPECTED_HASH_ALGORITHMS } from "./expectedHash";
 import { getCurrentLocale, initLocale, t } from "./i18n";
 
 function sources(dir: string): string[] {
@@ -90,6 +91,42 @@ describe("i18n", () => {
     const files = allSources();
     const literal = (key: string) => files.some(({ text }) => text.includes(`"${key}"`) || text.includes(`'${key}'`));
     expect(Object.keys(table).filter((key) => !dynamic(key) && !literal(key))).toEqual([]);
+  });
+
+  /** Members of `export type <name> = | "a" | "b";` in a source file under src/. */
+  const unionMembers = (file: string, name: string): string[] => {
+    const text = readFileSync(path.resolve(__dirname, "..", file), "utf8");
+    const match = new RegExp(`export type ${name} =([^;]*);`).exec(text);
+    expect(match, `${file} no longer declares type ${name}`).not.toBeNull();
+    return [...match![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  };
+
+  it("has a string for every STATUS_KEYS value", () => {
+    const text = readFileSync(path.resolve(__dirname, "../components/DuplicateUrlModal.tsx"), "utf8");
+    const block = /const STATUS_KEYS[^=]*=\s*\{([^}]*)\}/.exec(text);
+    expect(block, "DuplicateUrlModal.tsx no longer declares STATUS_KEYS").not.toBeNull();
+    const values = [...block![1].matchAll(/:\s*"([^"]+)"/g)].map((m) => m[1]);
+    expect(values.length).toBeGreaterThan(0);
+    expect(values.filter((key) => !(key in table))).toEqual([]);
+  });
+
+  it("has no stale members in a dynamic key family", () => {
+    const members: Record<string, string[]> = {
+      "error.hint.": unionMembers("lib/errors.ts", "ErrorCode"),
+      "toolchain.ejs.": unionMembers("tauri/types.ts", "EjsStatus"),
+      "toolchain.source.": unionMembers("tauri/types.ts", "YtDlpSource"),
+      "hash.algorithm.": [...EXPECTED_HASH_ALGORITHMS],
+    };
+    expect(Object.keys(members).sort()).toEqual(DYNAMIC_KEY_FAMILIES.map(({ prefix }) => prefix).sort());
+    const missing: string[] = [];
+    const stale: string[] = [];
+    for (const [prefix, names] of Object.entries(members)) {
+      const keys = Object.keys(table).filter((key) => key.startsWith(prefix));
+      for (const name of names) if (!keys.includes(prefix + name)) missing.push(prefix + name);
+      for (const key of keys) if (!names.includes(key.slice(prefix.length))) stale.push(key);
+    }
+    expect(missing).toEqual([]);
+    expect(stale).toEqual([]);
   });
 
   it("passes the placeholders each string expects", () => {
