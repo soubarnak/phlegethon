@@ -15,7 +15,7 @@ makedepends="libwebkit2gtk41-devel gtk+3-devel libsoup3-devel openssl-devel libr
 depends="yt-dlp ffmpeg nodejs xdg-utils xdg-desktop-portal dbus"
 short_desc="Download manager for videos, playlists and files from almost any site"
 maintainer="soubarnak <soubarnakarmakar@gmail.com>"
-license="MIT"
+license="MIT, OFL-1.1"
 homepage="https://github.com/soubarnak/phlegethon"
 # Tarball from scripts/make-dist-tarball.sh: tracked sources plus the prebuilt
 # packages/tauri-shell/frontend/dist, so no npm is needed inside xbps-src.
@@ -35,4 +35,5 @@ do_install() {
 	done
 	vdoc docs/companion-setup.md
 	vlicense LICENSE
+	vlicense THIRD_PARTY_NOTICES.md
 }

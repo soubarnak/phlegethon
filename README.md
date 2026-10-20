@@ -164,7 +164,7 @@ You may use, copy, modify, fork and redistribute it, including in products you s
 
 ## Credits and third-party software
 
-Phlegethon is built on other people's work. The licenses below come from the project's own manifests (`Cargo.lock`, `package-lock.json`) and the dependency policy in [`deny.toml`](deny.toml).
+Phlegethon is built on other people's work. The licenses below come from each project's own manifest and the dependency policy in [`deny.toml`](deny.toml).
 
 | Component | Use | License |
 | --- | --- | --- |
@@ -174,9 +174,11 @@ Phlegethon is built on other people's work. The licenses below come from the pro
 | [IBM Plex](https://github.com/IBM/plex) Sans and Mono | UI fonts, bundled with the app | SIL Open Font License 1.1 |
 | [Plus Jakarta Sans](https://github.com/tokotype/PlusJakartaSans) by Tokotype | The logo letters are outlines of its ExtraBold weight | SIL Open Font License 1.1 |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | External tool the app runs; not part of this repository | Unlicense |
-| [ffmpeg](https://ffmpeg.org) | External tool the app runs; not part of this repository | Set by its build; see the Void package |
+| [ffmpeg](https://ffmpeg.org) | External tool the app runs; not part of this repository | GPL-3.0-or-later in the Void package |
 | Rust crates | Download Core and shell | MIT, Apache-2.0, BSD, ISC, MPL-2.0, Zlib, Unicode-3.0 and similar permissive licenses |
 
 Every Rust dependency is checked by `cargo deny check` against the allowlist in `deny.toml`, and CI fails on a license outside it.
+
+The full notices, including the IBM Plex license text, are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and installed under `share/licenses/phlegethon/`.
 
 The logo outlines are a derived work of Plus Jakarta Sans, used under the SIL Open Font License 1.1. The font is copyright The Plus Jakarta Sans Project Authors. The logo files are not the font and are not sold by themselves.

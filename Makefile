@@ -53,6 +53,7 @@ install:
 	done
 	install -Dm644 docs/companion-setup.md $(DESTDIR)$(DATADIR)/doc/phlegethon/companion-setup.md
 	install -Dm644 LICENSE $(DESTDIR)$(DATADIR)/licenses/phlegethon/LICENSE
+	install -Dm644 THIRD_PARTY_NOTICES.md $(DESTDIR)$(DATADIR)/licenses/phlegethon/THIRD_PARTY_NOTICES.md
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/phlegethon $(DESTDIR)$(BINDIR)/phlegethon-nmh
@@ -61,7 +62,7 @@ uninstall:
 	for s in $(ICON_SIZES); do rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/$${s}x$${s}/apps/phlegethon.png; done
 	rm -f $(DESTDIR)$(DATADIR)/doc/phlegethon/companion-setup.md
 	-rmdir $(DESTDIR)$(DATADIR)/doc/phlegethon
-	rm -f $(DESTDIR)$(DATADIR)/licenses/phlegethon/LICENSE
+	rm -f $(DESTDIR)$(DATADIR)/licenses/phlegethon/LICENSE $(DESTDIR)$(DATADIR)/licenses/phlegethon/THIRD_PARTY_NOTICES.md
 	-rmdir $(DESTDIR)$(DATADIR)/licenses/phlegethon
 
 test: test-rust test-plugins test-extension test-scripts test-frontend
