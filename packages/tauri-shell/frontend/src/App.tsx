@@ -41,6 +41,7 @@ import { PromptModal } from "@/components/PromptModal";
 import { ExpectedHashModal, type ExpectedHashRequest } from "@/components/ExpectedHashModal";
 import { MirrorsModal, type MirrorsRequest } from "@/components/MirrorsModal";
 import { Credit } from "@/components/Credit";
+import { Logo } from "@/components/Logo";
 import type { ActiveJobMatch } from "@/tauri/types";
 
 const TAB_QUEUE = 0;
@@ -394,7 +395,7 @@ function Shell() {
   const header = (
     <Header aria-label="Phlegethon">
       <HeaderName href="#" prefix="">
-        Phlegethon
+        <Logo className="ph-logo" />
       </HeaderName>
       <HeaderGlobalBar>
         {toolchain && (
