@@ -1,12 +1,11 @@
-# Phlegethon brand (draft)
+# Phlegethon brand
 
-Source plate: *Phlegethontia longissima* anatomical illustration → simplified app mark.
+`phlegethontia-source.png` is the original reference plate (*Phlegethontia longissima* anatomical illustration) kept for provenance.
 
-| File | Use |
-| --- | --- |
-| `phlegethontia-source.png` | Original reference plate |
-| `phlegethon-logo-mark.png` | Primary monochrome mark |
-| `phlegethon-app-icon.png` | Squared icon base |
-| `phlegethon-lockup.png` | Mark + wordmark |
+The shipped logo lives elsewhere:
 
-Raster drafts only — vector SVG still needed before shipping installers.
+- Vector wordmark: `docs/branding/phlegethon-logo-light.svg` and `phlegethon-logo-dark.svg`.
+- In-app header logo: `packages/tauri-shell/frontend/src/components/Logo.tsx`.
+- App icons: `packages/tauri-shell/src-tauri/icons/`.
+
+The earlier raster drafts of the snake mark were removed. They remain in git history (commit `00a30be`).
