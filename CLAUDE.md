@@ -33,7 +33,6 @@ Per ADR 0001, the Tauri shell is the only Platform Shell and Void xbps is the on
 - **`packages/shell-support`**: folder picker (portal/zenity/kdialog), notifications, native-messaging install. No Tauri dependency.
 - **Browser companion path**: `packages/chrome-companion` (MV3) talks over stdio to `phlegethon-nmh` (`packages/native-messaging-host`), which forwards over a named local socket (`packages/companion-protocol/src/ipc.rs`) to the shell's `companion.rs`. The native-messaging manifest template (`packages/native-messaging-host/manifests/com.phlegethon.bridge.json`) has `REPLACE_WITH_...` placeholders for manual installs only. `scripts/install-nmh-linux.sh --extension-id <id>` does not read it; it writes its own JSON, and `scripts/test-scripts.sh` checks that the two have the same fields.
 - **`packages/extractor-plugins`**: yt-dlp plugins installed as an app-managed sidecar. `plugins-manifest.json` version and extractor keys must match `packages/download-core/src/plugin_sidecar.rs`.
-- `prototypes/` is static mockup HTML/JS, not part of the build. Do not edit it as product code.
 
 ## Gotchas
 

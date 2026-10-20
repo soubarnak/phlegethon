@@ -286,7 +286,7 @@ When a batch header is present, expose **group Pause / Resume** on that header (
 
 **Rejected for v1:** split-inspector / master–detail queue chrome.
 
-Artifact: [`prototypes/download-queue/`](../../prototypes/download-queue/) (`?variant=A`).
+Artifact: [`prototypes/download-queue/`](https://github.com/soubarnak/phlegethon/tree/6e5bdbe/prototypes/download-queue) (removed from the tree; pinned to commit 6e5bdbe) (`?variant=A`).
 
 ### 8.3 Probe-then-Confirm surface
 
@@ -294,7 +294,7 @@ Artifact: [`prototypes/download-queue/`](../../prototypes/download-queue/) (`?va
 
 **Not v1 default:** bulk quality bar; two-pane layout.
 
-Artifact: [`prototypes/probe-then-confirm/`](../../prototypes/probe-then-confirm/) (`?variant=A`).
+Artifact: [`prototypes/probe-then-confirm/`](https://github.com/soubarnak/phlegethon/tree/40b60ea/prototypes/probe-then-confirm) (removed from the tree; pinned to commit 40b60ea) (`?variant=A`).
 
 ### 8.4 Empty / error copy
 
@@ -400,8 +400,8 @@ In-scope fog carried forward from the map — may stay open without blocking map
 
 | Prototype | Path | Locked variant |
 | --- | --- | --- |
-| Download queue UI | [`prototypes/download-queue/`](../../prototypes/download-queue/) | A — Dense rows (+ batch-header group Pause/Resume) |
-| Probe-then-Confirm UI | [`prototypes/probe-then-confirm/`](../../prototypes/probe-then-confirm/) | A — Dense sheet |
+| Download queue UI | [`prototypes/download-queue/`](https://github.com/soubarnak/phlegethon/tree/6e5bdbe/prototypes/download-queue) (removed from the tree; pinned to commit 6e5bdbe) | A — Dense rows (+ batch-header group Pause/Resume) |
+| Probe-then-Confirm UI | [`prototypes/probe-then-confirm/`](https://github.com/soubarnak/phlegethon/tree/40b60ea/prototypes/probe-then-confirm) (removed from the tree; pinned to commit 40b60ea) | A — Dense sheet |
 
 ### Glossary
 
