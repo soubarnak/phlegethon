@@ -1,6 +1,6 @@
 # Template file for 'phlegethon'
 pkgname=phlegethon
-version=0.1.0
+version=0.1.1
 revision=1
 build_style=cargo
 # Both binaries from the workspace. `custom-protocol` embeds the frontend; without it
