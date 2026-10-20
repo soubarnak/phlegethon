@@ -6,8 +6,8 @@
 //! `scripts/gen-ts-types.sh`.
 
 use download_core::{
-    ActiveJobMatch, ExpectedHash, ExtractionTier, JobSnapshot, MediaFetchKind, MediaItem,
-    ProbeDestinationPreview, ProbeResult, Quality,
+    ActiveJobMatch, ArchiveEntry, ArchiveOutcome, ExpectedHash, ExtractionTier, JobSnapshot,
+    MediaFetchKind, MediaItem, ProbeDestinationPreview, ProbeResult, Quality,
 };
 use serde_json::Value;
 
@@ -39,6 +39,36 @@ fn job_snapshot_matches_the_sample() {
     assert_eq!(
         serde_json::to_value(snapshot).unwrap(),
         samples()["JobSnapshot"]
+    );
+}
+
+#[test]
+fn archive_entry_matches_the_samples() {
+    let entries = vec![
+        ArchiveEntry {
+            media_id: "youtube-abc".into(),
+            title: "A video".into(),
+            url: "https://example.com/v".into(),
+            completed_at_unix_secs: 1_700_000_000,
+            destination: "/lib/jobs/job-1".into(),
+            job_id: "job-1".into(),
+            outcome: ArchiveOutcome::Completed,
+            size_bytes: Some(4096),
+        },
+        ArchiveEntry {
+            media_id: "youtube-def".into(),
+            title: "Another video".into(),
+            url: "https://example.com/w".into(),
+            completed_at_unix_secs: 1_700_000_100,
+            destination: "/lib/jobs/job-2".into(),
+            job_id: "job-2".into(),
+            outcome: ArchiveOutcome::Failed,
+            size_bytes: None,
+        },
+    ];
+    assert_eq!(
+        serde_json::to_value(entries).unwrap(),
+        samples()["ArchiveEntry"]
     );
 }
 

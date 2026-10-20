@@ -18,6 +18,7 @@ const ARCHIVE_VERSION: u32 = 2;
 
 /// Outcome of a completed or failed media job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ArchiveOutcome {
     Completed,
     Failed,
@@ -25,11 +26,13 @@ pub enum ArchiveOutcome {
 
 /// A completed media identity recorded in the Download Archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ArchiveEntry {
     pub media_id: String,
     pub title: String,
     pub url: String,
     pub completed_at_unix_secs: u64,
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub destination: PathBuf,
     pub job_id: String,
     #[serde(default = "default_outcome")]

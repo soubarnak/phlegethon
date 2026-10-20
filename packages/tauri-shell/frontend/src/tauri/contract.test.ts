@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import samples from "./contract/samples.json";
 import type {
   ActiveJobMatch,
+  ArchiveEntry,
   CompanionIntent,
   CompanionResult,
   CoreEvent,
@@ -33,6 +34,10 @@ const JOB_SNAPSHOT: Shape<JobSnapshot> = {
   title: true, path: true, is_extractor: true, extraction_tier: true, last_error: true, queue_index: true,
 };
 const ACTIVE_JOB_MATCH: Shape<ActiveJobMatch> = { job_id: true, url: true, status: true, title: true };
+const ARCHIVE_ENTRY: Shape<ArchiveEntry> = {
+  media_id: true, title: true, url: true, completed_at_unix_secs: true, destination: true, job_id: true,
+  outcome: true, size_bytes: true,
+};
 const EXPECTED_HASH: Shape<ExpectedHash> = { algorithm: true, digest: true };
 const PROBE_DESTINATION_PREVIEW: Shape<ProbeDestinationPreview> = { path_display: true };
 const QUALITY: Shape<Quality> = { id: true, label: true, size_bytes: true, container: true };
@@ -76,6 +81,12 @@ describe("IPC contract samples (M-71)", () => {
   it("ActiveJobMatch includes the probing status that is not a job status", () => {
     for (const match of samples.ActiveJobMatch) expect(keys(match)).toEqual(shape(ACTIVE_JOB_MATCH));
     expect(samples.ActiveJobMatch.map((m) => m.status)).toContain("probing");
+  });
+
+  it("ArchiveEntry covers both outcomes and a missing size", () => {
+    for (const entry of samples.ArchiveEntry) expect(keys(entry)).toEqual(shape(ARCHIVE_ENTRY));
+    expect(samples.ArchiveEntry.map((e) => e.outcome).sort()).toEqual(["Completed", "Failed"]);
+    expect(samples.ArchiveEntry.some((e) => e.size_bytes === null)).toBe(true);
   });
 
   it("ExpectedHash", () => {
