@@ -6,6 +6,7 @@ import type {
   CompanionResult,
   CoreEvent,
   EnqueueResult,
+  ExpectedHash,
   JobSnapshot,
   MediaItem,
   ProbeDestinationPreview,
@@ -32,6 +33,7 @@ const JOB_SNAPSHOT: Shape<JobSnapshot> = {
   title: true, path: true, is_extractor: true, extraction_tier: true, last_error: true, queue_index: true,
 };
 const ACTIVE_JOB_MATCH: Shape<ActiveJobMatch> = { job_id: true, url: true, status: true, title: true };
+const EXPECTED_HASH: Shape<ExpectedHash> = { algorithm: true, digest: true };
 const PROBE_DESTINATION_PREVIEW: Shape<ProbeDestinationPreview> = { path_display: true };
 const QUALITY: Shape<Quality> = { id: true, label: true, size_bytes: true, container: true };
 const MEDIA_ITEM: Shape<MediaItem> = {
@@ -74,6 +76,10 @@ describe("IPC contract samples (M-71)", () => {
   it("ActiveJobMatch includes the probing status that is not a job status", () => {
     for (const match of samples.ActiveJobMatch) expect(keys(match)).toEqual(shape(ACTIVE_JOB_MATCH));
     expect(samples.ActiveJobMatch.map((m) => m.status)).toContain("probing");
+  });
+
+  it("ExpectedHash", () => {
+    expect(keys(samples.ExpectedHash)).toEqual(shape(EXPECTED_HASH));
   });
 
   it("probe types", () => {

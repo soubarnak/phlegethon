@@ -12,8 +12,10 @@ export type { CompanionIntentEvent as CompanionIntent } from "./generated/Compan
 export type { CompanionResult } from "./generated/CompanionResult";
 export type { EnqueueResult } from "./generated/EnqueueResult";
 export type { EventSummary as CoreEvent } from "./generated/EventSummary";
+export type { ExpectedHash } from "./generated/ExpectedHash";
 export type { ExtractionTier } from "./generated/ExtractionTier";
 export type { JobSnapshot } from "./generated/JobSnapshot";
+export type { HashAlgorithm } from "./generated/HashAlgorithm";
 export type { MediaFetchKind } from "./generated/MediaFetchKind";
 export type { MediaItem } from "./generated/MediaItem";
 export type { ProbeDestinationPreview } from "./generated/ProbeDestinationPreview";

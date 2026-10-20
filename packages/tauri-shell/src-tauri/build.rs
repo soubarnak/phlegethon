@@ -24,6 +24,8 @@ const COMMANDS: &[&str] = &[
     "add_job_mirror",
     "job_mirrors",
     "set_job_expected_hash",
+    "get_job_expected_hash",
+    "clear_job_expected_hash",
     "preview_filename_template",
     "clear_history",
     "confirm_probe_selection",

@@ -28,6 +28,8 @@
     "allow-add-job-mirror",
     "allow-job-mirrors",
     "allow-set-job-expected-hash",
+    "allow-get-job-expected-hash",
+    "allow-clear-job-expected-hash",
     "allow-preview-filename-template",
     "allow-clear-history",
     "allow-confirm-probe-selection",

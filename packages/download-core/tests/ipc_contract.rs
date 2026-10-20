@@ -6,7 +6,7 @@
 //! `scripts/gen-ts-types.sh`.
 
 use download_core::{
-    ActiveJobMatch, ExtractionTier, JobSnapshot, MediaFetchKind, MediaItem,
+    ActiveJobMatch, ExpectedHash, ExtractionTier, JobSnapshot, MediaFetchKind, MediaItem,
     ProbeDestinationPreview, ProbeResult, Quality,
 };
 use serde_json::Value;
@@ -39,6 +39,19 @@ fn job_snapshot_matches_the_sample() {
     assert_eq!(
         serde_json::to_value(snapshot).unwrap(),
         samples()["JobSnapshot"]
+    );
+}
+
+#[test]
+fn expected_hash_matches_the_sample() {
+    let hash = ExpectedHash::parse(
+        "sha-256",
+        "f69af9e91e9e5d93dac3c583e5e896dc71b756ef1a42ecbc2a0028393b487868",
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(hash).unwrap(),
+        samples()["ExpectedHash"]
     );
 }
 

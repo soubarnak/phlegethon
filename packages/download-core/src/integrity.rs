@@ -12,6 +12,7 @@ use std::path::Path;
 /// Supported digest algorithms for Integrity Check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum HashAlgorithm {
     Md5,
     Sha1,
@@ -21,6 +22,7 @@ pub enum HashAlgorithm {
 
 /// Expected digest for a completed download.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ExpectedHash {
     pub algorithm: HashAlgorithm,
     /// Lowercase hex digest (no separators).

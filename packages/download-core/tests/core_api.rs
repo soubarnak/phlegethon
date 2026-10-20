@@ -5840,6 +5840,40 @@ fn integrity_check_mismatch_fails_and_keeps_file_on_disk() {
 }
 
 #[test]
+fn expected_hash_can_be_read_and_cleared() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+
+    assert_eq!(core.job_expected_hash(&job_id).unwrap(), None);
+
+    core.set_job_expected_hash(&job_id, "sha-256", HELLO_FILE_SHA256)
+        .unwrap();
+    let hash = core.job_expected_hash(&job_id).unwrap().expect("hash set");
+    assert_eq!(hash.digest, HELLO_FILE_SHA256);
+
+    core.clear_job_expected_hash(&job_id).unwrap();
+    assert_eq!(core.job_expected_hash(&job_id).unwrap(), None);
+    // Clearing again is a no-op, not an error.
+    core.clear_job_expected_hash(&job_id).unwrap();
+    assert!(core.job_expected_hash("missing").is_err());
+    assert!(core.clear_job_expected_hash("missing").is_err());
+
+    // A cleared hash must not fail the job on a mismatch.
+    core.set_job_expected_hash(&job_id, "sha-256", "0".repeat(64).as_str())
+        .unwrap();
+    core.clear_job_expected_hash(&job_id).unwrap();
+    core.process_pending().unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job still queued");
+    assert_eq!(snap.status, "completed");
+}
+
+#[test]
 fn integrity_check_skipped_when_no_expected_hash() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));

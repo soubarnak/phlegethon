@@ -624,6 +624,21 @@ async fn set_job_expected_hash(
     core.set_job_expected_hash(&job_id, &algorithm, &digest)
 }
 
+#[tauri::command]
+async fn get_job_expected_hash(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<Option<download_core::ExpectedHash>, String> {
+    let core = lock_or_recover(&state.core);
+    core.job_expected_hash(&job_id)
+}
+
+#[tauri::command]
+async fn clear_job_expected_hash(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+    let mut core = lock_or_recover(&state.core);
+    core.clear_job_expected_hash(&job_id)
+}
+
 /// Render the Filename Template with sample values for the settings preview.
 #[tauri::command]
 async fn preview_filename_template(template: String) -> Result<String, String> {
@@ -1653,6 +1668,8 @@ pub fn run() {
             add_job_mirror,
             job_mirrors,
             set_job_expected_hash,
+            get_job_expected_hash,
+            clear_job_expected_hash,
             preview_filename_template,
             clear_history,
             confirm_probe_selection,

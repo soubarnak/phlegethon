@@ -590,6 +590,10 @@ impl Job {
         self.expected_hash = Some(hash);
     }
 
+    pub fn clear_expected_hash(&mut self) {
+        self.expected_hash = None;
+    }
+
     /// Final file path for this job under its Job Destination.
     pub fn final_path(&self) -> PathBuf {
         self.destination.join(&self.filename)

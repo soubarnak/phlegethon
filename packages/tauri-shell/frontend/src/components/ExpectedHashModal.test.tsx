@@ -9,7 +9,12 @@ const request = { jobId: "j1", title: "ubuntu.iso" };
 const hex = (length: number) => "0123456789abcdef".repeat(8).slice(0, length);
 
 function setup(handlers: Record<string, CommandHandler> = {}, onClose = vi.fn()) {
-  const ipc = installFakeIpc({ set_job_expected_hash: () => undefined, ...handlers });
+  const ipc = installFakeIpc({
+    set_job_expected_hash: () => undefined,
+    get_job_expected_hash: () => null,
+    clear_job_expected_hash: () => undefined,
+    ...handlers,
+  });
   render(
     <ToastProvider>
       <ExpectedHashModal request={request} onClose={onClose} />
@@ -93,5 +98,36 @@ describe("ExpectedHashModal", () => {
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onClose).toHaveBeenCalled();
     expect(ipc.callsTo("set_job_expected_hash")).toHaveLength(0);
+  });
+
+  it("shows the current expected hash and clears it", async () => {
+    const { ipc, onClose, user } = setup({
+      get_job_expected_hash: () => ({ algorithm: "sha-1", digest: hex(40) }),
+    });
+    expect(await screen.findByTestId("expected-hash-current")).toHaveTextContent(hex(40));
+    expect(screen.getByText("Current expected hash (SHA-1):")).toBeInTheDocument();
+    expect(ipc.callsTo("get_job_expected_hash")).toEqual([{ jobId: "j1" }]);
+
+    await user.click(screen.getByRole("button", { name: "Clear expected hash" }));
+    await waitFor(() => expect(ipc.callsTo("clear_job_expected_hash")).toEqual([{ jobId: "j1" }]));
+    expect(await screen.findByText("Expected hash cleared")).toBeInTheDocument();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no Clear button when the job has no expected hash", async () => {
+    const { ipc } = setup();
+    await waitFor(() => expect(ipc.callsTo("get_job_expected_hash")).toHaveLength(1));
+    expect(screen.queryByRole("button", { name: "Clear expected hash" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("expected-hash-current")).not.toBeInTheDocument();
+  });
+
+  it("keeps the dialog open when clearing fails", async () => {
+    const { onClose, user } = setup({
+      get_job_expected_hash: () => ({ algorithm: "md5", digest: hex(32) }),
+      clear_job_expected_hash: () => Promise.reject("job j1 not found"),
+    });
+    await user.click(await screen.findByRole("button", { name: "Clear expected hash" }));
+    expect(await screen.findByText("Could not clear the expected hash")).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
