@@ -2,11 +2,11 @@
 
 Phlegethon is a GTK/WebKit window. It needs no desktop environment, but three things in a bare compositor session decide whether the folder chooser and notifications work. The window rules at the end are optional.
 
-Nothing here has been run in a real niri session. Check each item with the command given.
+The app_id, the decorations and the folder dialog below were checked on niri 26.04 with the packaged 0.1.1 (2026-10-20). The rest, including the window rules, is not verified against a running session. Check each item with the command given.
 
 ## Window class (app_id)
 
-Window rules match the Wayland `app_id`. Tauri does not set a GTK application id for this app (`enableGTKAppId` is off), so the app_id is expected to be the binary name, `phlegethon`. Confirm it:
+Window rules match the Wayland `app_id`. Tauri does not set a GTK application id for this app (`enableGTKAppId` is off), so the app_id is the binary name, `phlegethon` (seen with `niri msg windows` on niri 26.04). Confirm it on your setup:
 
 ```sh
 niri msg windows        # niri
@@ -67,4 +67,4 @@ window-rule {
 }
 ```
 
-The first rule matches the `Choose folder` dialog of `xdg-desktop-portal-gtk`, which is what the folder button opens when the GTK portal backend is installed (checked on niri 26.04). For sway, the equivalent floating rules (not checked) are `for_window [app_id="xdg-desktop-portal-gtk" title="^Choose folder"] floating enable` and `for_window [app_id="zenity"] floating enable`. Keep a Phlegethon window at least 700 px wide for the batch bar and toolbar.
+The second rule matches the `Choose folder` dialog of `xdg-desktop-portal-gtk`, which is what the folder button opens when the GTK portal backend is installed (checked on niri 26.04). For sway, the equivalent floating rules (not checked) are `for_window [app_id="xdg-desktop-portal-gtk" title="^Choose folder"] floating enable` and `for_window [app_id="zenity"] floating enable`. The KDL above passes `niri validate` on niri 26.04. That the rules float the dialog and widen the column was not checked in a live session. On niri, also set `prefer-no-csd` in your config: with it Phlegethon draws no title bar or shadow, and niri's shipped default config leaves that line commented out, so without it you probably get a GTK title bar (not checked). Keep a Phlegethon window at least 700 px wide for the batch bar and toolbar.
