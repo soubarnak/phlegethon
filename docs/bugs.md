@@ -612,7 +612,8 @@ Height budget: niri stacks windows in a column. At 1080 logical pixels, two stac
 - **Problem:** With `enableGTKAppId` off, GTK sets no application id and the app_id falls back to the program name, probably `phlegethon`. That matches `phlegethon.desktop`, but the metainfo id is `com.phlegethon.app`.
 - **Effect:** A niri window rule written as `match app-id="com.phlegethon.app"` does not match. Turning on `enableGTKAppId` would fix the rule but break the desktop-file match unless the desktop file is renamed.
 - **Fix:** Confirm the real value with `niri msg windows`, then document it. If the reverse-DNS id is wanted, set `enableGTKAppId: true` and rename the desktop file to `com.phlegethon.app.desktop` together with the metainfo `launchable`.
-- **Confidence:** Confirmed for the configuration. The exact app_id string is suspected.
+- **Confidence:** Confirmed for the configuration.
+- **Checked under niri 26.04 (2026-10-20), installed 0.1.1:** `niri msg windows` reports `app_id` `phlegethon`. That matches `phlegethon.desktop` (and its `Icon`) and the metainfo `launchable`, so no change is needed. Window rules use `^phlegethon$`.
 
 #### UI-13 (low). Window decorations are left at the default
 
@@ -621,6 +622,7 @@ Height budget: niri stacks windows in a column. At 1080 logical pixels, two stac
 - **Effect:** In a tiled column a title bar wastes about 37 px of height, and its maximize and minimize buttons do nothing useful in niri. Floating windows may have a shadow margin.
 - **Fix:** Take a screenshot in niri first. If a title bar is drawn, set `"decorations": false` and add `data-tauri-drag-region` to the Carbon header so floating windows can still be moved.
 - **Confidence:** Suspected.
+- **Checked under niri 26.04 (2026-10-20), installed 0.1.1, with `prefer-no-csd` set:** the screenshot shows no title bar and no shadow margin; the window is exactly the column size (954 × 1028 in a 2/3 column). Leave `decorations` at the default. Without `prefer-no-csd` the result was not checked.
 
 #### UI-14 (low). Dead CSS would double the header offset if the inline style were removed
 
@@ -647,7 +649,8 @@ Height budget: niri stacks windows in a column. At 1080 logical pixels, two stac
 - **Problem:** zenity and kdialog run as separate top-level windows with no parent relation to Phlegethon. niri tiles such windows as a new column unless a window rule floats them.
 - **Effect:** "Choose folder" scrolls the strip to a new column instead of showing a dialog over the app.
 - **Fix:** Prefer the portal path (fix H-20 first), and document a niri window rule that floats the zenity picker.
-- **Confidence:** Suspected.
+- **Confidence:** Confirmed.
+- **Checked under niri 26.04 (2026-10-20), installed 0.1.1, `xdg-desktop-portal-gtk`:** clicking "Save to…" opens a window titled `Choose folder` with `app_id` `xdg-desktop-portal-gtk`, tiled as a new column (`pos_in_scrolling_layout` `[3, 1]`, `is_floating` false). So the portal path does this too, not only the zenity fallback, and a `^zenity$` rule alone does not match it. `picker.rs` passes no parent window. A rule on `xdg-desktop-portal-gtk` fixes it; passing a parent window handle to the portal would make the dialog transient and is left as a future change.
 
 #### UI-18 (low). Long clipboard URLs may overflow the clipboard hint
 
@@ -688,12 +691,17 @@ No case was found where two text runs paint on top of each other inside normal f
 
 ### 5.8 Suggested niri configuration for users
 
-Until UI-1, UI-2 and UI-12 are fixed, a user can open Phlegethon in a wide column and float external pickers. This snippet is untested; check the app_id with `niri msg windows` first.
+A user can open Phlegethon in a wide column and float the folder picker. Checked on niri 26.04 with the installed 0.1.1: the app_id is `phlegethon`, and the portal dialog is `xdg-desktop-portal-gtk` titled `Choose folder`.
 
 ```kdl
 window-rule {
     match app-id="^phlegethon$"
     default-column-width { proportion 0.66667; }
+}
+
+window-rule {
+    match app-id="^xdg-desktop-portal-gtk$" title="^Choose folder"
+    open-floating true
 }
 
 window-rule {
@@ -1059,12 +1067,12 @@ Status of each finding after the fix workstreams (GitHub issues #68 to #80). The
 | UI-9 | Fixed | #120 |
 | UI-10 | Fixed | #120 |
 | UI-11 | Fixed | #120 |
-| UI-12 | Open | needs a niri session |
-| UI-13 | Open | needs a niri session |
+| UI-12 | Verified, no change (app_id `phlegethon` matches the desktop file) | #140 |
+| UI-13 | Verified, no change (no decorations under `prefer-no-csd`) | #140 |
 | UI-14 | Fixed | #120 |
 | UI-15 | Fixed | #120 |
 | UI-16 | Fixed | #120 |
-| UI-17 | Open | needs a niri session |
+| UI-17 | Documented (window rule); a parent window handle is future work | #140 |
 | UI-18 | Fixed | #120 |
 | G-1 | Fixed | #83 |
 | G-2 | Fixed | #131 |

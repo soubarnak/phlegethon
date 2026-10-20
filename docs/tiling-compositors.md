@@ -32,7 +32,7 @@ The reverse-DNS identifier `com.phlegethon.app` is the Tauri bundle identifier a
    Other compositors use `<XDG_CURRENT_DESKTOP>-portals.conf`, or `portals.conf`, in the same directory. See `portals.conf(5)`.
 3. Make sure the portal runs in the session. Most compositors start it through D-Bus activation. If the chooser never appears, list the session bus names with `dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames | grep portal`, or start `/usr/libexec/xdg-desktop-portal -r` by hand and read its log.
 
-Without a working portal Phlegethon falls back to `zenity`, then `kdialog`, and finally asks you to type the path. That fallback opens a separate dialog window; see the floating rule below.
+Without a working portal Phlegethon falls back to `zenity`, then `kdialog`, and finally asks you to type the path. The portal dialog and the fallback both open as separate windows; see the floating rules below.
 
 ## Notifications: a notification daemon
 
@@ -57,9 +57,14 @@ window-rule {
 }
 
 window-rule {
+    match app-id="^xdg-desktop-portal-gtk$" title="^Choose folder"
+    open-floating true
+}
+
+window-rule {
     match app-id="^zenity$"
     open-floating true
 }
 ```
 
-For sway, the equivalent floating rule is `for_window [app_id="zenity"] floating enable`. Keep a Phlegethon window at least 700 px wide for the batch bar and toolbar.
+The first rule matches the `Choose folder` dialog of `xdg-desktop-portal-gtk`, which is what the folder button opens when the GTK portal backend is installed (checked on niri 26.04). For sway, the equivalent floating rules (not checked) are `for_window [app_id="xdg-desktop-portal-gtk" title="^Choose folder"] floating enable` and `for_window [app_id="zenity"] floating enable`. Keep a Phlegethon window at least 700 px wide for the batch bar and toolbar.
