@@ -20,7 +20,7 @@ homepage="https://github.com/soubarnak/phlegethon"
 # Tarball from scripts/make-dist-tarball.sh: tracked sources plus the prebuilt
 # packages/tauri-shell/frontend/dist, so no npm is needed inside xbps-src.
 distfiles="${homepage}/releases/download/phlegethon-v${version}/${pkgname}-${version}.tar.gz"
-checksum=34b5c3c0dc7540165228ba307e9834b66de45463bcdf721f7136059ce98db74f
+checksum=dc0e6d25459242d1856148e4754c3af68536ce9a893c4780fce36659ea609afd
 # WebKitGTK and the Tauri stack are not set up for cross builds.
 nocross=yes
 
