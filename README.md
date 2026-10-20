@@ -158,8 +158,8 @@ Phlegethon is released under the [MIT License](LICENSE). Copyright (c) 2026 soub
 
 You may use, copy, modify, fork and redistribute it, including in products you sell. In return:
 
-- Keep the [LICENSE](LICENSE) text and the copyright notice in every copy and fork.
-- Give credit. Keep the line "Phlegethon by [Bongbetic](https://github.com/soubarnak/phlegethon)" in the README or About page of your fork.
+- Forks must keep credit. The MIT License requires the [LICENSE](LICENSE) text and the copyright notice in every copy and substantial portion of the code. Do not remove them.
+- Name the original. Keep the line "Based on Phlegethon by [Bongbetic](https://github.com/soubarnak/phlegethon)" in the README or About page of your fork, with the link. This is the project's attribution request; the legal requirement is the notice above.
 - If your fork changes the product, please replace the Phlegethon logo and name. The logo and the "Developed by Bongbetic" footer credit identify this project. This is a request, not an extra license condition; the license is plain MIT.
 
 ## Credits and third-party software
