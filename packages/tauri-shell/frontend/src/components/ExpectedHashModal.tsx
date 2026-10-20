@@ -4,6 +4,7 @@ import { api } from "@/tauri/api";
 import { t } from "@/lib/i18n";
 import {
   EXPECTED_HASH_ALGORITHMS,
+  IPC_HASH_ALGORITHM,
   expectedDigestLength,
   normalizeExpectedDigest,
   type ExpectedDigestResult,
@@ -118,7 +119,7 @@ export function ExpectedHashModal({ request, onClose }: ExpectedHashModalProps) 
       <p style={{ wordBreak: "break-word" }}>{t("hash.body", { title: request.title })}</p>
       {current && (
         <div style={{ marginBottom: "1rem" }}>
-          <p>{t("hash.current", { algorithm: t(`hash.algorithm.${current.algorithm}`) })}</p>
+          <p>{t("hash.current", { algorithm: t(`hash.algorithm.${IPC_HASH_ALGORITHM[current.algorithm]}`) })}</p>
           <code data-testid="expected-hash-current" style={{ wordBreak: "break-all" }}>
             {current.digest}
           </code>

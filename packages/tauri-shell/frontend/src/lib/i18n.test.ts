@@ -3,7 +3,7 @@ import path from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import en from "@strings/en.json";
-import { EXPECTED_HASH_ALGORITHMS } from "./expectedHash";
+import { EXPECTED_HASH_ALGORITHMS, IPC_HASH_ALGORITHM } from "./expectedHash";
 import { getCurrentLocale, initLocale, t } from "./i18n";
 
 function sources(dir: string): string[] {
@@ -127,6 +127,16 @@ describe("i18n", () => {
     }
     expect(missing).toEqual([]);
     expect(stale).toEqual([]);
+  });
+
+  it("has a label for every HashAlgorithm the Core can send", () => {
+    const sent = unionMembers("tauri/generated/HashAlgorithm.ts", "HashAlgorithm");
+    expect(sent.length).toBeGreaterThan(0);
+    expect(Object.keys(IPC_HASH_ALGORITHM).sort()).toEqual([...sent].sort());
+    const missing = sent
+      .map((name) => `hash.algorithm.${IPC_HASH_ALGORITHM[name as keyof typeof IPC_HASH_ALGORITHM]}`)
+      .filter((key) => !(key in table));
+    expect(missing).toEqual([]);
   });
 
   it("passes the placeholders each string expects", () => {

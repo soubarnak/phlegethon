@@ -102,7 +102,7 @@ describe("ExpectedHashModal", () => {
 
   it("shows the current expected hash and clears it", async () => {
     const { ipc, onClose, user } = setup({
-      get_job_expected_hash: () => ({ algorithm: "sha-1", digest: hex(40) }),
+      get_job_expected_hash: () => ({ algorithm: "sha1", digest: hex(40) }),
     });
     expect(await screen.findByTestId("expected-hash-current")).toHaveTextContent(hex(40));
     expect(screen.getByText("Current expected hash (SHA-1):")).toBeInTheDocument();

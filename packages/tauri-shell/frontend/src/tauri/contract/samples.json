@@ -42,6 +42,7 @@
   "ExpectedHash": { "algorithm": "sha-256", "digest": "f69af9e91e9e5d93dac3c583e5e896dc71b756ef1a42ecbc2a0028393b487868" },
   "ExtractionTier": ["dedicated", "generic_extractor", "page_sniff", "direct_file"],
   "MediaFetchKind": ["extractor", "direct_http"],
+  "HashAlgorithm": ["md5", "sha1", "sha-256"],
   "ProbeDestinationPreview": { "path_display": "/lib/jobs/…" },
   "ProbeResult": {
     "url": "https://example.com/v",

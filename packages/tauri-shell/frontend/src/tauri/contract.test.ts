@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { IPC_HASH_ALGORITHM } from "@/lib/expectedHash";
 import samples from "./contract/samples.json";
 import type {
   ActiveJobMatch,
@@ -104,6 +105,12 @@ describe("IPC contract samples (M-71)", () => {
   it("enums are the snake_case strings the frontend compares against", () => {
     expect(samples.ExtractionTier).toEqual(["dedicated", "generic_extractor", "page_sniff", "direct_file"]);
     expect(samples.MediaFetchKind).toEqual(["extractor", "direct_http"]);
+  });
+
+  it("HashAlgorithm names are the kebab-case strings the Core sends, each with a canonical spelling", () => {
+    expect(samples.HashAlgorithm).toEqual(["md5", "sha1", "sha-256"]);
+    expect(Object.keys(IPC_HASH_ALGORITHM)).toEqual(samples.HashAlgorithm);
+    expect(IPC_HASH_ALGORITHM.sha1).toBe("sha-1");
   });
 
   it("every core-event variant", () => {
