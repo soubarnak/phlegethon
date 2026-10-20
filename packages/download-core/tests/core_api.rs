@@ -9422,8 +9422,10 @@ struct PlanningHttp {
     ranges: bool,
     size_known: bool,
     head_delay: std::time::Duration,
-    /// When set, HEAD requests block here until the test opens the gate.
+    /// When set, `supports_range` blocks here until the test opens the gate.
     head_gate: Option<Arc<HeadGate>>,
+    /// When set, `file_size` blocks here until the test opens the gate.
+    size_gate: Option<Arc<HeadGate>>,
     /// Panic inside `fetch`; only for ranged fetches when `Some(true)`.
     panic_on_fetch: Option<bool>,
     fetches: Arc<std::sync::atomic::AtomicUsize>,
@@ -9438,6 +9440,7 @@ impl PlanningHttp {
             size_known: true,
             head_delay: std::time::Duration::ZERO,
             head_gate: None,
+            size_gate: None,
             panic_on_fetch: None,
             fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ranged_fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -9485,6 +9488,9 @@ impl HttpBackend for PlanningHttp {
 
     fn file_size(&self, _url: &str) -> Result<u64, String> {
         std::thread::sleep(self.head_delay);
+        if let Some(gate) = &self.size_gate {
+            gate.pass();
+        }
         if self.size_known {
             Ok(self.body.len() as u64)
         } else {
@@ -9619,10 +9625,14 @@ fn dispatch_claims_active_job_slots_before_the_transfer_threads_plan() {
 
 #[test]
 fn slow_head_requests_do_not_hold_the_core_lock() {
-    let gate = Arc::new(HeadGate::default());
+    // Planning asks `supports_range` first and `file_size` second. Each has its own gate, so
+    // moving either HEAD request under the Core lock makes the matching check below fail.
+    let range_gate = Arc::new(HeadGate::default());
+    let size_gate = Arc::new(HeadGate::default());
     let mut http = PlanningHttp::new(&object_body(6));
     http.ranges = true;
-    http.head_gate = Some(gate.clone());
+    http.head_gate = Some(range_gate.clone());
+    http.size_gate = Some(size_gate.clone());
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, _rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
@@ -9630,16 +9640,26 @@ fn slow_head_requests_do_not_hold_the_core_lock() {
 
     let core = Arc::new(Mutex::new(core));
     Core::dispatch_pending(core.clone()).unwrap();
-    gate.wait_until_blocked();
 
-    // A HEAD request is blocked right now, so planning must not hold the Core lock.
-    let snapshots = match core.try_lock() {
-        Ok(guard) => guard.list_job_snapshots(),
-        Err(_) => panic!("planning held the Core lock during a HEAD request"),
+    // Without this, a poisoned mutex would read as "planning held the Core lock".
+    let snapshot_count = |request: &str| match core.try_lock() {
+        Ok(guard) => guard.list_job_snapshots().len(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            panic!("planning held the Core lock during the {request} HEAD request")
+        }
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            panic!("the Core mutex is poisoned: a thread panicked while holding it")
+        }
     };
-    assert_eq!(snapshots.len(), 1);
 
-    gate.open();
+    range_gate.wait_until_blocked();
+    assert_eq!(snapshot_count("supports_range"), 1);
+    range_gate.open();
+
+    size_gate.wait_until_blocked();
+    assert_eq!(snapshot_count("file_size"), 1);
+    size_gate.open();
+
     wait_for_status(
         &core,
         &job_id,
