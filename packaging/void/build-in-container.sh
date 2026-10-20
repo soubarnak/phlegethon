@@ -168,6 +168,7 @@ tar -xzOf "$tarball" "phlegethon-$version/packages/tauri-shell/frontend/dist/ind
 "$SRC/scripts/check-embedded-frontend.sh" /usr/bin/phlegethon "$WORK/index.html"
 test -f /usr/share/applications/phlegethon.desktop
 test -f /usr/share/licenses/phlegethon/LICENSE
+test -f /usr/share/licenses/phlegethon/THIRD_PARTY_NOTICES.md
 rm -f "$OUT/$libc"/*-repodata
 
 echo ">> done: $pkg"

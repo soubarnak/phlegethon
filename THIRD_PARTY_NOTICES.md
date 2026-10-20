@@ -1,6 +1,6 @@
 # Third-party notices
 
-Phlegethon is released under the MIT License (see `LICENSE`). This file carries the notices that other licenses require when their software is redistributed with it.
+Phlegethon is released under the MIT License (see `LICENSE`). This file carries the notice for the embedded IBM Plex fonts, which is the one license that requires its text to accompany the application. It is not a full inventory of every dependency.
 
 ## IBM Plex Sans and IBM Plex Mono
 
@@ -102,10 +102,10 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 ## Plus Jakarta Sans (logo outlines only)
 
-The letters of the Phlegethon logo are outlines derived from the ExtraBold weight of Plus Jakarta Sans. The font itself is not distributed with Phlegethon.
+The letters of the Phlegethon logo are outlines derived from the ExtraBold weight of Plus Jakarta Sans. The font itself is not distributed with Phlegethon. The font declares no Reserved Font Name, and the OFL text above applies to it.
 
 Copyright 2020 The Plus Jakarta Sans Project Authors (https://github.com/tokotype/PlusJakartaSans). Licensed under the SIL Open Font License 1.1: https://scripts.sil.org/OFL
 
 ## Other software
 
-Rust crates and npm packages are used under their own permissive licenses; the allowlist is in `deny.toml` and each package's license is in `Cargo.lock` and `package-lock.json`. yt-dlp (Unlicense) and ffmpeg (the license of the Void package build) are external programs that Phlegethon runs. They are not part of this repository or its package.
+Rust crates and npm packages are used under their own licenses. Rust dependencies are checked against the allowlist in `deny.toml`, and `package-lock.json` records each npm package's license. This file does not reproduce their notices. yt-dlp (Unlicense) and ffmpeg (the license of the Void package build) are external programs that Phlegethon runs. They are not part of this repository or its package.

@@ -164,7 +164,7 @@ You may use, copy, modify, fork and redistribute it, including in products you s
 
 ## Credits and third-party software
 
-Phlegethon is built on other people's work. The licenses below come from the project's own manifests (`Cargo.lock`, `package-lock.json`) and the dependency policy in [`deny.toml`](deny.toml).
+Phlegethon is built on other people's work. The licenses below come from each project's own manifest and the dependency policy in [`deny.toml`](deny.toml).
 
 | Component | Use | License |
 | --- | --- | --- |
