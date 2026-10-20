@@ -23,6 +23,11 @@
   </provides>
   <releases>
     <!-- Newest first. Keep the first entry equal to the application version (scripts/check-versions.sh). -->
+    <release version="0.1.1" date="2026-10-20" type="development">
+      <description>
+        <p>New Phlegethon logo in the header and a "Developed by Bongbetic" credit in the footer.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-16" type="development" />
   </releases>
   <content_rating type="oars-1.1" />

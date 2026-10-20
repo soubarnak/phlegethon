@@ -1,7 +1,7 @@
 {
   "name": "phlegethon-shell",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Phlegethon Platform Shell frontend (React + IBM Carbon) for the Tauri 2 shell",
   "scripts": {

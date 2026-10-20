@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "companion-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "interprocess",
  "log",
@@ -918,7 +918,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "download-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossbeam-channel",
  "fs2",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "phlegethon-nmh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "companion-protocol",
  "serde_json",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "phlegethon-shell-support"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "phlegethon-tauri"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "companion-protocol",
  "crossbeam-channel",
