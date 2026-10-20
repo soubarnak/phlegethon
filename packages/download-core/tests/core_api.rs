@@ -9379,6 +9379,41 @@ fn complete_segment_table_left_by_a_crash_is_finished_without_a_request() {
 // Regression: transfer planning and thread safety (H-6, M-3, M-13, H-9)
 // ---------------------------------------------------------------------------
 
+/// Blocks HEAD requests until a test opens it, and tells the test when one is waiting.
+#[derive(Default)]
+struct HeadGate {
+    state: Mutex<(bool, bool)>, // (a HEAD request is waiting, the gate is open)
+    changed: std::sync::Condvar,
+}
+
+impl HeadGate {
+    /// Called by the fake origin: announce the waiting request, then wait for `open`.
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    /// Wait until a HEAD request is blocked in the gate. The timeout only ends a hung
+    /// test; no assertion depends on it.
+    fn wait_until_blocked(&self) {
+        let state = self.state.lock().unwrap();
+        let (_state, timeout) = self
+            .changed
+            .wait_timeout_while(state, std::time::Duration::from_secs(30), |s| !s.0)
+            .unwrap();
+        assert!(!timeout.timed_out(), "no HEAD request reached the gate");
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.changed.notify_all();
+    }
+}
+
 /// Origin whose behaviour is switched per test: panics, slow HEAD requests,
 /// an unknown size, and counts of the fetches that ran.
 #[derive(Clone)]
@@ -9387,6 +9422,8 @@ struct PlanningHttp {
     ranges: bool,
     size_known: bool,
     head_delay: std::time::Duration,
+    /// When set, HEAD requests block here until the test opens the gate.
+    head_gate: Option<Arc<HeadGate>>,
     /// Panic inside `fetch`; only for ranged fetches when `Some(true)`.
     panic_on_fetch: Option<bool>,
     fetches: Arc<std::sync::atomic::AtomicUsize>,
@@ -9400,6 +9437,7 @@ impl PlanningHttp {
             ranges: false,
             size_known: true,
             head_delay: std::time::Duration::ZERO,
+            head_gate: None,
             panic_on_fetch: None,
             fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ranged_fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -9439,6 +9477,9 @@ impl HttpBackend for PlanningHttp {
 
     fn supports_range(&self, _url: &str) -> Result<bool, String> {
         std::thread::sleep(self.head_delay);
+        if let Some(gate) = &self.head_gate {
+            gate.pass();
+        }
         Ok(self.ranges)
     }
 
@@ -9578,9 +9619,10 @@ fn dispatch_claims_active_job_slots_before_the_transfer_threads_plan() {
 
 #[test]
 fn slow_head_requests_do_not_hold_the_core_lock() {
+    let gate = Arc::new(HeadGate::default());
     let mut http = PlanningHttp::new(&object_body(6));
     http.ranges = true;
-    http.head_delay = std::time::Duration::from_millis(600);
+    http.head_gate = Some(gate.clone());
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, _rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
@@ -9588,16 +9630,16 @@ fn slow_head_requests_do_not_hold_the_core_lock() {
 
     let core = Arc::new(Mutex::new(core));
     Core::dispatch_pending(core.clone()).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    gate.wait_until_blocked();
 
-    let started = std::time::Instant::now();
-    let snapshots = core.lock().unwrap().list_job_snapshots();
-    let waited = started.elapsed();
+    // A HEAD request is blocked right now, so planning must not hold the Core lock.
+    let snapshots = match core.try_lock() {
+        Ok(guard) => guard.list_job_snapshots(),
+        Err(_) => panic!("planning held the Core lock during a HEAD request"),
+    };
     assert_eq!(snapshots.len(), 1);
-    assert!(
-        waited < std::time::Duration::from_millis(250),
-        "planning held the Core lock for {waited:?} during HEAD requests"
-    );
+
+    gate.open();
     wait_for_status(
         &core,
         &job_id,
