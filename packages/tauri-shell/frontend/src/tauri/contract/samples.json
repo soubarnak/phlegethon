@@ -17,8 +17,32 @@
     { "job_id": "job-1", "url": "https://example.com/a.iso", "status": "paused", "title": "a.iso" },
     { "job_id": "", "url": "https://example.com/v", "status": "probing", "title": "https://example.com/v" }
   ],
+  "ArchiveEntry": [
+    {
+      "media_id": "youtube-abc",
+      "title": "A video",
+      "url": "https://example.com/v",
+      "completed_at_unix_secs": 1700000000,
+      "destination": "/lib/jobs/job-1",
+      "job_id": "job-1",
+      "outcome": "Completed",
+      "size_bytes": 4096
+    },
+    {
+      "media_id": "youtube-def",
+      "title": "Another video",
+      "url": "https://example.com/w",
+      "completed_at_unix_secs": 1700000100,
+      "destination": "/lib/jobs/job-2",
+      "job_id": "job-2",
+      "outcome": "Failed",
+      "size_bytes": null
+    }
+  ],
+  "ExpectedHash": { "algorithm": "sha-256", "digest": "f69af9e91e9e5d93dac3c583e5e896dc71b756ef1a42ecbc2a0028393b487868" },
   "ExtractionTier": ["dedicated", "generic_extractor", "page_sniff", "direct_file"],
   "MediaFetchKind": ["extractor", "direct_http"],
+  "HashAlgorithm": ["md5", "sha1", "sha-256"],
   "ProbeDestinationPreview": { "path_display": "/lib/jobs/…" },
   "ProbeResult": {
     "url": "https://example.com/v",

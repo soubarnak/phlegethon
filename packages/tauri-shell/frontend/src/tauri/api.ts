@@ -11,6 +11,7 @@ import type {
   CookieChannel,
   DefaultQualityPolicy,
   EnqueueResult,
+  ExpectedHash,
   JobSnapshot,
   MediaExtrasCapabilities,
   MediaExtrasOptions,
@@ -71,6 +72,8 @@ export const api = {
   getJobBandwidthCap: (jobId: string) => invoke<number | null>("get_job_bandwidth_cap", { jobId }),
   setJobExpectedHash: (jobId: string, algorithm: string, digest: string) =>
     invoke<void>("set_job_expected_hash", { jobId, algorithm, digest }),
+  getJobExpectedHash: (jobId: string) => invoke<ExpectedHash | null>("get_job_expected_hash", { jobId }),
+  clearJobExpectedHash: (jobId: string) => invoke<void>("clear_job_expected_hash", { jobId }),
 
   // ---- Window / files
   pickFolder: (title?: string) => invoke<PickFolderResult>("pick_folder", { title: title ?? null }),

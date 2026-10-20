@@ -624,6 +624,21 @@ async fn set_job_expected_hash(
     core.set_job_expected_hash(&job_id, &algorithm, &digest)
 }
 
+#[tauri::command]
+async fn get_job_expected_hash(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<Option<download_core::ExpectedHash>, String> {
+    let core = lock_or_recover(&state.core);
+    core.job_expected_hash(&job_id)
+}
+
+#[tauri::command]
+async fn clear_job_expected_hash(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+    let mut core = lock_or_recover(&state.core);
+    core.clear_job_expected_hash(&job_id)
+}
+
 /// Render the Filename Template with sample values for the settings preview.
 #[tauri::command]
 async fn preview_filename_template(template: String) -> Result<String, String> {
@@ -1653,6 +1668,8 @@ pub fn run() {
             add_job_mirror,
             job_mirrors,
             set_job_expected_hash,
+            get_job_expected_hash,
+            clear_job_expected_hash,
             preview_filename_template,
             clear_history,
             confirm_probe_selection,
@@ -2070,6 +2087,7 @@ mod command_gate_tests {
     const LIB_RS: &str = include_str!("lib.rs");
     const BUILD_RS: &str = include_str!("../build.rs");
     const CAPABILITY: &str = include_str!("../capabilities/default.json");
+    const FRONTEND_API: &str = include_str!("../../frontend/src/tauri/api.ts");
     const HANDLER_MACRO: &str = concat!("generate_handler", "![");
     const MANIFEST_LIST: &str = "const COMMANDS: &[&str] = &[";
 
@@ -2148,9 +2166,39 @@ mod command_gate_tests {
         );
     }
 
+    /// Command names `frontend/src/tauri/api.ts` passes to `invoke`, the only IPC entry point of
+    /// the frontend.
+    fn frontend_commands() -> BTreeSet<String> {
+        let mut commands = BTreeSet::new();
+        for (at, _) in FRONTEND_API.match_indices("invoke") {
+            let after = &FRONTEND_API[at + "invoke".len()..];
+            if !(after.starts_with('<') || after.starts_with('(')) {
+                continue; // the import, or a comment
+            }
+            let open = after.find('"').expect("invoke call names a command");
+            let name = &after[open + 1..];
+            commands.insert(name[..name.find('"').expect("closing quote")].to_string());
+        }
+        commands
+    }
+
     #[test]
-    fn every_registered_command_is_granted_and_no_grant_is_stale() {
-        let expected: BTreeSet<String> = handler_commands()
+    fn frontend_only_invokes_registered_commands() {
+        let frontend = frontend_commands();
+        assert!(frontend.len() > 60, "too few invokes parsed: {frontend:?}");
+        let handler: BTreeSet<String> = handler_commands().into_iter().collect();
+        let unregistered: Vec<&String> = frontend.difference(&handler).collect();
+        assert!(
+            unregistered.is_empty(),
+            "api.ts invokes commands that are not registered: {unregistered:?}"
+        );
+    }
+
+    /// L-50: the `main` window may call exactly the commands the frontend calls. A registered
+    /// command that nothing invokes stays out of the capability, so the webview cannot reach it.
+    #[test]
+    fn capability_grants_exactly_the_commands_the_frontend_invokes() {
+        let expected: BTreeSet<String> = frontend_commands()
             .iter()
             .map(|c| allow_permission(c))
             .collect();
@@ -2160,11 +2208,14 @@ mod command_gate_tests {
             .filter(|p| p.starts_with("allow-") && !p.contains(':'))
             .collect();
         let missing: Vec<&String> = expected.difference(&granted).collect();
-        let stale: Vec<&String> = granted.difference(&expected).collect();
+        let extra: Vec<&String> = granted.difference(&expected).collect();
         assert!(
             missing.is_empty(),
-            "not granted in capabilities/default.json: {missing:?}"
+            "api.ts invokes commands that capabilities/default.json does not grant: {missing:?}"
         );
-        assert!(stale.is_empty(), "granted but not registered: {stale:?}");
+        assert!(
+            extra.is_empty(),
+            "capabilities/default.json grants commands the frontend never invokes: {extra:?}"
+        );
     }
 }

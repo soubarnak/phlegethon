@@ -5840,6 +5840,40 @@ fn integrity_check_mismatch_fails_and_keeps_file_on_disk() {
 }
 
 #[test]
+fn expected_hash_can_be_read_and_cleared() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut core, _rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
+    core.set_library_root(tmp.path().join("library")).unwrap();
+    let job_id = enqueue_direct_job_id(&mut core, "https://example.com/file.zip");
+
+    assert_eq!(core.job_expected_hash(&job_id).unwrap(), None);
+
+    core.set_job_expected_hash(&job_id, "sha-256", HELLO_FILE_SHA256)
+        .unwrap();
+    let hash = core.job_expected_hash(&job_id).unwrap().expect("hash set");
+    assert_eq!(hash.digest, HELLO_FILE_SHA256);
+
+    core.clear_job_expected_hash(&job_id).unwrap();
+    assert_eq!(core.job_expected_hash(&job_id).unwrap(), None);
+    // Clearing again is a no-op, not an error.
+    core.clear_job_expected_hash(&job_id).unwrap();
+    assert!(core.job_expected_hash("missing").is_err());
+    assert!(core.clear_job_expected_hash("missing").is_err());
+
+    // A cleared hash must not fail the job on a mismatch.
+    core.set_job_expected_hash(&job_id, "sha-256", "0".repeat(64).as_str())
+        .unwrap();
+    core.clear_job_expected_hash(&job_id).unwrap();
+    core.process_pending().unwrap();
+    let snap = core
+        .list_job_snapshots()
+        .into_iter()
+        .find(|j| j.job_id == job_id)
+        .expect("job still queued");
+    assert_eq!(snap.status, "completed");
+}
+
+#[test]
 fn integrity_check_skipped_when_no_expected_hash() {
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, rx) = make_core(Box::new(NoRangeFakeHttp(fake_http())));
@@ -9345,6 +9379,41 @@ fn complete_segment_table_left_by_a_crash_is_finished_without_a_request() {
 // Regression: transfer planning and thread safety (H-6, M-3, M-13, H-9)
 // ---------------------------------------------------------------------------
 
+/// Blocks HEAD requests until a test opens it, and tells the test when one is waiting.
+#[derive(Default)]
+struct HeadGate {
+    state: Mutex<(bool, bool)>, // (a HEAD request is waiting, the gate is open)
+    changed: std::sync::Condvar,
+}
+
+impl HeadGate {
+    /// Called by the fake origin: announce the waiting request, then wait for `open`.
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    /// Wait until a HEAD request is blocked in the gate. The timeout only ends a hung
+    /// test; no assertion depends on it.
+    fn wait_until_blocked(&self) {
+        let state = self.state.lock().unwrap();
+        let (_state, timeout) = self
+            .changed
+            .wait_timeout_while(state, std::time::Duration::from_secs(30), |s| !s.0)
+            .unwrap();
+        assert!(!timeout.timed_out(), "no HEAD request reached the gate");
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.changed.notify_all();
+    }
+}
+
 /// Origin whose behaviour is switched per test: panics, slow HEAD requests,
 /// an unknown size, and counts of the fetches that ran.
 #[derive(Clone)]
@@ -9353,6 +9422,10 @@ struct PlanningHttp {
     ranges: bool,
     size_known: bool,
     head_delay: std::time::Duration,
+    /// When set, `supports_range` blocks here until the test opens the gate.
+    head_gate: Option<Arc<HeadGate>>,
+    /// When set, `file_size` blocks here until the test opens the gate.
+    size_gate: Option<Arc<HeadGate>>,
     /// Panic inside `fetch`; only for ranged fetches when `Some(true)`.
     panic_on_fetch: Option<bool>,
     fetches: Arc<std::sync::atomic::AtomicUsize>,
@@ -9366,6 +9439,8 @@ impl PlanningHttp {
             ranges: false,
             size_known: true,
             head_delay: std::time::Duration::ZERO,
+            head_gate: None,
+            size_gate: None,
             panic_on_fetch: None,
             fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ranged_fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -9405,11 +9480,17 @@ impl HttpBackend for PlanningHttp {
 
     fn supports_range(&self, _url: &str) -> Result<bool, String> {
         std::thread::sleep(self.head_delay);
+        if let Some(gate) = &self.head_gate {
+            gate.pass();
+        }
         Ok(self.ranges)
     }
 
     fn file_size(&self, _url: &str) -> Result<u64, String> {
         std::thread::sleep(self.head_delay);
+        if let Some(gate) = &self.size_gate {
+            gate.pass();
+        }
         if self.size_known {
             Ok(self.body.len() as u64)
         } else {
@@ -9544,9 +9625,14 @@ fn dispatch_claims_active_job_slots_before_the_transfer_threads_plan() {
 
 #[test]
 fn slow_head_requests_do_not_hold_the_core_lock() {
+    // Planning asks `supports_range` first and `file_size` second. Each has its own gate, so
+    // moving either HEAD request under the Core lock makes the matching check below fail.
+    let range_gate = Arc::new(HeadGate::default());
+    let size_gate = Arc::new(HeadGate::default());
     let mut http = PlanningHttp::new(&object_body(6));
     http.ranges = true;
-    http.head_delay = std::time::Duration::from_millis(600);
+    http.head_gate = Some(range_gate.clone());
+    http.size_gate = Some(size_gate.clone());
     let tmp = tempfile::tempdir().unwrap();
     let (mut core, _rx) = make_core(Box::new(http));
     core.set_library_root(tmp.path().join("library")).unwrap();
@@ -9554,16 +9640,26 @@ fn slow_head_requests_do_not_hold_the_core_lock() {
 
     let core = Arc::new(Mutex::new(core));
     Core::dispatch_pending(core.clone()).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let started = std::time::Instant::now();
-    let snapshots = core.lock().unwrap().list_job_snapshots();
-    let waited = started.elapsed();
-    assert_eq!(snapshots.len(), 1);
-    assert!(
-        waited < std::time::Duration::from_millis(250),
-        "planning held the Core lock for {waited:?} during HEAD requests"
-    );
+    // Without this, a poisoned mutex would read as "planning held the Core lock".
+    let snapshot_count = |request: &str| match core.try_lock() {
+        Ok(guard) => guard.list_job_snapshots().len(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            panic!("planning held the Core lock during the {request} HEAD request")
+        }
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            panic!("the Core mutex is poisoned: a thread panicked while holding it")
+        }
+    };
+
+    range_gate.wait_until_blocked();
+    assert_eq!(snapshot_count("supports_range"), 1);
+    range_gate.open();
+
+    size_gate.wait_until_blocked();
+    assert_eq!(snapshot_count("file_size"), 1);
+    size_gate.open();
+
     wait_for_status(
         &core,
         &job_id,

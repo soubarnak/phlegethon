@@ -2695,6 +2695,30 @@ impl Core {
         Ok(())
     }
 
+    /// The expected hash set on a job, if any.
+    pub fn job_expected_hash(&self, job_id: &str) -> Result<Option<ExpectedHash>, String> {
+        let job = self
+            .jobs
+            .iter()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        Ok(job.expected_hash().cloned())
+    }
+
+    /// Remove the expected hash from a job, so no Integrity Check runs for it.
+    pub fn clear_job_expected_hash(&mut self, job_id: &str) -> Result<(), String> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id() == job_id)
+            .ok_or_else(|| format!("job {job_id} not found"))?;
+        if job.expected_hash().is_some() {
+            job.clear_expected_hash();
+            self.persist_queue_now()?;
+        }
+        Ok(())
+    }
+
     /// Load an expected hash from a GNU checksum sidecar file on disk.
     pub fn set_job_expected_hash_from_sidecar(
         &mut self,

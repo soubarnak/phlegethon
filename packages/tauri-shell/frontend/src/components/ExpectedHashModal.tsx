@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
-import { Modal, Select, SelectItem, TextInput } from "@carbon/react";
+import { Button, Modal, Select, SelectItem, TextInput } from "@carbon/react";
 import { api } from "@/tauri/api";
 import { t } from "@/lib/i18n";
 import {
   EXPECTED_HASH_ALGORITHMS,
+  IPC_HASH_ALGORITHM,
   expectedDigestLength,
   normalizeExpectedDigest,
   type ExpectedDigestResult,
   type ExpectedHashAlgorithm,
 } from "@/lib/expectedHash";
 import { submitOnEnter } from "@/lib/submitOnEnter";
+import type { ExpectedHash } from "@/tauri/types";
 import { useReturnFocus } from "@/state/useReturnFocus";
 import { useToasts } from "@/state/useToasts";
 
@@ -46,12 +48,27 @@ export function ExpectedHashModal({ request, onClose }: ExpectedHashModalProps) 
   const [digest, setDigest] = useState("");
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [current, setCurrent] = useState<ExpectedHash | null>(null);
   useReturnFocus(request != null);
 
   useEffect(() => {
     setAlgorithm("sha-256");
     setDigest("");
     setTouched(false);
+    setCurrent(null);
+    if (!request) return;
+    let cancelled = false;
+    api
+      .getJobExpectedHash(request.jobId)
+      .then((hash) => {
+        if (!cancelled) setCurrent(hash);
+      })
+      .catch(() => {
+        // The dialog still works for setting a hash; it just cannot show the current one.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [request]);
 
   if (!request) return null;
@@ -74,6 +91,20 @@ export function ExpectedHashModal({ request, onClose }: ExpectedHashModalProps) 
     }
   };
 
+  const clear = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await api.clearJobExpectedHash(request.jobId);
+      toasts.success(t("hash.cleared"));
+      onClose();
+    } catch (err) {
+      toasts.error(t("hash.clearFailed"), err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <Modal
       open
@@ -86,6 +117,19 @@ export function ExpectedHashModal({ request, onClose }: ExpectedHashModalProps) 
       onRequestSubmit={() => void submit()}
     >
       <p style={{ wordBreak: "break-word" }}>{t("hash.body", { title: request.title })}</p>
+      {current && (
+        <div style={{ marginBottom: "1rem" }}>
+          <p>{t("hash.current", { algorithm: t(`hash.algorithm.${IPC_HASH_ALGORITHM[current.algorithm]}`) })}</p>
+          <code data-testid="expected-hash-current" style={{ wordBreak: "break-all" }}>
+            {current.digest}
+          </code>
+          <div style={{ marginTop: "0.5rem" }}>
+            <Button kind="danger--tertiary" size="sm" disabled={saving} onClick={() => void clear()}>
+              {t("hash.clear")}
+            </Button>
+          </div>
+        </div>
+      )}
       <Select
         id="expected-hash-algorithm"
         labelText={t("hash.algorithm")}

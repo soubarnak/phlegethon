@@ -8,12 +8,16 @@
 import type { JobSnapshot } from "./generated/JobSnapshot";
 
 export type { ActiveJobMatch } from "./generated/ActiveJobMatch";
+export type { ArchiveEntry } from "./generated/ArchiveEntry";
+export type { ArchiveOutcome } from "./generated/ArchiveOutcome";
 export type { CompanionIntentEvent as CompanionIntent } from "./generated/CompanionIntentEvent";
 export type { CompanionResult } from "./generated/CompanionResult";
 export type { EnqueueResult } from "./generated/EnqueueResult";
 export type { EventSummary as CoreEvent } from "./generated/EventSummary";
+export type { ExpectedHash } from "./generated/ExpectedHash";
 export type { ExtractionTier } from "./generated/ExtractionTier";
 export type { JobSnapshot } from "./generated/JobSnapshot";
+export type { HashAlgorithm } from "./generated/HashAlgorithm";
 export type { MediaFetchKind } from "./generated/MediaFetchKind";
 export type { MediaItem } from "./generated/MediaItem";
 export type { ProbeDestinationPreview } from "./generated/ProbeDestinationPreview";
@@ -118,20 +122,6 @@ export type SidecarApplyOutcome =
 export interface SidecarApplyResult {
   outcome: SidecarApplyOutcome;
   applied: SidecarComponent[];
-}
-
-export type ArchiveOutcome = "Completed" | "Failed";
-
-export interface ArchiveEntry {
-  media_id: string;
-  title: string;
-  url: string;
-  completed_at_unix_secs: number;
-  destination: string;
-  job_id: string;
-  outcome: ArchiveOutcome;
-  /** Bytes of the finished file; null for Failed entries and for entries recorded before sizes were kept. */
-  size_bytes: number | null;
 }
 
 export interface ToolInfo {

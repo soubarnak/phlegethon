@@ -6,8 +6,8 @@
 //! `scripts/gen-ts-types.sh`.
 
 use download_core::{
-    ActiveJobMatch, ExtractionTier, JobSnapshot, MediaFetchKind, MediaItem,
-    ProbeDestinationPreview, ProbeResult, Quality,
+    ActiveJobMatch, ArchiveEntry, ArchiveOutcome, ExpectedHash, ExtractionTier, HashAlgorithm,
+    JobSnapshot, MediaFetchKind, MediaItem, ProbeDestinationPreview, ProbeResult, Quality,
 };
 use serde_json::Value;
 
@@ -39,6 +39,49 @@ fn job_snapshot_matches_the_sample() {
     assert_eq!(
         serde_json::to_value(snapshot).unwrap(),
         samples()["JobSnapshot"]
+    );
+}
+
+#[test]
+fn archive_entry_matches_the_samples() {
+    let entries = vec![
+        ArchiveEntry {
+            media_id: "youtube-abc".into(),
+            title: "A video".into(),
+            url: "https://example.com/v".into(),
+            completed_at_unix_secs: 1_700_000_000,
+            destination: "/lib/jobs/job-1".into(),
+            job_id: "job-1".into(),
+            outcome: ArchiveOutcome::Completed,
+            size_bytes: Some(4096),
+        },
+        ArchiveEntry {
+            media_id: "youtube-def".into(),
+            title: "Another video".into(),
+            url: "https://example.com/w".into(),
+            completed_at_unix_secs: 1_700_000_100,
+            destination: "/lib/jobs/job-2".into(),
+            job_id: "job-2".into(),
+            outcome: ArchiveOutcome::Failed,
+            size_bytes: None,
+        },
+    ];
+    assert_eq!(
+        serde_json::to_value(entries).unwrap(),
+        samples()["ArchiveEntry"]
+    );
+}
+
+#[test]
+fn expected_hash_matches_the_sample() {
+    let hash = ExpectedHash::parse(
+        "sha-256",
+        "f69af9e91e9e5d93dac3c583e5e896dc71b756ef1a42ecbc2a0028393b487868",
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(hash).unwrap(),
+        samples()["ExpectedHash"]
     );
 }
 
@@ -80,6 +123,16 @@ fn enums_serialise_as_the_sampled_snake_case_strings() {
     assert_eq!(
         serde_json::to_value(kinds).unwrap(),
         samples()["MediaFetchKind"]
+    );
+    // Queue files already store "sha1", so the kebab-case rename is part of the contract.
+    let algorithms = [
+        HashAlgorithm::Md5,
+        HashAlgorithm::Sha1,
+        HashAlgorithm::Sha256,
+    ];
+    assert_eq!(
+        serde_json::to_value(algorithms).unwrap(),
+        samples()["HashAlgorithm"]
     );
 }
 

@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { IPC_HASH_ALGORITHM } from "@/lib/expectedHash";
 import samples from "./contract/samples.json";
 import type {
   ActiveJobMatch,
+  ArchiveEntry,
   CompanionIntent,
   CompanionResult,
   CoreEvent,
   EnqueueResult,
+  ExpectedHash,
   JobSnapshot,
   MediaItem,
   ProbeDestinationPreview,
@@ -32,6 +35,11 @@ const JOB_SNAPSHOT: Shape<JobSnapshot> = {
   title: true, path: true, is_extractor: true, extraction_tier: true, last_error: true, queue_index: true,
 };
 const ACTIVE_JOB_MATCH: Shape<ActiveJobMatch> = { job_id: true, url: true, status: true, title: true };
+const ARCHIVE_ENTRY: Shape<ArchiveEntry> = {
+  media_id: true, title: true, url: true, completed_at_unix_secs: true, destination: true, job_id: true,
+  outcome: true, size_bytes: true,
+};
+const EXPECTED_HASH: Shape<ExpectedHash> = { algorithm: true, digest: true };
 const PROBE_DESTINATION_PREVIEW: Shape<ProbeDestinationPreview> = { path_display: true };
 const QUALITY: Shape<Quality> = { id: true, label: true, size_bytes: true, container: true };
 const MEDIA_ITEM: Shape<MediaItem> = {
@@ -76,6 +84,16 @@ describe("IPC contract samples (M-71)", () => {
     expect(samples.ActiveJobMatch.map((m) => m.status)).toContain("probing");
   });
 
+  it("ArchiveEntry covers both outcomes and a missing size", () => {
+    for (const entry of samples.ArchiveEntry) expect(keys(entry)).toEqual(shape(ARCHIVE_ENTRY));
+    expect(samples.ArchiveEntry.map((e) => e.outcome).sort()).toEqual(["Completed", "Failed"]);
+    expect(samples.ArchiveEntry.some((e) => e.size_bytes === null)).toBe(true);
+  });
+
+  it("ExpectedHash", () => {
+    expect(keys(samples.ExpectedHash)).toEqual(shape(EXPECTED_HASH));
+  });
+
   it("probe types", () => {
     expect(keys(samples.ProbeDestinationPreview)).toEqual(shape(PROBE_DESTINATION_PREVIEW));
     expect(keys(samples.ProbeResult)).toEqual(shape(PROBE_RESULT));
@@ -87,6 +105,12 @@ describe("IPC contract samples (M-71)", () => {
   it("enums are the snake_case strings the frontend compares against", () => {
     expect(samples.ExtractionTier).toEqual(["dedicated", "generic_extractor", "page_sniff", "direct_file"]);
     expect(samples.MediaFetchKind).toEqual(["extractor", "direct_http"]);
+  });
+
+  it("HashAlgorithm names are the kebab-case strings the Core sends, each with a canonical spelling", () => {
+    expect(samples.HashAlgorithm).toEqual(["md5", "sha1", "sha-256"]);
+    expect(Object.keys(IPC_HASH_ALGORITHM)).toEqual(samples.HashAlgorithm);
+    expect(IPC_HASH_ALGORITHM.sha1).toBe("sha-1");
   });
 
   it("every core-event variant", () => {
