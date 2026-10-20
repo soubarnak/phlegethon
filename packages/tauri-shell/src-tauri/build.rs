@@ -1,5 +1,6 @@
 //! Build script. Lists every app command in the app manifest, so Tauri only
-//! allows the commands that `capabilities/default.json` grants.
+//! allows the commands that `capabilities/default.json` grants. That capability grants only the
+//! commands `frontend/src/tauri/api.ts` invokes (L-50); the `command_gate_tests` module checks it.
 
 /// Application commands registered in `src/lib.rs` (`generate_handler!`).
 /// Each name gets an `allow-<name with dashes>` permission that a capability must

@@ -37,11 +37,9 @@
     "allow-get-library-root",
     "allow-set-library-root",
     "allow-pick-folder",
-    "allow-get-platform-capabilities",
     "allow-notify-fallback",
     "allow-process-pending",
     "allow-list-jobs",
-    "allow-normalize-url-cmd",
     "allow-split-urls-cmd",
     "allow-find-active-job-for-url",
     "allow-pause-job",
@@ -73,12 +71,9 @@
     "allow-reveal-output",
     "allow-open-output",
     "allow-is-main-window-focused",
-    "allow-focus-main-window",
     "allow-take-pending-intents",
     "allow-take-library-root-warnings",
     "allow-list-history",
-    "allow-list-history-by-outcome",
-    "allow-remove-history-entry",
-    "allow-history-len"
+    "allow-remove-history-entry"
   ]
 }
