@@ -26,7 +26,7 @@ Sites that yt-dlp cannot handle on its own can have an extractor plugin in this 
 
 ## Install on Void Linux
 
-Each [GitHub release](https://github.com/soubarnak/phlegethon/releases) is a signed xbps repository. Add it once, then install:
+Each [GitHub release](https://github.com/soubarnak/phlegethon/releases) is a signed xbps repository. The first release is [v0.1.0](https://github.com/soubarnak/phlegethon/releases/tag/phlegethon-v0.1.0); the command below always tracks the newest one. Add it once, then install:
 
 ```sh
 echo 'repository=https://github.com/soubarnak/phlegethon/releases/latest/download' | sudo tee /etc/xbps.d/20-phlegethon.conf
